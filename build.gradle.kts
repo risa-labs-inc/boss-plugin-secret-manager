@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.0.0"
+version = "1.0.3"
 
 java {
     toolchain {
@@ -29,10 +29,10 @@ repositories {
 
 dependencies {
     // Plugin API from Maven Central
-    implementation("com.risaboss:plugin-api-desktop:1.0.1")
-    implementation("com.risaboss:plugin-ui-core-desktop:1.0.1")
-    implementation("com.risaboss:plugin-scrollbar-desktop:1.0.1")
-    
+    implementation("com.risaboss:plugin-api-desktop:1.0.3")
+    implementation("com.risaboss:plugin-ui-core-desktop:1.0.3")
+    implementation("com.risaboss:plugin-scrollbar-desktop:1.0.3")
+
     // Compose dependencies
     implementation(compose.desktop.currentOs)
     implementation(compose.runtime)
@@ -40,11 +40,11 @@ dependencies {
     implementation(compose.foundation)
     implementation(compose.material)
     implementation(compose.materialIconsExtended)
-    
+
     // Decompose for ComponentContext
     implementation("com.arkivanov.decompose:decompose:3.3.0")
     implementation("com.arkivanov.essenty:lifecycle:2.5.0")
-    
+
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
 }
@@ -53,7 +53,7 @@ dependencies {
 tasks.register<Jar>("buildPluginJar") {
     archiveFileName.set("boss-plugin-secret-manager-${version}.jar")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    
+
     manifest {
         attributes(
             "Implementation-Title" to "BOSS Secret Manager Plugin",
@@ -61,10 +61,10 @@ tasks.register<Jar>("buildPluginJar") {
             "Main-Class" to "ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin"
         )
     }
-    
+
     // Include compiled classes
     from(sourceSets.main.get().output)
-    
+
     // Include plugin manifest
     from("src/main/resources")
 }
