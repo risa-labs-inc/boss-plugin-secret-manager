@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.api.UserManagementProvider
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
 import ai.rever.boss.plugin.ui.BossTheme
@@ -36,14 +37,16 @@ import kotlinx.coroutines.CoroutineScope
  * Secret Manager panel content (Dynamic Plugin).
  *
  * Displays and manages user secrets with CRUD and sharing operations.
+ * Uses SecretDataProvider for secret operations and UserManagementProvider for sharing.
  */
 @Composable
 fun SecretManagerContent(
     secretDataProvider: SecretDataProvider?,
+    userManagementProvider: UserManagementProvider?,
     scope: CoroutineScope
 ) {
-    val viewModel = remember(secretDataProvider, scope) {
-        SecretManagerViewModel(secretDataProvider, scope)
+    val viewModel = remember(secretDataProvider, userManagementProvider, scope) {
+        SecretManagerViewModel(secretDataProvider, userManagementProvider, scope)
     }
 
     BossTheme {

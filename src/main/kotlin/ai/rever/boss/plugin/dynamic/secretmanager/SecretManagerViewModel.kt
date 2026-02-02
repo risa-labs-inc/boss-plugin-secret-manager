@@ -11,9 +11,11 @@ import kotlinx.coroutines.launch
  * ViewModel for the Secret Manager panel.
  *
  * Manages secret CRUD operations, search, and sharing.
+ * Uses SecretDataProvider for secret operations and UserManagementProvider for sharing.
  */
 class SecretManagerViewModel(
     private val secretDataProvider: SecretDataProvider?,
+    private val userManagementProvider: UserManagementProvider?,
     private val scope: CoroutineScope
 ) {
     private val _secrets = MutableStateFlow<List<SecretEntryData>>(emptyList())
