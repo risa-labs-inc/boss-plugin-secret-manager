@@ -1,322 +1,42 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
- * ViewModel for the Secret Manager panel.
+ * ViewModel for Secret Manager panel.
  *
- * Manages secret CRUD operations, search, and sharing.
- * Uses SecretDataProvider for secret operations and UserManagementProvider for sharing.
+ * Uses SecretDataProvider and UserManagementProvider interfaces for data operations.
+ * Matches the bundled plugin's state management pattern.
  */
 class SecretManagerViewModel(
     private val secretDataProvider: SecretDataProvider?,
     private val userManagementProvider: UserManagementProvider?,
     private val scope: CoroutineScope
 ) {
-    private val _secrets = MutableStateFlow<List<SecretEntryData>>(emptyList())
-    val secrets: StateFlow<List<SecretEntryData>> = _secrets.asStateFlow()
+    // Job tracking to prevent race conditions
+    private var loadJob: Job? = null
+    private var searchJob: Job? = null
 
-    private val _isLoading = MutableStateFlow(false)
-    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
-
-    private val _hasMore = MutableStateFlow(false)
-    val hasMore: StateFlow<Boolean> = _hasMore.asStateFlow()
-
-    private val _searchQuery = MutableStateFlow("")
-    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
-
-    private val _selectedSecretId = MutableStateFlow<String?>(null)
-    val selectedSecretId: StateFlow<String?> = _selectedSecretId.asStateFlow()
-
-    private val _statusMessage = MutableStateFlow<String?>(null)
-    val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
-
-    private val _errorMessage = MutableStateFlow<String?>(null)
-    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
-
-    private val _editingSecret = MutableStateFlow<SecretEntryData?>(null)
-    val editingSecret: StateFlow<SecretEntryData?> = _editingSecret.asStateFlow()
-
-    private val _showCreateDialog = MutableStateFlow(false)
-    val showCreateDialog: StateFlow<Boolean> = _showCreateDialog.asStateFlow()
-
-    private val _showShareDialog = MutableStateFlow(false)
-    val showShareDialog: StateFlow<Boolean> = _showShareDialog.asStateFlow()
-
-    private val _currentShares = MutableStateFlow<List<SecretShareData>>(emptyList())
-    val currentShares: StateFlow<List<SecretShareData>> = _currentShares.asStateFlow()
-
-    private var currentOffset = 0
-    private val pageSize = 50
+    // State
+    var state by mutableStateOf(SecretManagerState())
+        private set
 
     /**
      * Initialize by loading secrets.
      */
     fun initialize() {
-        loadSecrets()
-    }
-
-    /**
-     * Load secrets from the provider.
-     */
-    fun loadSecrets(loadMore: Boolean = false) {
-        scope.launch {
-            try {
-                _isLoading.value = true
-                if (!loadMore) {
-                    currentOffset = 0
-                }
-
-                val result = if (_searchQuery.value.isNotEmpty()) {
-                    secretDataProvider?.searchSecrets(_searchQuery.value, pageSize, currentOffset)
-                } else {
-                    secretDataProvider?.getUserSecrets(pageSize, currentOffset)
-                }
-
-                result?.onSuccess { paginated ->
-                    if (loadMore) {
-                        _secrets.value = _secrets.value + paginated.data
-                    } else {
-                        _secrets.value = paginated.data
-                    }
-                    _hasMore.value = paginated.hasMore
-                    currentOffset += paginated.data.size
-                }?.onFailure { error ->
-                    _errorMessage.value = "Failed to load secrets: ${error.message}"
-                }
-            } catch (e: Exception) {
-                _errorMessage.value = "Error loading secrets: ${e.message}"
-            } finally {
-                _isLoading.value = false
-            }
+        if (secretDataProvider != null) {
+            loadSecrets()
+            loadAvailableUsers()
+            loadAvailableRoles()
         }
-    }
-
-    /**
-     * Load more secrets (pagination).
-     */
-    fun loadMore() {
-        if (_hasMore.value && !_isLoading.value) {
-            loadSecrets(loadMore = true)
-        }
-    }
-
-    /**
-     * Update search query and reload.
-     */
-    fun updateSearchQuery(query: String) {
-        _searchQuery.value = query
-        loadSecrets()
-    }
-
-    /**
-     * Select a secret.
-     */
-    fun select(secretId: String) {
-        _selectedSecretId.value = secretId
-    }
-
-    /**
-     * Start creating a new secret.
-     */
-    fun startCreate() {
-        _editingSecret.value = null
-        _showCreateDialog.value = true
-    }
-
-    /**
-     * Start editing a secret.
-     */
-    fun startEdit(secret: SecretEntryData) {
-        _editingSecret.value = secret
-        _showCreateDialog.value = true
-    }
-
-    /**
-     * Cancel editing.
-     */
-    fun cancelEdit() {
-        _editingSecret.value = null
-        _showCreateDialog.value = false
-    }
-
-    /**
-     * Save a secret (create or update).
-     */
-    fun saveSecret(
-        website: String,
-        username: String,
-        password: String,
-        notes: String? = null,
-        tags: List<String> = emptyList()
-    ) {
-        scope.launch {
-            try {
-                _isLoading.value = true
-                val editing = _editingSecret.value
-
-                val result = if (editing != null) {
-                    secretDataProvider?.updateSecret(
-                        UpdateSecretRequestData(
-                            secretId = editing.id,
-                            website = website,
-                            username = username,
-                            password = password,
-                            notes = notes,
-                            tags = tags
-                        )
-                    )
-                } else {
-                    secretDataProvider?.createSecret(
-                        CreateSecretRequestData(
-                            website = website,
-                            username = username,
-                            password = password,
-                            notes = notes,
-                            tags = tags
-                        )
-                    )
-                }
-
-                result?.onSuccess {
-                    _statusMessage.value = if (editing != null) "Secret updated" else "Secret created"
-                    _showCreateDialog.value = false
-                    _editingSecret.value = null
-                    loadSecrets()
-                }?.onFailure { error ->
-                    _errorMessage.value = "Failed to save: ${error.message}"
-                }
-            } catch (e: Exception) {
-                _errorMessage.value = "Error saving: ${e.message}"
-            } finally {
-                _isLoading.value = false
-            }
-        }
-    }
-
-    /**
-     * Delete a secret.
-     */
-    fun deleteSecret(secretId: String) {
-        scope.launch {
-            try {
-                _isLoading.value = true
-                secretDataProvider?.deleteSecret(secretId)
-                    ?.onSuccess {
-                        _statusMessage.value = "Secret deleted"
-                        _selectedSecretId.value = null
-                        loadSecrets()
-                    }?.onFailure { error ->
-                        _errorMessage.value = "Failed to delete: ${error.message}"
-                    }
-            } catch (e: Exception) {
-                _errorMessage.value = "Error deleting: ${e.message}"
-            } finally {
-                _isLoading.value = false
-            }
-        }
-    }
-
-    /**
-     * Show share dialog for a secret.
-     */
-    fun showShareDialog(secretId: String) {
-        _selectedSecretId.value = secretId
-        _showShareDialog.value = true
-        loadShares(secretId)
-    }
-
-    /**
-     * Hide share dialog.
-     */
-    fun hideShareDialog() {
-        _showShareDialog.value = false
-        _currentShares.value = emptyList()
-    }
-
-    /**
-     * Load shares for a secret.
-     */
-    private fun loadShares(secretId: String) {
-        scope.launch {
-            try {
-                secretDataProvider?.getSecretShares(secretId)
-                    ?.onSuccess { shares ->
-                        _currentShares.value = shares
-                    }?.onFailure { error ->
-                        _errorMessage.value = "Failed to load shares: ${error.message}"
-                    }
-            } catch (e: Exception) {
-                _errorMessage.value = "Error loading shares: ${e.message}"
-            }
-        }
-    }
-
-    /**
-     * Share a secret with a user.
-     */
-    fun shareWithUser(secretId: String, userId: String, notes: String? = null) {
-        scope.launch {
-            try {
-                secretDataProvider?.shareSecret(
-                    ShareSecretRequestData(
-                        secretId = secretId,
-                        targetUserId = userId,
-                        notes = notes
-                    )
-                )?.onSuccess {
-                    _statusMessage.value = "Secret shared"
-                    loadShares(secretId)
-                }?.onFailure { error ->
-                    _errorMessage.value = "Failed to share: ${error.message}"
-                }
-            } catch (e: Exception) {
-                _errorMessage.value = "Error sharing: ${e.message}"
-            }
-        }
-    }
-
-    /**
-     * Unshare a secret.
-     */
-    fun unshare(secretId: String, userId: String? = null, roleId: String? = null) {
-        scope.launch {
-            try {
-                secretDataProvider?.unshareSecret(
-                    UnshareSecretRequestData(
-                        secretId = secretId,
-                        targetUserId = userId,
-                        targetRoleId = roleId
-                    )
-                )?.onSuccess {
-                    _statusMessage.value = "Share removed"
-                    loadShares(secretId)
-                }?.onFailure { error ->
-                    _errorMessage.value = "Failed to unshare: ${error.message}"
-                }
-            } catch (e: Exception) {
-                _errorMessage.value = "Error unsharing: ${e.message}"
-            }
-        }
-    }
-
-    /**
-     * Clear status message.
-     */
-    fun clearStatusMessage() {
-        _statusMessage.value = null
-    }
-
-    /**
-     * Clear error message.
-     */
-    fun clearErrorMessage() {
-        _errorMessage.value = null
     }
 
     /**
@@ -327,9 +47,389 @@ class SecretManagerViewModel(
     }
 
     /**
-     * Get a secret by ID.
+     * Load all secrets for the current user
      */
-    fun getSecret(secretId: String): SecretEntryData? {
-        return _secrets.value.find { it.id == secretId }
+    fun loadSecrets() {
+        state = state.copy(
+            isLoading = true,
+            errorMessage = null,
+            searchQuery = "",
+            currentOffset = 0,
+            hasMore = true
+        )
+
+        scope.launch {
+            val result = secretDataProvider?.getUserSecrets(limit = state.pageSize, offset = 0)
+
+            result?.onSuccess { paginatedResult ->
+                val secrets = paginatedResult.data
+                state = state.copy(
+                    secrets = secrets,
+                    isLoading = false,
+                    currentOffset = secrets.size,
+                    hasMore = paginatedResult.hasMore
+                )
+            }?.onFailure { exception ->
+                val error = exception.message ?: "Unknown error"
+                state = state.copy(
+                    isLoading = false,
+                    errorMessage = error
+                )
+            }
+        }
+    }
+
+    /**
+     * Load more secrets (pagination)
+     */
+    fun loadMoreSecrets() {
+        if (state.isLoadingMore || !state.hasMore || state.isLoading || state.searchQuery.isNotBlank()) {
+            return
+        }
+        if (searchJob?.isActive == true) {
+            return
+        }
+
+        loadJob?.cancel()
+        state = state.copy(isLoadingMore = true)
+
+        loadJob = scope.launch {
+            val result = secretDataProvider?.getUserSecrets(
+                limit = state.pageSize,
+                offset = state.currentOffset
+            )
+
+            result?.onSuccess { paginatedResult ->
+                val newSecrets = paginatedResult.data
+                state = state.copy(
+                    secrets = state.secrets + newSecrets,
+                    isLoadingMore = false,
+                    currentOffset = state.currentOffset + newSecrets.size,
+                    hasMore = paginatedResult.hasMore
+                )
+            }?.onFailure { exception ->
+                if (exception is CancellationException) return@onFailure
+                state = state.copy(
+                    isLoadingMore = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    /**
+     * Search secrets by website or username
+     */
+    fun searchSecrets(query: String) {
+        loadJob?.cancel()
+        loadJob = null
+        searchJob?.cancel()
+
+        state = state.copy(
+            searchQuery = query,
+            isLoading = true,
+            isLoadingMore = false,
+            errorMessage = null,
+            currentOffset = 0,
+            hasMore = false
+        )
+
+        if (query.isBlank()) {
+            searchJob = null
+            loadSecrets()
+            return
+        }
+
+        searchJob = scope.launch {
+            val result = secretDataProvider?.searchSecrets(query = query, limit = 100, offset = 0)
+
+            result?.onSuccess { paginatedResult ->
+                state = state.copy(
+                    secrets = paginatedResult.data,
+                    isLoading = false,
+                    isLoadingMore = false,
+                    currentOffset = 0,
+                    hasMore = false
+                )
+            }?.onFailure { exception ->
+                if (exception is CancellationException) return@onFailure
+                state = state.copy(
+                    isLoading = false,
+                    isLoadingMore = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    fun showCreateDialog() {
+        state = state.copy(showCreateDialog = true, selectedSecret = null)
+    }
+
+    fun hideCreateDialog() {
+        state = state.copy(showCreateDialog = false)
+    }
+
+    fun showEditDialog(secret: SecretEntryData) {
+        state = state.copy(showEditDialog = true, selectedSecret = secret)
+    }
+
+    fun hideEditDialog() {
+        state = state.copy(showEditDialog = false, selectedSecret = null)
+    }
+
+    fun showDeleteDialog(secret: SecretEntryData) {
+        state = state.copy(showDeleteDialog = true, selectedSecret = secret)
+    }
+
+    fun hideDeleteDialog() {
+        state = state.copy(showDeleteDialog = false, selectedSecret = null)
+    }
+
+    fun showShareDialog(secret: SecretEntryData) {
+        state = state.copy(
+            showShareDialog = true,
+            selectedSecret = secret,
+            secretShares = emptyList(),
+            isLoadingShares = false
+        )
+        loadSecretShares(secret.id)
+    }
+
+    fun hideShareDialog() {
+        state = state.copy(
+            showShareDialog = false,
+            selectedSecret = null,
+            secretShares = emptyList(),
+            isLoadingShares = false
+        )
+    }
+
+    /**
+     * Create a new secret
+     */
+    fun createSecret(request: CreateSecretRequestData) {
+        state = state.copy(isOperationInProgress = true)
+
+        scope.launch {
+            val result = secretDataProvider?.createSecret(request)
+
+            result?.onSuccess {
+                state = state.copy(isOperationInProgress = false)
+                hideCreateDialog()
+                loadSecrets()
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isOperationInProgress = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    /**
+     * Update an existing secret
+     */
+    fun updateSecret(request: UpdateSecretRequestData) {
+        state = state.copy(isOperationInProgress = true)
+
+        scope.launch {
+            val result = secretDataProvider?.updateSecret(request)
+
+            result?.onSuccess {
+                state = state.copy(isOperationInProgress = false)
+                hideEditDialog()
+                loadSecrets()
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isOperationInProgress = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    /**
+     * Delete a secret
+     */
+    fun deleteSecret(secretId: String) {
+        state = state.copy(isOperationInProgress = true)
+
+        scope.launch {
+            val result = secretDataProvider?.deleteSecret(secretId)
+
+            result?.onSuccess {
+                state = state.copy(isOperationInProgress = false)
+                hideDeleteDialog()
+                state = state.copy(secrets = state.secrets.filter { it.id != secretId })
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isOperationInProgress = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    fun togglePasswordVisibility(secretId: String) {
+        val current = state.visiblePasswordIds
+        state = if (current.contains(secretId)) {
+            state.copy(visiblePasswordIds = current - secretId)
+        } else {
+            state.copy(visiblePasswordIds = current + secretId)
+        }
+    }
+
+    fun toggleMetadataExpanded(secretId: String) {
+        val current = state.expandedSecretIds
+        state = if (current.contains(secretId)) {
+            state.copy(expandedSecretIds = current - secretId)
+        } else {
+            state.copy(expandedSecretIds = current + secretId)
+        }
+    }
+
+    fun clearError() {
+        state = state.copy(errorMessage = null)
+    }
+
+    fun loadSecretShares(secretId: String) {
+        state = state.copy(isLoadingShares = true)
+
+        scope.launch {
+            val result = secretDataProvider?.getSecretShares(secretId)
+
+            result?.onSuccess { shares ->
+                state = state.copy(secretShares = shares, isLoadingShares = false)
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isLoadingShares = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    fun shareSecret(request: ShareSecretRequestData) {
+        state = state.copy(isOperationInProgress = true)
+
+        scope.launch {
+            val result = secretDataProvider?.shareSecret(request)
+
+            result?.onSuccess {
+                state = state.copy(isOperationInProgress = false)
+                loadSecretShares(request.secretId)
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isOperationInProgress = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    fun unshareSecret(secretId: String, userId: String? = null, roleId: String? = null) {
+        state = state.copy(isOperationInProgress = true)
+
+        scope.launch {
+            val request = UnshareSecretRequestData(
+                secretId = secretId,
+                targetUserId = userId,
+                targetRoleId = roleId
+            )
+
+            val result = secretDataProvider?.unshareSecret(request)
+
+            result?.onSuccess {
+                state = state.copy(isOperationInProgress = false)
+                loadSecretShares(secretId)
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isOperationInProgress = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    fun loadAvailableUsers() {
+        state = state.copy(isLoadingUsers = true)
+
+        scope.launch {
+            val result = userManagementProvider?.getAllUsersWithRoles(limit = 10, offset = 0)
+
+            result?.onSuccess { paginatedResult ->
+                state = state.copy(availableUsers = paginatedResult.data, isLoadingUsers = false)
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isLoadingUsers = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    fun searchUsersForSharing(query: String) {
+        state = state.copy(isLoadingUsers = true)
+
+        scope.launch {
+            val result = userManagementProvider?.searchUsersByEmail(query, limit = 10, offset = 0)
+
+            result?.onSuccess { paginatedResult ->
+                state = state.copy(availableUsers = paginatedResult.data, isLoadingUsers = false)
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isLoadingUsers = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
+    }
+
+    fun loadAvailableRoles() {
+        state = state.copy(isLoadingRoles = true)
+
+        scope.launch {
+            val result = userManagementProvider?.getAllRoles()
+
+            result?.onSuccess { roles ->
+                state = state.copy(availableRoles = roles, isLoadingRoles = false)
+            }?.onFailure { exception ->
+                state = state.copy(
+                    isLoadingRoles = false,
+                    errorMessage = exception.message ?: "Unknown error"
+                )
+            }
+        }
     }
 }
+
+/**
+ * State for Secret Manager panel - matches bundled plugin state
+ */
+data class SecretManagerState(
+    val secrets: List<SecretEntryData> = emptyList(),
+    val isLoading: Boolean = false,
+    val isLoadingMore: Boolean = false,
+    val isOperationInProgress: Boolean = false,
+    val errorMessage: String? = null,
+    val searchQuery: String = "",
+    val showCreateDialog: Boolean = false,
+    val showEditDialog: Boolean = false,
+    val showDeleteDialog: Boolean = false,
+    val selectedSecret: SecretEntryData? = null,
+    val expandedSecretIds: Set<String> = emptySet(),
+    val visiblePasswordIds: Set<String> = emptySet(),
+    val pageSize: Int = 50,
+    val currentOffset: Int = 0,
+    val hasMore: Boolean = true,
+    // Sharing-related state
+    val showShareDialog: Boolean = false,
+    val secretShares: List<SecretShareData> = emptyList(),
+    val isLoadingShares: Boolean = false,
+    // Available users and roles for sharing
+    val availableUsers: List<UserWithRolesData> = emptyList(),
+    val availableRoles: List<RoleInfoData> = emptyList(),
+    val isLoadingUsers: Boolean = false,
+    val isLoadingRoles: Boolean = false
+)
