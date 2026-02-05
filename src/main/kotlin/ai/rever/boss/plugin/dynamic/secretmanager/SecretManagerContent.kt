@@ -37,16 +37,18 @@ import kotlinx.coroutines.CoroutineScope
  * Secret Manager panel content (Dynamic Plugin).
  *
  * Displays and manages user secrets with CRUD and sharing operations.
+ * Also supports Plugin Store API key management for admin/plugin_admin users.
  * UI matches the bundled plugin's Card-based design.
  */
 @Composable
 fun SecretManagerContent(
     secretDataProvider: SecretDataProvider?,
     userManagementProvider: UserManagementProvider?,
+    pluginStoreApiKeyProvider: PluginStoreApiKeyProvider?,
     scope: CoroutineScope
 ) {
-    val viewModel = remember(secretDataProvider, userManagementProvider, scope) {
-        SecretManagerViewModel(secretDataProvider, userManagementProvider, scope)
+    val viewModel = remember(secretDataProvider, userManagementProvider, pluginStoreApiKeyProvider, scope) {
+        SecretManagerViewModel(secretDataProvider, userManagementProvider, pluginStoreApiKeyProvider, scope)
     }
 
     if (!viewModel.isAvailable()) {
@@ -57,6 +59,7 @@ fun SecretManagerContent(
 
     LaunchedEffect(Unit) {
         viewModel.initialize()
+        viewModel.checkApiKeyPermission()
     }
 }
 
@@ -106,6 +109,7 @@ private fun NoProviderMessage() {
 private fun SecretManagerView(viewModel: SecretManagerViewModel) {
     val state = viewModel.state
     val listState = rememberLazyListState()
+    var showAddDropdown by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -141,16 +145,90 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                     )
                 }
 
-                // Add button
-                IconButton(
-                    onClick = { viewModel.showCreateDialog() },
-                    enabled = !state.isLoading
-                ) {
-                    Icon(
-                        Icons.Default.Add,
-                        contentDescription = "Add Secret",
-                        tint = Color(0xFF4CAF50)
-                    )
+                // Add button with dropdown menu
+                Box {
+                    IconButton(
+                        onClick = { showAddDropdown = true },
+                        enabled = !state.isLoading
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "Add",
+                            tint = Color(0xFF4CAF50)
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showAddDropdown,
+                        onDismissRequest = { showAddDropdown = false },
+                        modifier = Modifier.background(Color(0xFF3C3F41))
+                    ) {
+                        // Add Secret option (always visible)
+                        DropdownMenuItem(
+                            onClick = {
+                                showAddDropdown = false
+                                viewModel.showCreateDialog()
+                            }
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text("Add Secret", color = Color.White, fontSize = 13.sp)
+                            }
+                        }
+
+                        // Create API Key option (visible for admin/plugin_admin)
+                        if (state.canManageApiKeys) {
+                            Divider(color = BossDarkBorder)
+
+                            DropdownMenuItem(
+                                onClick = {
+                                    showAddDropdown = false
+                                    viewModel.showCreateApiKeyDialog()
+                                }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.VpnKey,
+                                        contentDescription = null,
+                                        tint = Color(0xFFFFB74D),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text("Create API Key", color = Color.White, fontSize = 13.sp)
+                                }
+                            }
+
+                            DropdownMenuItem(
+                                onClick = {
+                                    showAddDropdown = false
+                                    viewModel.showApiKeysListDialog()
+                                }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.List,
+                                        contentDescription = null,
+                                        tint = Color(0xFF64B5F6),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text("Manage API Keys", color = Color.White, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -287,6 +365,31 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
             isLoading = state.isOperationInProgress,
             isLoadingShares = state.isLoadingShares,
             isLoadingUsers = state.isLoadingUsers
+        )
+    }
+
+    // API Key dialogs
+    if (state.showCreateApiKeyDialog) {
+        CreateApiKeyDialog(
+            onConfirm = { name, scopes, expiresInDays ->
+                viewModel.createApiKey(name, scopes, expiresInDays)
+            },
+            onDismiss = { viewModel.hideCreateApiKeyDialog() },
+            isSuccess = state.apiKeyCreatedSuccessfully,
+            isLoading = state.isOperationInProgress
+        )
+    }
+
+    if (state.showApiKeysListDialog) {
+        ApiKeysListDialog(
+            apiKeys = state.apiKeys,
+            onRevoke = { keyId -> viewModel.revokeApiKey(keyId) },
+            onDismiss = { viewModel.hideApiKeysListDialog() },
+            onCreateNew = {
+                viewModel.hideApiKeysListDialog()
+                viewModel.showCreateApiKeyDialog()
+            },
+            isLoading = state.isLoadingApiKeys || state.isOperationInProgress
         )
     }
 }
@@ -1347,5 +1450,694 @@ private fun DialogTextField(
                 }
             }
         }
+    }
+}
+
+// ==================== API KEY DIALOGS ====================
+
+/**
+ * Dialog for creating a new Plugin Store API key.
+ * The API key is automatically stored as a secret after creation.
+ */
+@Composable
+private fun CreateApiKeyDialog(
+    onConfirm: (name: String, scopes: List<String>, expiresInDays: Int?) -> Unit,
+    onDismiss: () -> Unit,
+    isSuccess: Boolean,
+    isLoading: Boolean
+) {
+    var name by remember { mutableStateOf("") }
+    var publishScope by remember { mutableStateOf(true) }
+    var versionScope by remember { mutableStateOf(true) }
+    var finalizeScope by remember { mutableStateOf(true) }
+    var hasExpiration by remember { mutableStateOf(false) }
+    var expirationDays by remember { mutableStateOf("90") }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.width(450.dp),
+            color = Color(0xFF2D2D2D),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            if (isSuccess) Icons.Default.CheckCircle else Icons.Default.VpnKey,
+                            contentDescription = null,
+                            tint = if (isSuccess) Color(0xFF4CAF50) else Color(0xFFFFB74D),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Text(
+                            if (isSuccess) "API Key Created" else "Create API Key",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                if (isSuccess) {
+                    // Success message
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF1E1F22), RoundedCornerShape(4.dp))
+                            .border(1.dp, Color(0xFF4CAF50), RoundedCornerShape(4.dp))
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = Color(0xFF4CAF50),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Text(
+                            "API Key Securely Stored",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            "Your API key has been automatically saved to your secrets.",
+                            color = BossDarkTextSecondary,
+                            fontSize = 12.sp
+                        )
+                        Divider(color = BossDarkBorder, modifier = Modifier.padding(vertical = 8.dp))
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Language,
+                                    contentDescription = null,
+                                    tint = BossDarkTextSecondary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    "Website: boss_plugin_store_api_key",
+                                    color = Color.White,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Person,
+                                    contentDescription = null,
+                                    tint = BossDarkTextSecondary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    "Username: Your key name",
+                                    color = Color.White,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.VpnKey,
+                                    contentDescription = null,
+                                    tint = BossDarkTextSecondary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    "Password: Your API key",
+                                    color = Color.White,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        "Use the X-API-Key header with your key for CI/CD publishing.",
+                        color = BossDarkTextSecondary,
+                        fontSize = 11.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        Button(
+                            onClick = onDismiss,
+                            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF4CAF50))
+                        ) {
+                            Text("Done", color = Color.White)
+                        }
+                    }
+                } else {
+                    // Creation form
+                    Text(
+                        "Create an API key for CI/CD publishing to the Plugin Store. The key will be securely stored in your secrets.",
+                        color = BossDarkTextSecondary,
+                        fontSize = 12.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Name field
+                    DialogTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = "Key Name",
+                        placeholder = "e.g., github-actions-release"
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Scopes
+                    Text(
+                        "Scopes",
+                        color = BossDarkTextSecondary,
+                        fontSize = 11.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        ScopeCheckbox(
+                            checked = publishScope,
+                            onCheckedChange = { publishScope = it },
+                            label = "publish",
+                            description = "Create new plugin versions"
+                        )
+                        ScopeCheckbox(
+                            checked = versionScope,
+                            onCheckedChange = { versionScope = it },
+                            label = "version",
+                            description = "Upload version files"
+                        )
+                        ScopeCheckbox(
+                            checked = finalizeScope,
+                            onCheckedChange = { finalizeScope = it },
+                            label = "finalize",
+                            description = "Finalize version uploads"
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Expiration
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = hasExpiration,
+                            onCheckedChange = { hasExpiration = it },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = Color(0xFF4CAF50),
+                                uncheckedColor = BossDarkTextSecondary
+                            )
+                        )
+                        Column {
+                            Text(
+                                "Set expiration",
+                                color = Color.White,
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                "Key will expire after specified days",
+                                color = BossDarkTextSecondary,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+
+                    if (hasExpiration) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            BasicTextField(
+                                value = expirationDays,
+                                onValueChange = { newValue ->
+                                    // Only allow digits
+                                    if (newValue.isEmpty() || newValue.all { it.isDigit() }) {
+                                        expirationDays = newValue
+                                    }
+                                },
+                                modifier = Modifier
+                                    .width(80.dp)
+                                    .background(Color(0xFF1E1F22), RoundedCornerShape(4.dp))
+                                    .border(1.dp, BossDarkBorder, RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.body2.copy(color = Color.White),
+                                cursorBrush = SolidColor(Color(0xFF4CAF50))
+                            )
+                            Text(
+                                "days",
+                                color = BossDarkTextSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    // Action buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = onDismiss, enabled = !isLoading) {
+                            Text("Cancel", color = BossDarkTextSecondary)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val scopes = buildList {
+                                    if (publishScope) add("publish")
+                                    if (versionScope) add("version")
+                                    if (finalizeScope) add("finalize")
+                                }
+                                val expDays = if (hasExpiration) expirationDays.toIntOrNull() else null
+                                onConfirm(name, scopes, expDays)
+                            },
+                            enabled = !isLoading && name.isNotBlank() && (publishScope || versionScope || finalizeScope),
+                            colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFFFFB74D))
+                        ) {
+                            if (isLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    color = Color.White,
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text("Create Key", color = Color.Black)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Checkbox component for scope selection.
+ */
+@Composable
+private fun ScopeCheckbox(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    label: String,
+    description: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = CheckboxDefaults.colors(
+                checkedColor = Color(0xFF4CAF50),
+                uncheckedColor = BossDarkTextSecondary
+            )
+        )
+        Column(modifier = Modifier.padding(start = 8.dp)) {
+            Text(
+                label,
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                description,
+                color = BossDarkTextSecondary,
+                fontSize = 10.sp
+            )
+        }
+    }
+}
+
+/**
+ * Dialog for listing and managing API keys.
+ */
+@Composable
+private fun ApiKeysListDialog(
+    apiKeys: List<ApiKeyInfo>,
+    onRevoke: (keyId: String) -> Unit,
+    onDismiss: () -> Unit,
+    onCreateNew: () -> Unit,
+    isLoading: Boolean
+) {
+    var keyToRevoke by remember { mutableStateOf<ApiKeyInfo?>(null) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.width(500.dp).heightIn(max = 450.dp),
+            color = Color(0xFF2D2D2D),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.VpnKey,
+                            contentDescription = null,
+                            tint = Color(0xFF64B5F6),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Text(
+                            "Plugin Store API Keys",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    IconButton(
+                        onClick = onCreateNew,
+                        enabled = !isLoading
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "Create new",
+                            tint = Color(0xFF4CAF50)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                if (isLoading) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(150.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF4CAF50),
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                } else if (apiKeys.isEmpty()) {
+                    // Empty state
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(150.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.VpnKey,
+                                contentDescription = null,
+                                tint = BossDarkTextSecondary,
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Text(
+                                "No API keys",
+                                color = Color.White,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                "Create a key for CI/CD publishing",
+                                color = BossDarkTextSecondary,
+                                fontSize = 12.sp
+                            )
+                            Button(
+                                onClick = onCreateNew,
+                                colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFFFFB74D))
+                            ) {
+                                Icon(
+                                    Icons.Default.Add,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Create API Key", color = Color.Black, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                } else {
+                    // Keys list
+                    val listState = rememberLazyListState()
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .lazyListScrollbar(
+                                listState = listState,
+                                direction = Orientation.Vertical,
+                                config = getPanelScrollbarConfig()
+                            ),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(apiKeys, key = { it.id }) { key ->
+                            ApiKeyCard(
+                                apiKey = key,
+                                onRevoke = { keyToRevoke = key },
+                                isLoading = isLoading
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF424242))
+                    ) {
+                        Text("Close", color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+
+    // Revoke confirmation dialog
+    keyToRevoke?.let { key ->
+        AlertDialog(
+            onDismissRequest = { keyToRevoke = null },
+            title = {
+                Text("Revoke API Key?", color = Color.White, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column {
+                    Text(
+                        "Are you sure you want to revoke this API key?",
+                        color = Color.White
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        key.name,
+                        color = Color(0xFF90CAF9),
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "This will immediately invalidate the key. CI/CD pipelines using this key will fail.",
+                        color = Color(0xFFF44336),
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onRevoke(key.id)
+                        keyToRevoke = null
+                    },
+                    enabled = !isLoading,
+                    colors = ButtonDefaults.buttonColors(backgroundColor = Color(0xFFF44336))
+                ) {
+                    Text("Revoke", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { keyToRevoke = null }) {
+                    Text("Cancel", color = BossDarkTextSecondary)
+                }
+            },
+            backgroundColor = Color(0xFF2D2D2D)
+        )
+    }
+}
+
+/**
+ * Card component for displaying a single API key.
+ */
+@Composable
+private fun ApiKeyCard(
+    apiKey: ApiKeyInfo,
+    onRevoke: () -> Unit,
+    isLoading: Boolean
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(6.dp),
+        backgroundColor = Color(0xFF3C3F41),
+        elevation = 1.dp
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        apiKey.name,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Key prefix
+                        Text(
+                            apiKey.keyPrefix + "...",
+                            color = BossDarkTextSecondary,
+                            fontSize = 11.sp
+                        )
+                        // Scopes
+                        apiKey.scopes.forEach { scope ->
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF4CAF50).copy(alpha = 0.2f)
+                            ) {
+                                Text(
+                                    scope,
+                                    color = Color(0xFF4CAF50),
+                                    fontSize = 9.sp,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                IconButton(
+                    onClick = onRevoke,
+                    enabled = !isLoading,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = "Revoke",
+                        tint = Color(0xFFE57373),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Metadata row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Created date
+                Column {
+                    Text(
+                        "Created",
+                        color = BossDarkTextSecondary,
+                        fontSize = 10.sp
+                    )
+                    Text(
+                        formatTimestamp(apiKey.createdAt),
+                        color = Color.White,
+                        fontSize = 11.sp
+                    )
+                }
+
+                // Last used
+                apiKey.lastUsedAt?.let { lastUsed ->
+                    Column {
+                        Text(
+                            "Last used",
+                            color = BossDarkTextSecondary,
+                            fontSize = 10.sp
+                        )
+                        Text(
+                            formatTimestamp(lastUsed),
+                            color = Color.White,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                // Expires
+                apiKey.expiresAt?.let { expiresAt ->
+                    Column {
+                        Text(
+                            "Expires",
+                            color = BossDarkTextSecondary,
+                            fontSize = 10.sp
+                        )
+                        Text(
+                            formatTimestamp(expiresAt),
+                            color = Color(0xFFFFB74D),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Format a timestamp (milliseconds) to a readable date string.
+ */
+private fun formatTimestamp(timestamp: Long): String {
+    return try {
+        val instant = java.time.Instant.ofEpochMilli(timestamp)
+        val dateTime = java.time.LocalDateTime.ofInstant(instant, java.time.ZoneId.systemDefault())
+        val formatter = java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy")
+        dateTime.format(formatter)
+    } catch (_: Exception) {
+        "Unknown"
     }
 }

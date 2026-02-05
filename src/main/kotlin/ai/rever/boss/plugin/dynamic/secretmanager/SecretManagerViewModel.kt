@@ -12,12 +12,13 @@ import kotlinx.coroutines.launch
 /**
  * ViewModel for Secret Manager panel.
  *
- * Uses SecretDataProvider and UserManagementProvider interfaces for data operations.
- * Matches the bundled plugin's state management pattern.
+ * Uses SecretDataProvider, UserManagementProvider, and PluginStoreApiKeyProvider
+ * interfaces for data operations. Matches the bundled plugin's state management pattern.
  */
 class SecretManagerViewModel(
     private val secretDataProvider: SecretDataProvider?,
     private val userManagementProvider: UserManagementProvider?,
+    private val pluginStoreApiKeyProvider: PluginStoreApiKeyProvider?,
     private val scope: CoroutineScope
 ) {
     // Job tracking to prevent race conditions
@@ -402,6 +403,175 @@ class SecretManagerViewModel(
             }
         }
     }
+
+    // ============================================================================
+    // Plugin Store API Key Management
+    // ============================================================================
+
+    /**
+     * Check if the current user can manage API keys.
+     */
+    fun checkApiKeyPermission() {
+        scope.launch {
+            val canManage = pluginStoreApiKeyProvider?.canManageApiKeys() ?: false
+            state = state.copy(canManageApiKeys = canManage)
+        }
+    }
+
+    /**
+     * Show the Create API Key dialog.
+     */
+    fun showCreateApiKeyDialog() {
+        state = state.copy(showCreateApiKeyDialog = true)
+    }
+
+    /**
+     * Hide the Create API Key dialog.
+     */
+    fun hideCreateApiKeyDialog() {
+        state = state.copy(
+            showCreateApiKeyDialog = false,
+            apiKeyCreatedSuccessfully = false
+        )
+    }
+
+    /**
+     * Load all API keys for the current user.
+     */
+    fun loadApiKeys() {
+        if (pluginStoreApiKeyProvider == null) return
+
+        state = state.copy(isLoadingApiKeys = true)
+
+        scope.launch {
+            val result = pluginStoreApiKeyProvider.listApiKeys()
+
+            result.onSuccess { keys ->
+                state = state.copy(
+                    apiKeys = keys,
+                    isLoadingApiKeys = false
+                )
+            }.onFailure { exception ->
+                state = state.copy(
+                    isLoadingApiKeys = false,
+                    errorMessage = exception.message ?: "Failed to load API keys"
+                )
+            }
+        }
+    }
+
+    /**
+     * Create a new API key and automatically store it as a secret.
+     *
+     * @param name Display name for the key
+     * @param scopes List of scopes
+     * @param expiresInDays Optional expiration in days
+     */
+    fun createApiKey(
+        name: String,
+        scopes: List<String> = listOf("publish", "version", "finalize"),
+        expiresInDays: Int? = null
+    ) {
+        if (pluginStoreApiKeyProvider == null) return
+
+        state = state.copy(isOperationInProgress = true)
+
+        scope.launch {
+            val result = pluginStoreApiKeyProvider.createApiKey(name, scopes, expiresInDays)
+
+            result.onSuccess { creationResult ->
+                // Automatically store the API key as a secret
+                val secretRequest = CreateSecretRequestData(
+                    website = "boss_plugin_store_api_key",
+                    username = name,
+                    password = creationResult.apiKey,
+                    notes = "Plugin Store API Key\nScopes: ${scopes.joinToString(", ")}" +
+                            (expiresInDays?.let { "\nExpires in: $it days" } ?: "")
+                )
+
+                val secretResult = secretDataProvider?.createSecret(secretRequest)
+
+                secretResult?.onSuccess {
+                    state = state.copy(
+                        isOperationInProgress = false,
+                        apiKeyCreatedSuccessfully = true,
+                        apiKeys = state.apiKeys + creationResult.keyInfo
+                    )
+                    // Reload secrets to show the newly created one
+                    loadSecrets()
+                }?.onFailure { secretException ->
+                    // API key created but secret storage failed - still show as partial success
+                    state = state.copy(
+                        isOperationInProgress = false,
+                        apiKeyCreatedSuccessfully = true,
+                        apiKeys = state.apiKeys + creationResult.keyInfo,
+                        errorMessage = "API key created but failed to store as secret: ${secretException.message}"
+                    )
+                }
+
+                // If secretDataProvider is null, just mark as success
+                if (secretDataProvider == null) {
+                    state = state.copy(
+                        isOperationInProgress = false,
+                        apiKeyCreatedSuccessfully = true,
+                        apiKeys = state.apiKeys + creationResult.keyInfo
+                    )
+                }
+            }.onFailure { exception ->
+                state = state.copy(
+                    isOperationInProgress = false,
+                    errorMessage = exception.message ?: "Failed to create API key"
+                )
+            }
+        }
+    }
+
+    /**
+     * Clear the API key created success flag.
+     */
+    fun clearApiKeyCreatedFlag() {
+        state = state.copy(apiKeyCreatedSuccessfully = false)
+    }
+
+    /**
+     * Revoke an API key.
+     */
+    fun revokeApiKey(keyId: String) {
+        if (pluginStoreApiKeyProvider == null) return
+
+        state = state.copy(isOperationInProgress = true)
+
+        scope.launch {
+            val result = pluginStoreApiKeyProvider.revokeApiKey(keyId)
+
+            result.onSuccess {
+                state = state.copy(
+                    isOperationInProgress = false,
+                    apiKeys = state.apiKeys.filter { it.id != keyId }
+                )
+            }.onFailure { exception ->
+                state = state.copy(
+                    isOperationInProgress = false,
+                    errorMessage = exception.message ?: "Failed to revoke API key"
+                )
+            }
+        }
+    }
+
+    /**
+     * Show the API Keys list dialog.
+     */
+    fun showApiKeysListDialog() {
+        state = state.copy(showApiKeysListDialog = true)
+        loadApiKeys()
+    }
+
+    /**
+     * Hide the API Keys list dialog.
+     */
+    fun hideApiKeysListDialog() {
+        state = state.copy(showApiKeysListDialog = false)
+    }
 }
 
 /**
@@ -431,5 +601,12 @@ data class SecretManagerState(
     val availableUsers: List<UserWithRolesData> = emptyList(),
     val availableRoles: List<RoleInfoData> = emptyList(),
     val isLoadingUsers: Boolean = false,
-    val isLoadingRoles: Boolean = false
+    val isLoadingRoles: Boolean = false,
+    // Plugin Store API Key management
+    val canManageApiKeys: Boolean = false,
+    val showCreateApiKeyDialog: Boolean = false,
+    val showApiKeysListDialog: Boolean = false,
+    val apiKeys: List<ApiKeyInfo> = emptyList(),
+    val isLoadingApiKeys: Boolean = false,
+    val apiKeyCreatedSuccessfully: Boolean = false // Flag to show success message
 )
