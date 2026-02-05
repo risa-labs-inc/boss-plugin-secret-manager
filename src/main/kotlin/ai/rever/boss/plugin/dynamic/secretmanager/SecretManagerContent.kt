@@ -839,6 +839,7 @@ private fun CreateSecretDialog(
     var password by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
+    var isApiKey by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -859,8 +860,8 @@ private fun CreateSecretDialog(
                 DialogTextField(
                     value = website,
                     onValueChange = { website = it },
-                    label = "Website",
-                    placeholder = "e.g., github.com"
+                    label = if (isApiKey) "Service Name" else "Website",
+                    placeholder = if (isApiKey) "e.g., OpenAI API" else "e.g., github.com"
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -868,8 +869,8 @@ private fun CreateSecretDialog(
                 DialogTextField(
                     value = username,
                     onValueChange = { username = it },
-                    label = "Username / Email",
-                    placeholder = "e.g., user@example.com"
+                    label = if (isApiKey) "Key Name" else "Username / Email",
+                    placeholder = if (isApiKey) "e.g., production-key" else "e.g., user@example.com"
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -877,8 +878,8 @@ private fun CreateSecretDialog(
                 DialogTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = "Password",
-                    placeholder = "Enter password",
+                    label = if (isApiKey) "API Key" else "Password",
+                    placeholder = if (isApiKey) "Enter API key" else "Enter password",
                     isPassword = true,
                     showPassword = showPassword,
                     onTogglePassword = { showPassword = !showPassword }
@@ -894,7 +895,33 @@ private fun CreateSecretDialog(
                     singleLine = false
                 )
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // API Key checkbox
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { isApiKey = !isApiKey }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = isApiKey,
+                        onCheckedChange = { isApiKey = it },
+                        colors = CheckboxDefaults.colors(
+                            checkedColor = Color(0xFF4CAF50),
+                            uncheckedColor = BossDarkTextSecondary
+                        )
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "This is an API Key",
+                        color = Color.White,
+                        fontSize = 14.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -911,7 +938,8 @@ private fun CreateSecretDialog(
                                     website = website,
                                     username = username,
                                     password = password,
-                                    notes = notes.takeIf { it.isNotBlank() }
+                                    notes = notes.takeIf { it.isNotBlank() },
+                                    tags = if (isApiKey) listOf("api_key") else emptyList()
                                 ))
                             }
                         },
@@ -946,6 +974,7 @@ private fun EditSecretDialog(
     var password by remember { mutableStateOf(secret.password) }
     var notes by remember { mutableStateOf(secret.notes ?: "") }
     var showPassword by remember { mutableStateOf(false) }
+    var isApiKey by remember { mutableStateOf(secret.tags.contains("api_key")) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -966,7 +995,7 @@ private fun EditSecretDialog(
                 DialogTextField(
                     value = website,
                     onValueChange = { website = it },
-                    label = "Website"
+                    label = if (isApiKey) "Service Name" else "Website"
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -974,7 +1003,7 @@ private fun EditSecretDialog(
                 DialogTextField(
                     value = username,
                     onValueChange = { username = it },
-                    label = "Username / Email"
+                    label = if (isApiKey) "Key Name" else "Username / Email"
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -982,7 +1011,7 @@ private fun EditSecretDialog(
                 DialogTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = "Password",
+                    label = if (isApiKey) "API Key" else "Password",
                     isPassword = true,
                     showPassword = showPassword,
                     onTogglePassword = { showPassword = !showPassword }
@@ -997,7 +1026,33 @@ private fun EditSecretDialog(
                     singleLine = false
                 )
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // API Key checkbox
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { isApiKey = !isApiKey }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = isApiKey,
+                        onCheckedChange = { isApiKey = it },
+                        colors = CheckboxDefaults.colors(
+                            checkedColor = Color(0xFF4CAF50),
+                            uncheckedColor = BossDarkTextSecondary
+                        )
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "This is an API Key",
+                        color = Color.White,
+                        fontSize = 14.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1010,12 +1065,19 @@ private fun EditSecretDialog(
                     Button(
                         onClick = {
                             if (website.isNotBlank() && username.isNotBlank() && password.isNotBlank()) {
+                                // Preserve existing tags, add/remove api_key as needed
+                                val updatedTags = if (isApiKey) {
+                                    if (secret.tags.contains("api_key")) secret.tags else secret.tags + "api_key"
+                                } else {
+                                    secret.tags.filter { it != "api_key" }
+                                }
                                 onConfirm(UpdateSecretRequestData(
                                     secretId = secret.id,
                                     website = website,
                                     username = username,
                                     password = password,
-                                    notes = notes.takeIf { it.isNotBlank() }
+                                    notes = notes.takeIf { it.isNotBlank() },
+                                    tags = updatedTags
                                 ))
                             }
                         },

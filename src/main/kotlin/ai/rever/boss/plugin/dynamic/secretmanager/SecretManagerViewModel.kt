@@ -486,7 +486,8 @@ class SecretManagerViewModel(
                     username = name,
                     password = creationResult.apiKey,
                     notes = "Plugin Store API Key\nScopes: ${scopes.joinToString(", ")}" +
-                            (expiresInDays?.let { "\nExpires in: $it days" } ?: "")
+                            (expiresInDays?.let { "\nExpires in: $it days" } ?: ""),
+                    tags = listOf("api_key")
                 )
 
                 val secretResult = secretDataProvider?.createSecret(secretRequest)
