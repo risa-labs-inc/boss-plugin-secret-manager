@@ -9,6 +9,7 @@
   "description": "Manage encrypted credentials and secrets",
   "author": "Risa Labs",
   "url": "https://github.com/risa-labs-inc/boss-plugin-secret-manager",
+  "requiresAdmin": true,
   "panel": {
     "position": "right_top_bottom",
     "priority": 24
