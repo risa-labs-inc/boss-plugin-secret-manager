@@ -8,16 +8,26 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+
+private val json = Json { ignoreUnknownKeys = true }
+
+@Serializable
+data class ShareUserRow(val id: String, val email: String)
+
+@Serializable
+data class ShareRoleRow(val id: String, val name: String, val description: String? = null)
 
 /**
  * ViewModel for Secret Manager panel.
  *
- * Uses SecretDataProvider, UserManagementProvider, and PluginStoreApiKeyProvider
+ * Uses SecretDataProvider, SupabaseDataProvider, and PluginStoreApiKeyProvider
  * interfaces for data operations. Matches the bundled plugin's state management pattern.
  */
 class SecretManagerViewModel(
     private val secretDataProvider: SecretDataProvider?,
-    private val userManagementProvider: UserManagementProvider?,
+    private val supabaseDataProvider: SupabaseDataProvider?,
     private val pluginStoreApiKeyProvider: PluginStoreApiKeyProvider?,
     private val scope: CoroutineScope
 ) {
@@ -357,10 +367,15 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingUsers = true)
 
         scope.launch {
-            val result = userManagementProvider?.getAllUsersWithRoles(limit = 10, offset = 0)
+            val result = supabaseDataProvider?.select(
+                table = "users_with_roles",
+                columns = "id,email",
+                range = QueryRange(0, 9)
+            )
 
-            result?.onSuccess { paginatedResult ->
-                state = state.copy(availableUsers = paginatedResult.data, isLoadingUsers = false)
+            result?.onSuccess { jsonStr ->
+                val users = json.decodeFromString<List<ShareUserRow>>(jsonStr)
+                state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
                 state = state.copy(
                     isLoadingUsers = false,
@@ -374,10 +389,16 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingUsers = true)
 
         scope.launch {
-            val result = userManagementProvider?.searchUsersByEmail(query, limit = 10, offset = 0)
+            val result = supabaseDataProvider?.select(
+                table = "users_with_roles",
+                columns = "id,email",
+                filters = listOf(QueryFilter("email", FilterOperator.ILIKE, "%$query%")),
+                range = QueryRange(0, 9)
+            )
 
-            result?.onSuccess { paginatedResult ->
-                state = state.copy(availableUsers = paginatedResult.data, isLoadingUsers = false)
+            result?.onSuccess { jsonStr ->
+                val users = json.decodeFromString<List<ShareUserRow>>(jsonStr)
+                state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
                 state = state.copy(
                     isLoadingUsers = false,
@@ -391,9 +412,10 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingRoles = true)
 
         scope.launch {
-            val result = userManagementProvider?.getAllRoles()
+            val result = supabaseDataProvider?.select(table = "roles", columns = "id,name,description")
 
-            result?.onSuccess { roles ->
+            result?.onSuccess { jsonStr ->
+                val roles = json.decodeFromString<List<ShareRoleRow>>(jsonStr)
                 state = state.copy(availableRoles = roles, isLoadingRoles = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -599,8 +621,8 @@ data class SecretManagerState(
     val secretShares: List<SecretShareData> = emptyList(),
     val isLoadingShares: Boolean = false,
     // Available users and roles for sharing
-    val availableUsers: List<UserWithRolesData> = emptyList(),
-    val availableRoles: List<RoleInfoData> = emptyList(),
+    val availableUsers: List<ShareUserRow> = emptyList(),
+    val availableRoles: List<ShareRoleRow> = emptyList(),
     val isLoadingUsers: Boolean = false,
     val isLoadingRoles: Boolean = false,
     // Plugin Store API Key management

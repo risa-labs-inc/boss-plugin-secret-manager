@@ -9,7 +9,7 @@ import kotlinx.coroutines.Dispatchers
  * Secret Manager dynamic plugin - Loaded from external JAR.
  *
  * Manage encrypted credentials and secrets with CRUD and sharing.
- * Uses SecretDataProvider, UserManagementProvider, and PluginStoreApiKeyProvider from PluginContext.
+ * Uses SecretDataProvider, SupabaseDataProvider, and PluginStoreApiKeyProvider from PluginContext.
  */
 class SecretManagerDynamicPlugin : DynamicPlugin {
     override val pluginId: String = "ai.rever.boss.plugin.dynamic.secretmanager"
@@ -21,12 +21,11 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
 
     override fun register(context: PluginContext) {
         val secretDataProvider = context.secretDataProvider
-        val userManagementProvider = context.userManagementProvider
+        val supabaseDataProvider = context.supabaseDataProvider
         val pluginStoreApiKeyProvider = context.pluginStoreApiKeyProvider
         val pluginScope = context.pluginScope ?: CoroutineScope(Dispatchers.Main)
 
         if (secretDataProvider == null) {
-            // Provider not available - register stub
             context.panelRegistry.registerPanel(SecretManagerInfo) { ctx, panelInfo ->
                 SecretManagerComponent(ctx, panelInfo, null, null, null, pluginScope)
             }
@@ -38,7 +37,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 ctx = ctx,
                 panelInfo = panelInfo,
                 secretDataProvider = secretDataProvider,
-                userManagementProvider = userManagementProvider,
+                supabaseDataProvider = supabaseDataProvider,
                 pluginStoreApiKeyProvider = pluginStoreApiKeyProvider,
                 scope = pluginScope
             )

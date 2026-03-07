@@ -43,12 +43,12 @@ import kotlinx.coroutines.CoroutineScope
 @Composable
 fun SecretManagerContent(
     secretDataProvider: SecretDataProvider?,
-    userManagementProvider: UserManagementProvider?,
+    supabaseDataProvider: SupabaseDataProvider?,
     pluginStoreApiKeyProvider: PluginStoreApiKeyProvider?,
     scope: CoroutineScope
 ) {
-    val viewModel = remember(secretDataProvider, userManagementProvider, pluginStoreApiKeyProvider, scope) {
-        SecretManagerViewModel(secretDataProvider, userManagementProvider, pluginStoreApiKeyProvider, scope)
+    val viewModel = remember(secretDataProvider, supabaseDataProvider, pluginStoreApiKeyProvider, scope) {
+        SecretManagerViewModel(secretDataProvider, supabaseDataProvider, pluginStoreApiKeyProvider, scope)
     }
 
     if (!viewModel.isAvailable()) {
@@ -1162,8 +1162,8 @@ private fun DeleteConfirmationDialog(
 private fun ShareSecretDialog(
     secret: SecretEntryData,
     shares: List<SecretShareData>,
-    availableUsers: List<UserWithRolesData>,
-    availableRoles: List<RoleInfoData>,
+    availableUsers: List<ShareUserRow>,
+    availableRoles: List<ShareRoleRow>,
     onShare: (ShareSecretRequestData) -> Unit,
     onRevoke: (userId: String?, roleId: String?) -> Unit,
     onDismiss: () -> Unit,
