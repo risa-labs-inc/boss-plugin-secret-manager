@@ -222,7 +222,7 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                                     Icon(
                                         Icons.Default.List,
                                         contentDescription = null,
-                                        tint = Color(0xFF64B5F6),
+                                        tint = BossThemeColors.AccentColor,
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Text("Manage API Keys", color = BossThemeColors.TextPrimary, fontSize = 13.sp)
