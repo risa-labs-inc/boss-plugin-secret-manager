@@ -121,15 +121,14 @@ internal class SecretManagerMcpToolProvider(
                 )
             },
         ),
-    ).onEach { it.requiredPermissions = permissionsFor(it.name) }
+    ).onEach { it.requiredPermissions = listOf("secret.read") }
 
-    // RBAC gate: reads need secret.read (the plugin's own manifest permission);
-    // create/delete need the granular write permissions. Admins bypass.
-    private fun permissionsFor(tool: String): List<String> = when (tool) {
-        "secret_create" -> listOf("secrets.create")
-        "secret_delete" -> listOf("secrets.delete")
-        else -> listOf("secret.read")
-    }
+    // RBAC gate: secret.read across the board — the same gate as the panel UI
+    // (the plugin's manifest permission; the RPCs themselves are auth.uid()-
+    // scoped so users only ever touch their own secrets). Granular
+    // secrets.create/secrets.delete strings are NOT seeded in the RBAC catalog,
+    // so gating on them would silently make the write tools admin-only and
+    // diverge from what the panel allows.
 
     private suspend fun findById(id: String): SecretEntryData? =
         secrets.getUserSecrets(limit = 500).getOrNull()?.data?.firstOrNull { it.id == id }
