@@ -41,13 +41,23 @@ class SecretManagerViewModel(
 
     /**
      * Initialize by loading secrets.
+     *
+     * Users and roles are NOT loaded here — they are only needed by the share
+     * dialog and are fetched lazily when it opens, so opening the panel costs
+     * a single network round-trip instead of three.
      */
     fun initialize() {
         if (secretDataProvider != null) {
             loadSecrets()
-            loadAvailableUsers()
-            loadAvailableRoles()
         }
+    }
+
+    /**
+     * Log elapsed time for a data operation so intermittent slow loads are
+     * diagnosable from the host console (search for "SecretManager").
+     */
+    private fun logTiming(operation: String, startedAtMs: Long, outcome: String) {
+        println("[SecretManager] $operation: $outcome in ${System.currentTimeMillis() - startedAtMs} ms")
     }
 
     /**
@@ -70,18 +80,22 @@ class SecretManagerViewModel(
         )
 
         scope.launch {
+            val startedAt = System.currentTimeMillis()
             val result = secretDataProvider?.getUserSecrets(limit = state.pageSize, offset = 0)
 
             result?.onSuccess { paginatedResult ->
                 val secrets = paginatedResult.data
+                logTiming("getUserSecrets", startedAt, "${secrets.size} secrets")
                 state = state.copy(
                     secrets = secrets,
                     isLoading = false,
                     currentOffset = secrets.size,
-                    hasMore = paginatedResult.hasMore
+                    hasMore = paginatedResult.hasMore,
+                    lastLoadDurationMs = System.currentTimeMillis() - startedAt
                 )
             }?.onFailure { exception ->
                 val error = exception.message ?: "Unknown error"
+                logTiming("getUserSecrets", startedAt, "FAILED: $error")
                 state = state.copy(
                     isLoading = false,
                     errorMessage = error
@@ -105,6 +119,7 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingMore = true)
 
         loadJob = scope.launch {
+            val startedAt = System.currentTimeMillis()
             val result = secretDataProvider?.getUserSecrets(
                 limit = state.pageSize,
                 offset = state.currentOffset
@@ -112,6 +127,7 @@ class SecretManagerViewModel(
 
             result?.onSuccess { paginatedResult ->
                 val newSecrets = paginatedResult.data
+                logTiming("getUserSecrets(offset=${state.currentOffset})", startedAt, "${newSecrets.size} secrets")
                 state = state.copy(
                     secrets = state.secrets + newSecrets,
                     isLoadingMore = false,
@@ -152,9 +168,11 @@ class SecretManagerViewModel(
         }
 
         searchJob = scope.launch {
+            val startedAt = System.currentTimeMillis()
             val result = secretDataProvider?.searchSecrets(query = query, limit = 100, offset = 0)
 
             result?.onSuccess { paginatedResult ->
+                logTiming("searchSecrets", startedAt, "${paginatedResult.data.size} secrets")
                 state = state.copy(
                     secrets = paginatedResult.data,
                     isLoading = false,
@@ -205,6 +223,13 @@ class SecretManagerViewModel(
             isLoadingShares = false
         )
         loadSecretShares(secret.id)
+        // Share targets are fetched lazily on first dialog open (see initialize)
+        if (state.availableUsers.isEmpty() && !state.isLoadingUsers) {
+            loadAvailableUsers()
+        }
+        if (state.availableRoles.isEmpty() && !state.isLoadingRoles) {
+            loadAvailableRoles()
+        }
     }
 
     fun hideShareDialog() {
@@ -308,9 +333,11 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingShares = true)
 
         scope.launch {
+            val startedAt = System.currentTimeMillis()
             val result = secretDataProvider?.getSecretShares(secretId)
 
             result?.onSuccess { shares ->
+                logTiming("getSecretShares", startedAt, "${shares.size} shares")
                 state = state.copy(secretShares = shares, isLoadingShares = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -367,6 +394,7 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingUsers = true)
 
         scope.launch {
+            val startedAt = System.currentTimeMillis()
             val result = supabaseDataProvider?.select(
                 table = "users_with_roles",
                 columns = "id,email",
@@ -375,6 +403,7 @@ class SecretManagerViewModel(
 
             result?.onSuccess { jsonStr ->
                 val users = json.decodeFromString<List<ShareUserRow>>(jsonStr)
+                logTiming("select(users_with_roles)", startedAt, "${users.size} users")
                 state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -412,10 +441,12 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingRoles = true)
 
         scope.launch {
+            val startedAt = System.currentTimeMillis()
             val result = supabaseDataProvider?.select(table = "roles", columns = "id,name,description")
 
             result?.onSuccess { jsonStr ->
                 val roles = json.decodeFromString<List<ShareRoleRow>>(jsonStr)
+                logTiming("select(roles)", startedAt, "${roles.size} roles")
                 state = state.copy(availableRoles = roles, isLoadingRoles = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -616,6 +647,7 @@ data class SecretManagerState(
     val pageSize: Int = 50,
     val currentOffset: Int = 0,
     val hasMore: Boolean = true,
+    val lastLoadDurationMs: Long? = null,
     // Sharing-related state
     val showShareDialog: Boolean = false,
     val secretShares: List<SecretShareData> = emptyList(),

@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 
 /**
  * Secret Manager panel content (Dynamic Plugin).
@@ -242,7 +243,8 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
 
             // Secret count
             Text(
-                "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}",
+                "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}" +
+                    (state.lastLoadDurationMs?.let { " · loaded in ${formatLoadDuration(it)}" } ?: ""),
                 color = BossThemeColors.TextSecondary,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(bottom = 8.dp)
@@ -453,8 +455,18 @@ private fun SearchBar(
     )
 }
 
+private fun formatLoadDuration(ms: Long): String =
+    if (ms < 1000) "${ms}ms" else "%.1fs".format(ms / 1000.0)
+
 @Composable
 private fun LoadingView() {
+    var elapsedSeconds by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            elapsedSeconds++
+        }
+    }
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -462,7 +474,19 @@ private fun LoadingView() {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(color = BossThemeColors.SuccessColor)
             Spacer(modifier = Modifier.height(16.dp))
-            Text("Loading secrets...", color = BossThemeColors.TextSecondary, fontSize = 12.sp)
+            Text(
+                if (elapsedSeconds < 3) "Loading secrets..." else "Loading secrets... ${elapsedSeconds}s",
+                color = BossThemeColors.TextSecondary,
+                fontSize = 12.sp
+            )
+            if (elapsedSeconds >= 10) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Still waiting on the server — the network may be slow",
+                    color = BossThemeColors.TextSecondary.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
+            }
         }
     }
 }
