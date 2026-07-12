@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.2.1"
+version = "1.2.2"
 
 java {
     toolchain {
@@ -34,7 +34,10 @@ repositories {
 
 dependencies {
     if (useLocalDependencies) {
-        // Local development: use boss-plugin-api JAR from sibling repo
+        // Local development: use boss-plugin-api JAR from sibling repo.
+        // NOTE: plugin.json declares apiVersion 1.0.20 — the ai.rever.boss.plugin.logging
+        // and .scrollbar packages used by this plugin were introduced in exactly that
+        // release (api tag v1.0.20), so the declared minimum is accurate.
         compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.51.jar"))
     } else {
         // CI: use downloaded JAR

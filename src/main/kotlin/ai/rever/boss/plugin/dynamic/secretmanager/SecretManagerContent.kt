@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -30,7 +31,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Secret Manager panel content (Dynamic Plugin).
@@ -38,29 +40,18 @@ import kotlinx.coroutines.CoroutineScope
  * Displays and manages user secrets with CRUD and sharing operations.
  * Also supports Plugin Store API key management for admin/plugin_admin users.
  * UI matches the bundled plugin's Card-based design.
+ *
+ * The ViewModel is owned by [SecretManagerComponent] so state survives the
+ * panel leaving and re-entering composition.
  */
 @Composable
-fun SecretManagerContent(
-    secretDataProvider: SecretDataProvider?,
-    supabaseDataProvider: SupabaseDataProvider?,
-    pluginStoreApiKeyProvider: PluginStoreApiKeyProvider?,
-    scope: CoroutineScope
-) {
-    val viewModel = remember(secretDataProvider, supabaseDataProvider, pluginStoreApiKeyProvider, scope) {
-        SecretManagerViewModel(secretDataProvider, supabaseDataProvider, pluginStoreApiKeyProvider, scope)
-    }
-
+fun SecretManagerContent(viewModel: SecretManagerViewModel) {
     BossTheme {
         if (!viewModel.isAvailable()) {
             NoProviderMessage()
         } else {
             SecretManagerView(viewModel)
         }
-    }
-
-    LaunchedEffect(Unit) {
-        viewModel.initialize()
-        viewModel.checkApiKeyPermission()
     }
 }
 
@@ -69,7 +60,7 @@ private fun NoProviderMessage() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(BossThemeColors.SurfaceColor)
+            .background(BossThemeColors.BackgroundColor)
             .padding(16.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -110,12 +101,13 @@ private fun NoProviderMessage() {
 private fun SecretManagerView(viewModel: SecretManagerViewModel) {
     val state = viewModel.state
     val listState = rememberLazyListState()
+    val clipboardManager = LocalClipboardManager.current
     var showAddDropdown by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(BossThemeColors.SurfaceColor)
+            .background(BossThemeColors.BackgroundColor)
             .padding(16.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -149,7 +141,11 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                 // Add button with dropdown menu
                 Box {
                     IconButton(
-                        onClick = { showAddDropdown = true },
+                        onClick = {
+                            showAddDropdown = true
+                            // Fallback trigger; normally pre-warmed after the first secrets load
+                            viewModel.checkApiKeyPermission()
+                        },
                         enabled = !state.isLoading
                     ) {
                         Icon(
@@ -242,7 +238,8 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
 
             // Secret count
             Text(
-                "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}",
+                "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}" +
+                    (state.lastLoadDurationMs?.let { " · last fetch ${formatLoadDuration(it)}" } ?: ""),
                 color = BossThemeColors.TextSecondary,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(bottom = 8.dp)
@@ -287,7 +284,8 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                                 onToggleExpand = { viewModel.toggleMetadataExpanded(secret.id) },
                                 onEdit = { viewModel.showEditDialog(secret) },
                                 onDelete = { viewModel.showDeleteDialog(secret) },
-                                onShare = { viewModel.showShareDialog(secret) }
+                                onShare = { viewModel.showShareDialog(secret) },
+                                onCopyPassword = { viewModel.copyPasswordToClipboard(secret, clipboardManager) }
                             )
                         }
 
@@ -453,8 +451,21 @@ private fun SearchBar(
     )
 }
 
+private fun formatLoadDuration(ms: Long): String = when {
+    ms < 1000 -> "${ms}ms"
+    ms < 60_000 -> "${ms / 1000}.${(ms % 1000) / 100}s"
+    else -> "${ms / 60_000}m ${(ms % 60_000) / 1000}s"
+}
+
 @Composable
 private fun LoadingView() {
+    var elapsedSeconds by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            elapsedSeconds++
+        }
+    }
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -462,7 +473,19 @@ private fun LoadingView() {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(color = BossThemeColors.SuccessColor)
             Spacer(modifier = Modifier.height(16.dp))
-            Text("Loading secrets...", color = BossThemeColors.TextSecondary, fontSize = 12.sp)
+            Text(
+                if (elapsedSeconds < 3) "Loading secrets..." else "Loading secrets... ${elapsedSeconds}s",
+                color = BossThemeColors.TextSecondary,
+                fontSize = 12.sp
+            )
+            if (elapsedSeconds >= 10) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Still waiting on the server — the network may be slow",
+                    color = BossThemeColors.TextSecondary.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
+            }
         }
     }
 }
@@ -559,8 +582,18 @@ private fun SecretCard(
     onToggleExpand: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onCopyPassword: () -> Unit
 ) {
+    val copyScope = rememberCoroutineScope()
+    var justCopied by remember { mutableStateOf(false) }
+    val isApiKey = secret.tags.contains("api_key")
+    val metadata = secret.metadata
+    val hasDetails = secret.tags.isNotEmpty() ||
+        !secret.notes.isNullOrBlank() ||
+        secret.expirationDate != null ||
+        (metadata != null && metadata.twofaEnabled)
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
@@ -571,7 +604,7 @@ private fun SecretCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Header: Website and actions
+            // Header: Website/Service and Username with icons, actions on the right
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -581,23 +614,45 @@ private fun SecretCard(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    // Website
-                    Text(
-                        text = secret.website,
-                        color = BossThemeColors.TextPrimary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    // Username
-                    Text(
-                        text = secret.username,
-                        color = BossThemeColors.TextSecondary,
-                        fontSize = 14.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    // Website/Service with icon
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            if (isApiKey) Icons.Default.Api else Icons.Default.Language,
+                            contentDescription = if (isApiKey) "Service" else "Website",
+                            tint = if (isApiKey) BossThemeColors.WarningColor else BossThemeColors.TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = secret.website,
+                            color = BossThemeColors.TextPrimary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    // Username/Key Name with icon
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            if (isApiKey) Icons.Default.Key else Icons.Default.Person,
+                            contentDescription = if (isApiKey) "Key Name" else "Username",
+                            tint = BossThemeColors.TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = secret.username,
+                            color = BossThemeColors.TextSecondary,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
                 // Action buttons
@@ -629,23 +684,52 @@ private fun SecretCard(
                 }
             }
 
-            // Password field
+            Divider(color = BossThemeColors.BorderColor, thickness = 1.dp)
+
+            // Password field with copy and visibility toggle
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(BossThemeColors.SurfaceColor, RoundedCornerShape(4.dp))
+                    .background(BossThemeColors.BackgroundColor, RoundedCornerShape(4.dp))
                     .padding(12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (isPasswordVisible) secret.password else "••••••••",
-                    color = if (isPasswordVisible) BossThemeColors.TextPrimary else BossThemeColors.TextSecondary,
+                    text = when {
+                        justCopied -> "Copied — clipboard clears in 45s"
+                        isPasswordVisible -> secret.password
+                        else -> "••••••••"
+                    },
+                    color = when {
+                        justCopied -> BossThemeColors.SuccessColor
+                        isPasswordVisible -> BossThemeColors.TextPrimary
+                        else -> BossThemeColors.TextSecondary
+                    },
                     fontSize = 14.sp,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                IconButton(
+                    onClick = {
+                        onCopyPassword()
+                        justCopied = true
+                        copyScope.launch {
+                            delay(4000)
+                            justCopied = false
+                        }
+                    },
+                    modifier = Modifier.size(24.dp)
+                ) {
+                    Icon(
+                        if (justCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                        contentDescription = if (isApiKey) "Copy API Key" else "Copy password",
+                        tint = if (justCopied) BossThemeColors.SuccessColor else BossThemeColors.TextSecondary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
                 IconButton(onClick = onTogglePassword, modifier = Modifier.size(24.dp)) {
                     Icon(
                         if (isPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
@@ -656,43 +740,8 @@ private fun SecretCard(
                 }
             }
 
-            // Tags
-            if (secret.tags.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    secret.tags.forEach { tag ->
-                        TagBadge(tag)
-                    }
-                }
-            }
-
-            // Expiration warning
-            if (secret.expirationDate != null) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Default.DateRange,
-                        contentDescription = null,
-                        tint = BossThemeColors.WarningColor,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Text(
-                        text = "Expires: ${secret.expirationDate}",
-                        color = BossThemeColors.WarningColor,
-                        fontSize = 12.sp
-                    )
-                }
-            }
-
-            // "More" button to show metadata
-            val metadata = secret.metadata
-            if (metadata != null && metadata.twofaEnabled) {
-                Divider(color = BossThemeColors.BorderColor, thickness = 1.dp)
-
+            // Show/Hide details (tags, notes, expiration, 2FA)
+            if (hasDetails) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -701,85 +750,140 @@ private fun SecretCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Default.Security,
-                            contentDescription = null,
-                            tint = BossThemeColors.SuccessColor,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "2FA Details",
-                            color = BossThemeColors.SuccessColor,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
+                    Text(
+                        if (isExpanded) "Hide Details" else "Show Details",
+                        color = BossThemeColors.SuccessColor,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                     Icon(
                         if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         contentDescription = if (isExpanded) "Hide details" else "Show details",
-                        tint = BossThemeColors.TextSecondary,
+                        tint = BossThemeColors.SuccessColor,
                         modifier = Modifier.size(16.dp)
                     )
                 }
 
-                // Expanded metadata
                 if (isExpanded) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(BossThemeColors.SurfaceColor, RoundedCornerShape(4.dp))
+                            .background(BossThemeColors.BackgroundColor, RoundedCornerShape(4.dp))
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // 2FA Type
-                        metadata.twofaType?.let { twofaType ->
-                            MetadataRow(
-                                label = "2FA Type",
-                                value = twofaType.uppercase()
-                            )
+                        // Tags
+                        if (secret.tags.isNotEmpty()) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Label,
+                                    contentDescription = "Tags",
+                                    tint = BossThemeColors.SuccessColor,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                secret.tags.forEach { tag ->
+                                    TagBadge(tag)
+                                }
+                            }
                         }
 
-                        // Recovery codes
-                        if (metadata.recoveryCodes.isNotEmpty()) {
-                            Text(
-                                text = "Recovery Codes:",
-                                color = BossThemeColors.TextSecondary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            metadata.recoveryCodes.forEach { code ->
+                        // Notes
+                        secret.notes?.takeIf { it.isNotBlank() }?.let { notes ->
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Icon(
+                                    Icons.Default.Notes,
+                                    contentDescription = "Notes",
+                                    tint = BossThemeColors.TextSecondary,
+                                    modifier = Modifier.size(14.dp).padding(top = 2.dp)
+                                )
                                 Text(
-                                    text = "• $code",
-                                    color = BossThemeColors.TextPrimary,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.padding(start = 8.dp)
+                                    notes,
+                                    color = BossThemeColors.TextSecondary,
+                                    fontSize = 12.sp
                                 )
                             }
                         }
-                    }
-                }
-            }
 
-            // Notes
-            secret.notes?.takeIf { it.isNotBlank() }?.let { notes ->
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = "Notes:",
-                        color = BossThemeColors.TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = notes,
-                        color = BossThemeColors.TextPrimary,
-                        fontSize = 12.sp,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                        // Expiration date
+                        secret.expirationDate?.let { expirationDate ->
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Event,
+                                    contentDescription = "Expires",
+                                    tint = BossThemeColors.WarningColor,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    "Expires: $expirationDate",
+                                    color = BossThemeColors.WarningColor,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+
+                        // 2FA details
+                        if (metadata != null && metadata.twofaEnabled) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Security,
+                                    contentDescription = "2FA",
+                                    tint = BossThemeColors.SuccessColor,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    "2FA: ${metadata.twofaType?.uppercase() ?: "ENABLED"}",
+                                    color = BossThemeColors.TextPrimary,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            if (metadata.recoveryCodes.isNotEmpty()) {
+                                Text(
+                                    text = "Recovery Codes:",
+                                    color = BossThemeColors.TextSecondary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                metadata.recoveryCodes.forEach { code ->
+                                    Text(
+                                        text = "• $code",
+                                        color = BossThemeColors.TextPrimary,
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.padding(start = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Created date
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Schedule,
+                                contentDescription = "Created",
+                                tint = BossThemeColors.TextSecondary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                "Created: ${secret.createdAt}",
+                                color = BossThemeColors.TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -800,29 +904,6 @@ private fun TagBadge(tag: String) {
             color = BossThemeColors.SuccessColor,
             fontSize = 11.sp,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-        )
-    }
-}
-
-/**
- * Metadata row component
- */
-@Composable
-private fun MetadataRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(
-            text = label,
-            color = BossThemeColors.TextSecondary,
-            fontSize = 12.sp
-        )
-        Text(
-            text = value,
-            color = BossThemeColors.TextPrimary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium
         )
     }
 }
