@@ -154,7 +154,7 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                     IconButton(
                         onClick = {
                             showAddDropdown = true
-                            // Deferred from panel open; resolves whether API-key items show
+                            // Fallback trigger; normally pre-warmed after the first secrets load
                             viewModel.checkApiKeyPermission()
                         },
                         enabled = !state.isLoading
@@ -250,7 +250,7 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
             // Secret count
             Text(
                 "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}" +
-                    (state.lastLoadDurationMs?.let { " · loaded in ${formatLoadDuration(it)}" } ?: ""),
+                    (state.lastLoadDurationMs?.let { " · last fetch ${formatLoadDuration(it)}" } ?: ""),
                 color = BossThemeColors.TextSecondary,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(bottom = 8.dp)

@@ -82,7 +82,7 @@ class SecretManagerViewModel(
      * diagnosable from the host console (search for "SecretManager").
      */
     private fun logTiming(operation: String, elapsedMs: Long, outcome: String, failed: Boolean = false) {
-        val message = "$operation: $outcome in $elapsedMs ms"
+        val message = "$operation: ${if (failed) "FAILED ($outcome)" else outcome} in $elapsedMs ms"
         if (failed) {
             logger.warn(LogCategory.NETWORK, message)
         } else {
@@ -125,9 +125,12 @@ class SecretManagerViewModel(
                     hasMore = paginatedResult.hasMore,
                     lastLoadDurationMs = elapsedMs
                 )
+                // Pre-warm the API-key permission check off the critical open
+                // path so the Add menu is populated by the time it's opened
+                checkApiKeyPermission()
             }?.onFailure { exception ->
                 val error = exception.message ?: "Unknown error"
-                logTiming("getUserSecrets", elapsedMs, "FAILED: $error", failed = true)
+                logTiming("getUserSecrets", elapsedMs, error, failed = true)
                 state = state.copy(
                     isLoading = false,
                     errorMessage = error
@@ -346,19 +349,24 @@ class SecretManagerViewModel(
         }
     }
 
+    // Generation token: bumped per copy so only the latest copy's timer may clear
+    private var clipboardCopyGeneration = 0L
+
     /**
      * Copy a secret's password/API key to the clipboard, then best-effort
      * clear it after a delay. Runs in the ViewModel scope so the pending
      * clear survives the card scrolling out of composition. The clear only
-     * fires if the clipboard still holds this exact value, so anything the
-     * user copied afterwards is never clobbered.
+     * fires from the most recent copy's timer, and only if the clipboard
+     * still holds that value — so re-copies get their full window and
+     * anything the user copied afterwards is never clobbered.
      */
     fun copyPasswordToClipboard(secret: SecretEntryData, clipboard: ClipboardManager) {
         val copied = secret.password
+        val generation = ++clipboardCopyGeneration
         clipboard.setText(AnnotatedString(copied))
         scope.launch {
             delay(CLIPBOARD_CLEAR_DELAY_MS)
-            if (clipboard.getText()?.text == copied) {
+            if (generation == clipboardCopyGeneration && clipboard.getText()?.text == copied) {
                 clipboard.setText(AnnotatedString(""))
             }
         }
@@ -527,19 +535,21 @@ class SecretManagerViewModel(
     /**
      * Check if the current user can manage API keys.
      *
-     * Called lazily when the Add dropdown opens (not on panel open) so the
-     * panel's initial load stays a single network round-trip. Runs at most once.
+     * Kept off the panel's critical open path: pre-warmed after the first
+     * successful secrets load, with the Add dropdown's open as a fallback
+     * trigger. Runs at most once; a failed check allows a retry.
      */
     fun checkApiKeyPermission() {
         if (apiKeyPermissionChecked) return
+        apiKeyPermissionChecked = true // also dedupes concurrent triggers
         scope.launch {
             val canManage = try {
                 pluginStoreApiKeyProvider?.canManageApiKeys() ?: false
             } catch (e: Exception) {
                 logger.warn(LogCategory.NETWORK, "canManageApiKeys FAILED: ${e.message}")
-                return@launch // guard stays unset so the next dropdown open retries
+                apiKeyPermissionChecked = false // allow the next trigger to retry
+                return@launch
             }
-            apiKeyPermissionChecked = true
             state = state.copy(canManageApiKeys = canManage)
         }
     }
