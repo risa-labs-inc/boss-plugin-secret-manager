@@ -173,9 +173,11 @@ class SecretManagerViewModel(
                 )
             }?.onFailure { exception ->
                 if (exception is CancellationException) return@onFailure
+                val error = exception.message ?: "Unknown error"
+                logTiming("getUserSecrets(offset=${state.currentOffset})", elapsedMs, error, failed = true)
                 state = state.copy(
                     isLoadingMore = false,
-                    errorMessage = exception.message ?: "Unknown error"
+                    errorMessage = error
                 )
             }
         }
@@ -222,10 +224,12 @@ class SecretManagerViewModel(
                 )
             }?.onFailure { exception ->
                 if (exception is CancellationException) return@onFailure
+                val error = exception.message ?: "Unknown error"
+                logTiming("searchSecrets", elapsedMs, error, failed = true)
                 state = state.copy(
                     isLoading = false,
                     isLoadingMore = false,
-                    errorMessage = exception.message ?: "Unknown error"
+                    errorMessage = error
                 )
             }
         }
@@ -359,6 +363,11 @@ class SecretManagerViewModel(
      * fires from the most recent copy's timer, and only if the clipboard
      * still holds that value — so re-copies get their full window and
      * anything the user copied afterwards is never clobbered.
+     *
+     * Known limits of the mitigation: if the panel scope is cancelled
+     * (panel closed, app quit) before the delay elapses, the clear never
+     * runs; and OS clipboard-history managers may retain the value
+     * regardless. Copying to the system clipboard is inherently exposed.
      */
     fun copyPasswordToClipboard(secret: SecretEntryData, clipboard: ClipboardManager) {
         val copied = secret.password
@@ -405,9 +414,11 @@ class SecretManagerViewModel(
                 logTiming("getSecretShares", elapsedMsSince(startedAt), "${shares.size} shares")
                 state = state.copy(secretShares = shares, isLoadingShares = false)
             }?.onFailure { exception ->
+                val error = exception.message ?: "Unknown error"
+                logTiming("getSecretShares", elapsedMsSince(startedAt), error, failed = true)
                 state = state.copy(
                     isLoadingShares = false,
-                    errorMessage = exception.message ?: "Unknown error"
+                    errorMessage = error
                 )
             }
         }
@@ -473,9 +484,11 @@ class SecretManagerViewModel(
                 usersListFiltered = false
                 state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
+                val error = exception.message ?: "Unknown error"
+                logTiming("select(users_with_roles)", elapsedMsSince(startedAt), error, failed = true)
                 state = state.copy(
                     isLoadingUsers = false,
-                    errorMessage = exception.message ?: "Unknown error"
+                    errorMessage = error
                 )
             }
         }
@@ -496,12 +509,15 @@ class SecretManagerViewModel(
             result?.onSuccess { jsonStr ->
                 val users = json.decodeFromString<List<ShareUserRow>>(jsonStr)
                 logTiming("select(users_with_roles, search)", elapsedMsSince(startedAt), "${users.size} users")
+                usersLoaded = true
                 usersListFiltered = query.isNotBlank()
                 state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
+                val error = exception.message ?: "Unknown error"
+                logTiming("select(users_with_roles, search)", elapsedMsSince(startedAt), error, failed = true)
                 state = state.copy(
                     isLoadingUsers = false,
-                    errorMessage = exception.message ?: "Unknown error"
+                    errorMessage = error
                 )
             }
         }
@@ -520,9 +536,11 @@ class SecretManagerViewModel(
                 rolesLoaded = true
                 state = state.copy(availableRoles = roles, isLoadingRoles = false)
             }?.onFailure { exception ->
+                val error = exception.message ?: "Unknown error"
+                logTiming("select(roles)", elapsedMsSince(startedAt), error, failed = true)
                 state = state.copy(
                     isLoadingRoles = false,
-                    errorMessage = exception.message ?: "Unknown error"
+                    errorMessage = error
                 )
             }
         }

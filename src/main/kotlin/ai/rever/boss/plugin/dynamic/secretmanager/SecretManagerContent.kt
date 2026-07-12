@@ -716,7 +716,7 @@ private fun SecretCard(
                         onCopyPassword()
                         justCopied = true
                         copyScope.launch {
-                            delay(2500)
+                            delay(4000)
                             justCopied = false
                         }
                     },
