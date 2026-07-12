@@ -24,7 +24,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -113,6 +112,7 @@ private fun NoProviderMessage() {
 private fun SecretManagerView(viewModel: SecretManagerViewModel) {
     val state = viewModel.state
     val listState = rememberLazyListState()
+    val clipboardManager = LocalClipboardManager.current
     var showAddDropdown by remember { mutableStateOf(false) }
 
     Box(
@@ -295,7 +295,8 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                                 onToggleExpand = { viewModel.toggleMetadataExpanded(secret.id) },
                                 onEdit = { viewModel.showEditDialog(secret) },
                                 onDelete = { viewModel.showDeleteDialog(secret) },
-                                onShare = { viewModel.showShareDialog(secret) }
+                                onShare = { viewModel.showShareDialog(secret) },
+                                onCopyPassword = { viewModel.copyPasswordToClipboard(secret, clipboardManager) }
                             )
                         }
 
@@ -589,9 +590,9 @@ private fun SecretCard(
     onToggleExpand: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onCopyPassword: () -> Unit
 ) {
-    val clipboardManager = LocalClipboardManager.current
     val copyScope = rememberCoroutineScope()
     var justCopied by remember { mutableStateOf(false) }
     val isApiKey = secret.tags.contains("api_key")
@@ -712,18 +713,11 @@ private fun SecretCard(
                 )
                 IconButton(
                     onClick = {
-                        val copied = secret.password
-                        clipboardManager.setText(AnnotatedString(copied))
+                        onCopyPassword()
                         justCopied = true
                         copyScope.launch {
                             delay(1500)
                             justCopied = false
-                            // Best-effort clipboard hygiene: clear after 30s total,
-                            // but only if the clipboard still holds this secret
-                            delay(28_500)
-                            if (clipboardManager.getText()?.text == copied) {
-                                clipboardManager.setText(AnnotatedString(""))
-                            }
                         }
                     },
                     modifier = Modifier.size(24.dp)

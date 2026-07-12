@@ -6,14 +6,21 @@ import ai.rever.boss.plugin.logging.LogCategory
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.ClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 private val json = Json { ignoreUnknownKeys = true }
+
+// Long enough to paste into an external tool, short enough that a copied
+// secret doesn't linger on the system clipboard indefinitely
+private const val CLIPBOARD_CLEAR_DELAY_MS = 45_000L
 
 @Serializable
 data class ShareUserRow(val id: String, val email: String)
@@ -42,6 +49,8 @@ class SecretManagerViewModel(
     // Lazy-load guards for share-dialog data and the API-key permission check
     private var usersLoaded = false
     private var rolesLoaded = false
+    // True while availableUsers holds a search-filtered subset rather than the full list
+    private var usersListFiltered = false
     private var apiKeyPermissionChecked = false
 
     // State
@@ -62,11 +71,18 @@ class SecretManagerViewModel(
     }
 
     /**
+     * Elapsed milliseconds since a System.nanoTime() mark — monotonic, so
+     * durations are immune to wall-clock (NTP) jumps.
+     */
+    private fun elapsedMsSince(startedAtNanos: Long): Long =
+        (System.nanoTime() - startedAtNanos) / 1_000_000
+
+    /**
      * Log elapsed time for a data operation so intermittent slow loads are
      * diagnosable from the host console (search for "SecretManager").
      */
-    private fun logTiming(operation: String, startedAtMs: Long, outcome: String, failed: Boolean = false) {
-        val message = "$operation: $outcome in ${System.currentTimeMillis() - startedAtMs} ms"
+    private fun logTiming(operation: String, elapsedMs: Long, outcome: String, failed: Boolean = false) {
+        val message = "$operation: $outcome in $elapsedMs ms"
         if (failed) {
             logger.warn(LogCategory.NETWORK, message)
         } else {
@@ -90,26 +106,28 @@ class SecretManagerViewModel(
             errorMessage = null,
             searchQuery = "",
             currentOffset = 0,
-            hasMore = true
+            hasMore = true,
+            lastLoadDurationMs = null
         )
 
         scope.launch {
-            val startedAt = System.currentTimeMillis()
+            val startedAt = System.nanoTime()
             val result = secretDataProvider?.getUserSecrets(limit = state.pageSize, offset = 0)
+            val elapsedMs = elapsedMsSince(startedAt)
 
             result?.onSuccess { paginatedResult ->
                 val secrets = paginatedResult.data
-                logTiming("getUserSecrets", startedAt, "${secrets.size} secrets")
+                logTiming("getUserSecrets", elapsedMs, "${secrets.size} secrets")
                 state = state.copy(
                     secrets = secrets,
                     isLoading = false,
                     currentOffset = secrets.size,
                     hasMore = paginatedResult.hasMore,
-                    lastLoadDurationMs = System.currentTimeMillis() - startedAt
+                    lastLoadDurationMs = elapsedMs
                 )
             }?.onFailure { exception ->
                 val error = exception.message ?: "Unknown error"
-                logTiming("getUserSecrets", startedAt, "FAILED: $error", failed = true)
+                logTiming("getUserSecrets", elapsedMs, "FAILED: $error", failed = true)
                 state = state.copy(
                     isLoading = false,
                     errorMessage = error
@@ -133,21 +151,22 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingMore = true)
 
         loadJob = scope.launch {
-            val startedAt = System.currentTimeMillis()
+            val startedAt = System.nanoTime()
             val result = secretDataProvider?.getUserSecrets(
                 limit = state.pageSize,
                 offset = state.currentOffset
             )
+            val elapsedMs = elapsedMsSince(startedAt)
 
             result?.onSuccess { paginatedResult ->
                 val newSecrets = paginatedResult.data
-                logTiming("getUserSecrets(offset=${state.currentOffset})", startedAt, "${newSecrets.size} secrets")
+                logTiming("getUserSecrets(offset=${state.currentOffset})", elapsedMs, "${newSecrets.size} secrets")
                 state = state.copy(
                     secrets = state.secrets + newSecrets,
                     isLoadingMore = false,
                     currentOffset = state.currentOffset + newSecrets.size,
                     hasMore = paginatedResult.hasMore,
-                    lastLoadDurationMs = System.currentTimeMillis() - startedAt
+                    lastLoadDurationMs = elapsedMs
                 )
             }?.onFailure { exception ->
                 if (exception is CancellationException) return@onFailure
@@ -173,7 +192,8 @@ class SecretManagerViewModel(
             isLoadingMore = false,
             errorMessage = null,
             currentOffset = 0,
-            hasMore = false
+            hasMore = false,
+            lastLoadDurationMs = null
         )
 
         if (query.isBlank()) {
@@ -183,18 +203,19 @@ class SecretManagerViewModel(
         }
 
         searchJob = scope.launch {
-            val startedAt = System.currentTimeMillis()
+            val startedAt = System.nanoTime()
             val result = secretDataProvider?.searchSecrets(query = query, limit = 100, offset = 0)
+            val elapsedMs = elapsedMsSince(startedAt)
 
             result?.onSuccess { paginatedResult ->
-                logTiming("searchSecrets", startedAt, "${paginatedResult.data.size} secrets")
+                logTiming("searchSecrets", elapsedMs, "${paginatedResult.data.size} secrets")
                 state = state.copy(
                     secrets = paginatedResult.data,
                     isLoading = false,
                     isLoadingMore = false,
                     currentOffset = 0,
                     hasMore = false,
-                    lastLoadDurationMs = System.currentTimeMillis() - startedAt
+                    lastLoadDurationMs = elapsedMs
                 )
             }?.onFailure { exception ->
                 if (exception is CancellationException) return@onFailure
@@ -240,8 +261,9 @@ class SecretManagerViewModel(
         )
         loadSecretShares(secret.id)
         // Share targets are fetched lazily on first dialog open (see initialize);
-        // the loaded flags avoid re-fetching a legitimately empty list
-        if (!usersLoaded && !state.isLoadingUsers) {
+        // the loaded flags avoid re-fetching a legitimately empty list. A reload
+        // is also needed when a previous search left a filtered subset behind.
+        if ((!usersLoaded || usersListFiltered) && !state.isLoadingUsers) {
             loadAvailableUsers()
         }
         if (!rolesLoaded && !state.isLoadingRoles) {
@@ -324,6 +346,24 @@ class SecretManagerViewModel(
         }
     }
 
+    /**
+     * Copy a secret's password/API key to the clipboard, then best-effort
+     * clear it after a delay. Runs in the ViewModel scope so the pending
+     * clear survives the card scrolling out of composition. The clear only
+     * fires if the clipboard still holds this exact value, so anything the
+     * user copied afterwards is never clobbered.
+     */
+    fun copyPasswordToClipboard(secret: SecretEntryData, clipboard: ClipboardManager) {
+        val copied = secret.password
+        clipboard.setText(AnnotatedString(copied))
+        scope.launch {
+            delay(CLIPBOARD_CLEAR_DELAY_MS)
+            if (clipboard.getText()?.text == copied) {
+                clipboard.setText(AnnotatedString(""))
+            }
+        }
+    }
+
     fun togglePasswordVisibility(secretId: String) {
         val current = state.visiblePasswordIds
         state = if (current.contains(secretId)) {
@@ -350,11 +390,11 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingShares = true)
 
         scope.launch {
-            val startedAt = System.currentTimeMillis()
+            val startedAt = System.nanoTime()
             val result = secretDataProvider?.getSecretShares(secretId)
 
             result?.onSuccess { shares ->
-                logTiming("getSecretShares", startedAt, "${shares.size} shares")
+                logTiming("getSecretShares", elapsedMsSince(startedAt), "${shares.size} shares")
                 state = state.copy(secretShares = shares, isLoadingShares = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -411,7 +451,7 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingUsers = true)
 
         scope.launch {
-            val startedAt = System.currentTimeMillis()
+            val startedAt = System.nanoTime()
             val result = supabaseDataProvider?.select(
                 table = "users_with_roles",
                 columns = "id,email",
@@ -420,8 +460,9 @@ class SecretManagerViewModel(
 
             result?.onSuccess { jsonStr ->
                 val users = json.decodeFromString<List<ShareUserRow>>(jsonStr)
-                logTiming("select(users_with_roles)", startedAt, "${users.size} users")
+                logTiming("select(users_with_roles)", elapsedMsSince(startedAt), "${users.size} users")
                 usersLoaded = true
+                usersListFiltered = false
                 state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -436,7 +477,7 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingUsers = true)
 
         scope.launch {
-            val startedAt = System.currentTimeMillis()
+            val startedAt = System.nanoTime()
             val result = supabaseDataProvider?.select(
                 table = "users_with_roles",
                 columns = "id,email",
@@ -446,7 +487,8 @@ class SecretManagerViewModel(
 
             result?.onSuccess { jsonStr ->
                 val users = json.decodeFromString<List<ShareUserRow>>(jsonStr)
-                logTiming("select(users_with_roles, search)", startedAt, "${users.size} users")
+                logTiming("select(users_with_roles, search)", elapsedMsSince(startedAt), "${users.size} users")
+                usersListFiltered = query.isNotBlank()
                 state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -461,12 +503,12 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingRoles = true)
 
         scope.launch {
-            val startedAt = System.currentTimeMillis()
+            val startedAt = System.nanoTime()
             val result = supabaseDataProvider?.select(table = "roles", columns = "id,name,description")
 
             result?.onSuccess { jsonStr ->
                 val roles = json.decodeFromString<List<ShareRoleRow>>(jsonStr)
-                logTiming("select(roles)", startedAt, "${roles.size} roles")
+                logTiming("select(roles)", elapsedMsSince(startedAt), "${roles.size} roles")
                 rolesLoaded = true
                 state = state.copy(availableRoles = roles, isLoadingRoles = false)
             }?.onFailure { exception ->
@@ -490,9 +532,14 @@ class SecretManagerViewModel(
      */
     fun checkApiKeyPermission() {
         if (apiKeyPermissionChecked) return
-        apiKeyPermissionChecked = true
         scope.launch {
-            val canManage = pluginStoreApiKeyProvider?.canManageApiKeys() ?: false
+            val canManage = try {
+                pluginStoreApiKeyProvider?.canManageApiKeys() ?: false
+            } catch (e: Exception) {
+                logger.warn(LogCategory.NETWORK, "canManageApiKeys FAILED: ${e.message}")
+                return@launch // guard stays unset so the next dropdown open retries
+            }
+            apiKeyPermissionChecked = true
             state = state.copy(canManageApiKeys = canManage)
         }
     }
