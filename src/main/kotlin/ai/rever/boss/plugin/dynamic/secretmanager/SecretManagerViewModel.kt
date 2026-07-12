@@ -545,6 +545,9 @@ class SecretManagerViewModel(
         scope.launch {
             val canManage = try {
                 pluginStoreApiKeyProvider?.canManageApiKeys() ?: false
+            } catch (e: CancellationException) {
+                apiKeyPermissionChecked = false
+                throw e
             } catch (e: Exception) {
                 logger.warn(LogCategory.NETWORK, "canManageApiKeys FAILED: ${e.message}")
                 apiKeyPermissionChecked = false // allow the next trigger to retry

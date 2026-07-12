@@ -707,8 +707,16 @@ private fun SecretCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (isPasswordVisible) secret.password else "••••••••",
-                    color = if (isPasswordVisible) BossThemeColors.TextPrimary else BossThemeColors.TextSecondary,
+                    text = when {
+                        justCopied -> "Copied — clipboard clears in 45s"
+                        isPasswordVisible -> secret.password
+                        else -> "••••••••"
+                    },
+                    color = when {
+                        justCopied -> BossThemeColors.SuccessColor
+                        isPasswordVisible -> BossThemeColors.TextPrimary
+                        else -> BossThemeColors.TextSecondary
+                    },
                     fontSize = 14.sp,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
@@ -719,7 +727,7 @@ private fun SecretCard(
                         onCopyPassword()
                         justCopied = true
                         copyScope.launch {
-                            delay(1500)
+                            delay(2500)
                             justCopied = false
                         }
                     },
