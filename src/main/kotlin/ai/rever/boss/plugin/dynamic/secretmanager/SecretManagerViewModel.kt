@@ -1,6 +1,8 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.*
+import ai.rever.boss.plugin.logging.BossLogger
+import ai.rever.boss.plugin.logging.LogCategory
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -31,9 +33,16 @@ class SecretManagerViewModel(
     private val pluginStoreApiKeyProvider: PluginStoreApiKeyProvider?,
     private val scope: CoroutineScope
 ) {
+    private val logger = BossLogger.forComponent("SecretManager")
+
     // Job tracking to prevent race conditions
     private var loadJob: Job? = null
     private var searchJob: Job? = null
+
+    // Lazy-load guards for share-dialog data and the API-key permission check
+    private var usersLoaded = false
+    private var rolesLoaded = false
+    private var apiKeyPermissionChecked = false
 
     // State
     var state by mutableStateOf(SecretManagerState())
@@ -56,8 +65,13 @@ class SecretManagerViewModel(
      * Log elapsed time for a data operation so intermittent slow loads are
      * diagnosable from the host console (search for "SecretManager").
      */
-    private fun logTiming(operation: String, startedAtMs: Long, outcome: String) {
-        println("[SecretManager] $operation: $outcome in ${System.currentTimeMillis() - startedAtMs} ms")
+    private fun logTiming(operation: String, startedAtMs: Long, outcome: String, failed: Boolean = false) {
+        val message = "$operation: $outcome in ${System.currentTimeMillis() - startedAtMs} ms"
+        if (failed) {
+            logger.warn(LogCategory.NETWORK, message)
+        } else {
+            logger.info(LogCategory.NETWORK, message)
+        }
     }
 
     /**
@@ -95,7 +109,7 @@ class SecretManagerViewModel(
                 )
             }?.onFailure { exception ->
                 val error = exception.message ?: "Unknown error"
-                logTiming("getUserSecrets", startedAt, "FAILED: $error")
+                logTiming("getUserSecrets", startedAt, "FAILED: $error", failed = true)
                 state = state.copy(
                     isLoading = false,
                     errorMessage = error
@@ -132,7 +146,8 @@ class SecretManagerViewModel(
                     secrets = state.secrets + newSecrets,
                     isLoadingMore = false,
                     currentOffset = state.currentOffset + newSecrets.size,
-                    hasMore = paginatedResult.hasMore
+                    hasMore = paginatedResult.hasMore,
+                    lastLoadDurationMs = System.currentTimeMillis() - startedAt
                 )
             }?.onFailure { exception ->
                 if (exception is CancellationException) return@onFailure
@@ -178,7 +193,8 @@ class SecretManagerViewModel(
                     isLoading = false,
                     isLoadingMore = false,
                     currentOffset = 0,
-                    hasMore = false
+                    hasMore = false,
+                    lastLoadDurationMs = System.currentTimeMillis() - startedAt
                 )
             }?.onFailure { exception ->
                 if (exception is CancellationException) return@onFailure
@@ -223,11 +239,12 @@ class SecretManagerViewModel(
             isLoadingShares = false
         )
         loadSecretShares(secret.id)
-        // Share targets are fetched lazily on first dialog open (see initialize)
-        if (state.availableUsers.isEmpty() && !state.isLoadingUsers) {
+        // Share targets are fetched lazily on first dialog open (see initialize);
+        // the loaded flags avoid re-fetching a legitimately empty list
+        if (!usersLoaded && !state.isLoadingUsers) {
             loadAvailableUsers()
         }
-        if (state.availableRoles.isEmpty() && !state.isLoadingRoles) {
+        if (!rolesLoaded && !state.isLoadingRoles) {
             loadAvailableRoles()
         }
     }
@@ -404,6 +421,7 @@ class SecretManagerViewModel(
             result?.onSuccess { jsonStr ->
                 val users = json.decodeFromString<List<ShareUserRow>>(jsonStr)
                 logTiming("select(users_with_roles)", startedAt, "${users.size} users")
+                usersLoaded = true
                 state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -418,6 +436,7 @@ class SecretManagerViewModel(
         state = state.copy(isLoadingUsers = true)
 
         scope.launch {
+            val startedAt = System.currentTimeMillis()
             val result = supabaseDataProvider?.select(
                 table = "users_with_roles",
                 columns = "id,email",
@@ -427,6 +446,7 @@ class SecretManagerViewModel(
 
             result?.onSuccess { jsonStr ->
                 val users = json.decodeFromString<List<ShareUserRow>>(jsonStr)
+                logTiming("select(users_with_roles, search)", startedAt, "${users.size} users")
                 state = state.copy(availableUsers = users, isLoadingUsers = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -447,6 +467,7 @@ class SecretManagerViewModel(
             result?.onSuccess { jsonStr ->
                 val roles = json.decodeFromString<List<ShareRoleRow>>(jsonStr)
                 logTiming("select(roles)", startedAt, "${roles.size} roles")
+                rolesLoaded = true
                 state = state.copy(availableRoles = roles, isLoadingRoles = false)
             }?.onFailure { exception ->
                 state = state.copy(
@@ -463,8 +484,13 @@ class SecretManagerViewModel(
 
     /**
      * Check if the current user can manage API keys.
+     *
+     * Called lazily when the Add dropdown opens (not on panel open) so the
+     * panel's initial load stays a single network round-trip. Runs at most once.
      */
     fun checkApiKeyPermission() {
+        if (apiKeyPermissionChecked) return
+        apiKeyPermissionChecked = true
         scope.launch {
             val canManage = pluginStoreApiKeyProvider?.canManageApiKeys() ?: false
             state = state.copy(canManageApiKeys = canManage)

@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Secret Manager panel content (Dynamic Plugin).
@@ -63,7 +64,6 @@ fun SecretManagerContent(
 
     LaunchedEffect(Unit) {
         viewModel.initialize()
-        viewModel.checkApiKeyPermission()
     }
 }
 
@@ -152,7 +152,11 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                 // Add button with dropdown menu
                 Box {
                     IconButton(
-                        onClick = { showAddDropdown = true },
+                        onClick = {
+                            showAddDropdown = true
+                            // Deferred from panel open; resolves whether API-key items show
+                            viewModel.checkApiKeyPermission()
+                        },
                         enabled = !state.isLoading
                     ) {
                         Icon(
@@ -458,7 +462,7 @@ private fun SearchBar(
 }
 
 private fun formatLoadDuration(ms: Long): String =
-    if (ms < 1000) "${ms}ms" else "%.1fs".format(ms / 1000.0)
+    if (ms < 1000) "${ms}ms" else "${ms / 1000}.${(ms % 1000) / 100}s"
 
 @Composable
 private fun LoadingView() {
@@ -588,6 +592,8 @@ private fun SecretCard(
     onShare: () -> Unit
 ) {
     val clipboardManager = LocalClipboardManager.current
+    val copyScope = rememberCoroutineScope()
+    var justCopied by remember { mutableStateOf(false) }
     val isApiKey = secret.tags.contains("api_key")
     val metadata = secret.metadata
     val hasDetails = secret.tags.isNotEmpty() ||
@@ -705,13 +711,27 @@ private fun SecretCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 IconButton(
-                    onClick = { clipboardManager.setText(AnnotatedString(secret.password)) },
+                    onClick = {
+                        val copied = secret.password
+                        clipboardManager.setText(AnnotatedString(copied))
+                        justCopied = true
+                        copyScope.launch {
+                            delay(1500)
+                            justCopied = false
+                            // Best-effort clipboard hygiene: clear after 30s total,
+                            // but only if the clipboard still holds this secret
+                            delay(28_500)
+                            if (clipboardManager.getText()?.text == copied) {
+                                clipboardManager.setText(AnnotatedString(""))
+                            }
+                        }
+                    },
                     modifier = Modifier.size(24.dp)
                 ) {
                     Icon(
-                        Icons.Default.ContentCopy,
+                        if (justCopied) Icons.Default.Check else Icons.Default.ContentCopy,
                         contentDescription = if (isApiKey) "Copy API Key" else "Copy password",
-                        tint = BossThemeColors.TextSecondary,
+                        tint = if (justCopied) BossThemeColors.SuccessColor else BossThemeColors.TextSecondary,
                         modifier = Modifier.size(16.dp)
                     )
                 }
