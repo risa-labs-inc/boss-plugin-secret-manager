@@ -31,7 +31,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -41,28 +40,18 @@ import kotlinx.coroutines.launch
  * Displays and manages user secrets with CRUD and sharing operations.
  * Also supports Plugin Store API key management for admin/plugin_admin users.
  * UI matches the bundled plugin's Card-based design.
+ *
+ * The ViewModel is owned by [SecretManagerComponent] so state survives the
+ * panel leaving and re-entering composition.
  */
 @Composable
-fun SecretManagerContent(
-    secretDataProvider: SecretDataProvider?,
-    supabaseDataProvider: SupabaseDataProvider?,
-    pluginStoreApiKeyProvider: PluginStoreApiKeyProvider?,
-    scope: CoroutineScope
-) {
-    val viewModel = remember(secretDataProvider, supabaseDataProvider, pluginStoreApiKeyProvider, scope) {
-        SecretManagerViewModel(secretDataProvider, supabaseDataProvider, pluginStoreApiKeyProvider, scope)
-    }
-
+fun SecretManagerContent(viewModel: SecretManagerViewModel) {
     BossTheme {
         if (!viewModel.isAvailable()) {
             NoProviderMessage()
         } else {
             SecretManagerView(viewModel)
         }
-    }
-
-    LaunchedEffect(Unit) {
-        viewModel.initialize()
     }
 }
 

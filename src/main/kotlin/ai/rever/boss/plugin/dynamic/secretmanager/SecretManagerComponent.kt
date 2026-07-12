@@ -24,13 +24,19 @@ class SecretManagerComponent(
     private val scope: CoroutineScope
 ) : PanelComponentWithUI, ComponentContext by ctx {
 
+    // Created once per panel instance (not per composition), so secrets stay
+    // cached across panel switches — reopening renders instantly instead of
+    // refetching. Same pattern as the Role Creation plugin; the Refresh
+    // button refetches on demand.
+    private val viewModel = SecretManagerViewModel(
+        secretDataProvider,
+        supabaseDataProvider,
+        pluginStoreApiKeyProvider,
+        scope
+    ).also { it.initialize() }
+
     @Composable
     override fun Content() {
-        SecretManagerContent(
-            secretDataProvider = secretDataProvider,
-            supabaseDataProvider = supabaseDataProvider,
-            pluginStoreApiKeyProvider = pluginStoreApiKeyProvider,
-            scope = scope
-        )
+        SecretManagerContent(viewModel)
     }
 }
