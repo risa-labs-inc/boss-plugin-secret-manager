@@ -51,6 +51,58 @@ build.gradle.kts   → Build config + version (single source of truth)
 
 The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` — only change it in `build.gradle.kts`.
 
+## AI Providers (`ai/` package)
+
+This plugin owns **all** AI provider configuration. The host has none: its
+`Settings → AI Providers` section renders `LlmProviderSettingsPanel` through
+`LlmProviderSettingsAPI`, and `PluginContext.llmProvider` is relayed from the same
+registered instance. Provider registry, credentials, environment-variable resolution
+and the model catalogue all live here.
+
+**Model lists are always fetched live** from each provider's own models endpoint
+(`ModelCatalogClient`), cached with a timestamp and a 6-hour TTL. There is
+deliberately no bundled fallback list: the host implementation this replaced shipped
+hardcoded models that drifted years out of date, and a provider with no credential
+now reports "not configured" instead of guessing.
+
+### Do not add OAuth without re-checking the docs
+
+Sign-in is intentionally absent. As of July 2026:
+
+- **Anthropic** prohibits third-party OAuth outright (policy 2026-02-20, billing
+  enforcement 2026-04-04). Subscription tokens are Claude Code / claude.ai only.
+  Wiring their OAuth client here would breach their terms.
+- **OpenAI**'s "Sign in with ChatGPT" ships only inside Codex tooling; there is no
+  third-party program.
+- **xAI** and **Moonshot (Kimi)** publish Bearer-API-key auth only in their REST
+  references. Their OAuth/device-code flows belong to their own coding CLIs — the
+  same category as Anthropic's, and not a documented third-party surface.
+- **Google** does have a documented installed-app OAuth flow, but it runs through
+  **Vertex AI** — a different base URL needing a GCP project, region and ADC, not the
+  `generativelanguage` key path used here. That is tracked as separate work.
+- **Together** has no OAuth.
+
+Providers instead get an assisted flow: a "Get API key" button opening
+`ProviderDescriptor.consoleUrl` in a BOSS tab.
+
+### Linkage containment
+
+`LlmProviderSettingsApiImpl` is the **only** file referencing api symbols added in
+1.0.70 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE`). Everything else
+uses the plugin-local `WireFormat` enum. That is why `registerAiProviderSettings`
+can wrap registration in a `LinkageError` guard and why `plugin.json` keeps its lower
+`apiVersion`: on an older host the AI panel is simply not served, and secret
+management still works. Adding a new-api reference outside that file would take the
+whole plugin down on such a host.
+
+### Out-of-process caveat
+
+`plugin.json` declares `isolationMode: out-of-process`, which only engages under
+`BOSS_MODE=KERNEL`. In-process (the default) the `@Composable` panel renders
+directly. Under KERNEL mode the API crosses a process boundary and the panel is not
+expected to render — the host falls back to its "plugin isn't loaded yet" notice
+rather than failing.
+
 ## Code Quality
 
 - Use Compose Multiplatform APIs (not Android-specific)

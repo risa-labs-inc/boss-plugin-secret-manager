@@ -33,6 +33,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.BorderStroke
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
 
 /**
  * Secret Manager panel content (Dynamic Plugin).
@@ -181,6 +185,34 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                             }
                         }
 
+                        // Add an AI provider API key. Written through
+                        // ProviderCredentialStore so Settings → AI Providers recognises it.
+                        if (state.canAddAiProviderKey) {
+                            DropdownMenuItem(
+                                onClick = {
+                                    showAddDropdown = false
+                                    viewModel.showAiProviderKeyDialog()
+                                }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = BossThemeColors.AccentColor,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        "Add AI Provider Key",
+                                        color = BossThemeColors.TextPrimary,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        }
+
                         // Create API Key option (visible for admin/plugin_admin)
                         if (state.canManageApiKeys) {
                             Divider(color = BossThemeColors.BorderColor)
@@ -285,7 +317,10 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                                 onEdit = { viewModel.showEditDialog(secret) },
                                 onDelete = { viewModel.showDeleteDialog(secret) },
                                 onShare = { viewModel.showShareDialog(secret) },
-                                onCopyPassword = { viewModel.copyPasswordToClipboard(secret, clipboardManager) }
+                                onCopyPassword = { viewModel.copyPasswordToClipboard(secret, clipboardManager) },
+                                isAiProvider = viewModel.isAiProviderSecret(secret),
+                                aiProviderLabel = viewModel.aiProviderDisplayName(secret),
+                                onOpenAiProviderSettings = { viewModel.openAiProviderSettings() }
                             )
                         }
 
@@ -325,6 +360,21 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
             onConfirm = { viewModel.createSecret(it) },
             onDismiss = { viewModel.hideCreateDialog() },
             isLoading = state.isOperationInProgress
+        )
+    }
+
+    if (state.showAiProviderKeyDialog) {
+        AiProviderKeyDialog(
+            selectedProviderId = state.aiProviderKeyProviderId,
+            sources = state.aiProviderSources,
+            keyDraft = state.aiProviderKeyDraft,
+            isLoading = state.isOperationInProgress,
+            errorMessage = state.errorMessage,
+            onProviderChange = { viewModel.setAiProviderKeyProvider(it) },
+            onKeyChange = { viewModel.setAiProviderKeyDraft(it) },
+            onOpenConsole = { viewModel.openAiProviderConsole() },
+            onConfirm = { viewModel.saveAiProviderKey() },
+            onDismiss = { viewModel.hideAiProviderKeyDialog() }
         )
     }
 
@@ -583,7 +633,10 @@ private fun SecretCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onShare: () -> Unit,
-    onCopyPassword: () -> Unit
+    onCopyPassword: () -> Unit,
+    isAiProvider: Boolean = false,
+    aiProviderLabel: String = "",
+    onOpenAiProviderSettings: () -> Unit = {}
 ) {
     val copyScope = rememberCoroutineScope()
     var justCopied by remember { mutableStateOf(false) }
@@ -604,6 +657,40 @@ private fun SecretCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // AI provider entries are configuration, not a password: the useful action is
+            // to open the settings section where the key can be tested and a model picked.
+            if (isAiProvider) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(BossThemeColors.AccentColor.copy(alpha = 0.12f))
+                        .clickable(onClick = onOpenAiProviderSettings)
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = BossThemeColors.AccentColor,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "AI provider${if (aiProviderLabel.isNotBlank()) " · $aiProviderLabel" else ""}",
+                        color = BossThemeColors.TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = "Open settings →",
+                        color = BossThemeColors.AccentColor,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
             // Header: Website/Service and Username with icons, actions on the right
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -2284,4 +2371,220 @@ private fun formatTimestamp(timestamp: Long): String {
     } catch (_: Exception) {
         "Unknown"
     }
+}
+
+/**
+ * Dialog for adding an AI provider API key.
+ *
+ * Separate from [CreateSecretDialog] because these entries are not passwords: the
+ * provider is picked from the registry rather than typed as a website, and the key is
+ * written through ProviderCredentialStore so Settings → AI Providers recognises the
+ * result. A hand-made secret with the same fields would not be picked up.
+ */
+@Composable
+private fun AiProviderKeyDialog(
+    selectedProviderId: String,
+    sources: Map<String, CredentialSource>,
+    keyDraft: String,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onProviderChange: (String) -> Unit,
+    onKeyChange: (String) -> Unit,
+    onOpenConsole: () -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val descriptor = ProviderRegistry.findOrDefault(selectedProviderId)
+    var providerMenuOpen by remember { mutableStateOf(false) }
+
+    val existingSource = sources[descriptor.id] ?: CredentialSource.NONE
+    val alreadyStored = existingSource == CredentialSource.STORED
+    // An env-supplied key cannot be stored here — saveKey rejects it — so say that up
+    // front instead of letting the save fail after the key has been typed.
+    val fromEnvironment = existingSource == CredentialSource.ENVIRONMENT
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        backgroundColor = BossThemeColors.SurfaceColor,
+        title = {
+            Text(
+                if (alreadyStored) "Change AI Provider Key" else "Add AI Provider Key",
+                color = BossThemeColors.TextPrimary,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Stored as an encrypted secret. Pick a model afterwards in Settings → AI Providers.",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 12.sp
+                )
+
+                // Say plainly what saving will do to an existing credential.
+                if (alreadyStored) {
+                    Text(
+                        "${descriptor.standardKeyName} is already stored. Entering a new key replaces it.",
+                        color = BossThemeColors.WarningColor,
+                        fontSize = 12.sp
+                    )
+                } else if (fromEnvironment) {
+                    Text(
+                        "${descriptor.displayName} is supplied by the environment " +
+                            "(${descriptor.envVarNames.joinToString(" / ")}) and can't be stored here. " +
+                            "Unset that variable to manage the key in BOSS.",
+                        color = BossThemeColors.WarningColor,
+                        fontSize = 12.sp
+                    )
+                }
+
+                // Provider picker
+                Box {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(BossThemeColors.BackgroundColor)
+                            .clickable(enabled = !isLoading) { providerMenuOpen = true }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = descriptor.displayName,
+                            color = BossThemeColors.TextPrimary,
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            Icons.Default.ArrowDropDown,
+                            contentDescription = "Choose provider",
+                            tint = BossThemeColors.TextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = providerMenuOpen,
+                        onDismissRequest = { providerMenuOpen = false },
+                        modifier = Modifier.background(BossThemeColors.SurfaceColor)
+                    ) {
+                        ProviderRegistry.all.forEach { candidate ->
+                            DropdownMenuItem(
+                                onClick = {
+                                    providerMenuOpen = false
+                                    onProviderChange(candidate.id)
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        candidate.displayName,
+                                        color = BossThemeColors.TextPrimary,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    // Marking configured providers means "already set" is
+                                    // visible before picking, not after.
+                                    when (sources[candidate.id]) {
+                                        CredentialSource.STORED -> Text(
+                                            "set",
+                                            color = BossThemeColors.SuccessColor,
+                                            fontSize = 11.sp
+                                        )
+                                        CredentialSource.ENVIRONMENT -> Text(
+                                            "env",
+                                            color = BossThemeColors.SecondaryColor,
+                                            fontSize = 11.sp
+                                        )
+                                        else -> Unit
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = keyDraft,
+                    onValueChange = onKeyChange,
+                    label = {
+                        Text(
+                            if (alreadyStored) "New API key" else "API key",
+                            color = BossThemeColors.TextSecondary
+                        )
+                    },
+                    placeholder = {
+                        Text(
+                            if (alreadyStored) "Enter a new key to replace the stored one"
+                            else descriptor.keyPlaceholder,
+                            color = BossThemeColors.TextMuted
+                        )
+                    },
+                    singleLine = true,
+                    enabled = !isLoading && !fromEnvironment,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Same affordance as Settings → AI Providers: don't make someone without a
+                // key hunt for the console themselves.
+                if (descriptor.consoleUrl != null) {
+                    OutlinedButton(
+                        onClick = onOpenConsole,
+                        enabled = !isLoading,
+                        border = BorderStroke(1.dp, BossThemeColors.BorderColor)
+                    ) {
+                        Icon(
+                            Icons.Default.OpenInNew,
+                            contentDescription = null,
+                            tint = BossThemeColors.TextSecondary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            "Get API key",
+                            color = BossThemeColors.TextPrimary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+
+                if (descriptor.envVarNames.isNotEmpty()) {
+                    Text(
+                        "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
+                        color = BossThemeColors.TextMuted,
+                        fontSize = 11.sp
+                    )
+                }
+
+                errorMessage?.let {
+                    Text(it, color = BossThemeColors.ErrorColor, fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                enabled = !isLoading && !fromEnvironment && keyDraft.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(
+                    backgroundColor = BossThemeColors.AccentColor
+                )
+            ) {
+                Text(
+                    when {
+                        isLoading -> "Saving…"
+                        alreadyStored -> "Replace"
+                        else -> "Save"
+                    }
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isLoading) {
+                Text("Cancel", color = BossThemeColors.TextSecondary)
+            }
+        }
+    )
 }

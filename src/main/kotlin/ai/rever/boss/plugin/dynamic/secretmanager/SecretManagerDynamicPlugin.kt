@@ -2,8 +2,17 @@ package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.DynamicPlugin
 import ai.rever.boss.plugin.api.PluginContext
+import ai.rever.boss.plugin.api.SecretDataProvider
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ActiveProviderPrefs
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.EnvResolver
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.LegacySettingsImport
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.LlmProviderSettingsApiImpl
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ModelCatalog
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import java.io.File
 
 /**
  * Secret Manager dynamic plugin - Loaded from external JAR.
@@ -32,6 +41,15 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
             return
         }
 
+        // Built once and shared: the panel's "Add AI Provider Key" action and the
+        // settings panel must write through the same store, or an entry added from one
+        // wouldn't be recognised as provider configuration by the other.
+        //
+        // Safe to construct outside the LinkageError guard below — ProviderCredentialStore
+        // and ProviderRegistry reference only api symbols that predate 1.0.70.
+        val envResolver = EnvResolver()
+        val credentialStore = ProviderCredentialStore(secretDataProvider, envResolver)
+
         context.panelRegistry.registerPanel(SecretManagerInfo) { ctx, panelInfo ->
             SecretManagerComponent(
                 ctx = ctx,
@@ -39,11 +57,61 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 secretDataProvider = secretDataProvider,
                 supabaseDataProvider = supabaseDataProvider,
                 pluginStoreApiKeyProvider = pluginStoreApiKeyProvider,
-                scope = pluginScope
+                scope = pluginScope,
+                aiProviderStore = credentialStore,
+                settingsProvider = context.settingsProvider,
+                windowId = context.windowId,
+                splitViewOperations = context.splitViewOperations
             )
         }
 
         // Contribute secret_* MCP tools (expose secret values to agents; auto-removed on disable/unload).
         context.registerMcpToolProvider(SecretManagerMcpToolProvider(pluginId, secretDataProvider))
+
+        registerAiProviderSettings(context, credentialStore, envResolver, pluginScope)
+    }
+
+    /**
+     * Serve AI provider configuration (credentials, env resolution, live model lists)
+     * to the host's Settings → AI Providers section and to other plugins via
+     * PluginContext.llmProvider.
+     *
+     * Guarded: LlmProviderSettingsAPI is a shared-package (parent-first) class added in
+     * api 1.0.70, so on hosts that predate it LlmProviderSettingsApiImpl fails to link.
+     * Skipping registration there costs only the AI panel — secret management, MCP
+     * tools and everything else still work. This is why the plugin's declared
+     * apiVersion stays at its true floor instead of being raised to 1.0.70.
+     */
+    private fun registerAiProviderSettings(
+        context: PluginContext,
+        credentialStore: ProviderCredentialStore,
+        envResolver: EnvResolver,
+        pluginScope: CoroutineScope,
+    ) {
+        try {
+            val cacheDir =
+                context.cacheProvider
+                    ?.getPluginCacheDirectory(pluginId)
+                    ?.let { File(it) }
+
+            val viewModel =
+                AiProvidersViewModel(
+                    store = credentialStore,
+                    catalog = ModelCatalog(cacheDir = cacheDir),
+                    prefs = ActiveProviderPrefs(),
+                    legacyImport = LegacySettingsImport(credentialStore, envResolver),
+                    splitViewOperations = context.splitViewOperations,
+                    scope = pluginScope,
+                )
+
+            context.registerPluginAPI(LlmProviderSettingsApiImpl(viewModel))
+
+            // Warm the credentials so the first AI action after a restart doesn't race
+            // the load. Network-free — model lists are still fetched lazily, when the
+            // panel is opened or refreshed, so this costs nothing at startup.
+            viewModel.ensureConnectionsLoaded()
+        } catch (e: LinkageError) {
+            // Host predates LlmProviderSettingsAPI — skip; everything else works.
+        }
     }
 }

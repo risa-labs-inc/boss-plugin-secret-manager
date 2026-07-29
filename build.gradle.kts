@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.2.4"
+version = "1.2.5"
 
 java {
     toolchain {
@@ -35,10 +35,18 @@ repositories {
 dependencies {
     if (useLocalDependencies) {
         // Local development: use boss-plugin-api JAR from sibling repo.
-        // NOTE: plugin.json declares apiVersion 1.0.20 — the ai.rever.boss.plugin.logging
-        // and .scrollbar packages used by this plugin were introduced in exactly that
-        // release (api tag v1.0.20), so the declared minimum is accurate.
-        compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.51.jar"))
+        // NOTE: plugin.json still declares apiVersion 1.0.20 — the
+        // ai.rever.boss.plugin.logging and .scrollbar packages used by this plugin
+        // were introduced in exactly that release (api tag v1.0.20), and that is
+        // still the true floor for the plugin to function.
+        //
+        // The AI-provider feature compiles against 1.0.70 (LlmProviderSettingsAPI,
+        // LlmApiFormat.GOOGLE_GENERATIVE) but does not raise the declared minimum:
+        // every reference to those symbols is confined to LlmProviderSettingsApiImpl,
+        // which is registered inside a LinkageError guard. On an older host the AI
+        // settings panel simply isn't served and secret management is unaffected —
+        // raising apiVersion instead would stop the plugin loading at all there.
+        compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.70.jar"))
     } else {
         // CI: use downloaded JAR
         compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))
