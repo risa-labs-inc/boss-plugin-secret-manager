@@ -1,5 +1,7 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
+import ai.rever.boss.plugin.logging.BossLogger
+import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -10,9 +12,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 import java.net.URI
+import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.charset.StandardCharsets
 import java.time.Duration
 
 /**
@@ -29,6 +33,7 @@ import java.time.Duration
 class ModelCatalogClient(
     private val httpClient: HttpClient = defaultHttpClient(),
 ) {
+    private val logger = BossLogger.forComponent("AiModelCatalogClient")
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     /**
@@ -47,59 +52,164 @@ class ModelCatalogClient(
                 IllegalStateException("${descriptor.displayName} has no model list endpoint — enter a model id manually."),
             )
 
-        val first = request(descriptor, primary, apiKey)
+        val first = fetchAllPages(descriptor, primary, apiKey)
         if (first.isSuccess) return first
 
         // xAI exposes a richer endpoint plus a minimal one; fall back rather than
-        // reporting failure when only the richer route is unavailable.
+        // reporting failure when only the richer route is unavailable. An
+        // unrecognised envelope counts as a failure (see parseOrFail), so a 200 whose
+        // shape we didn't anticipate also reaches the fallback instead of silently
+        // presenting an empty picker.
         val fallback = descriptor.modelsEndpointFallback ?: return first
-        return request(descriptor, fallback, apiKey)
+        return fetchAllPages(descriptor, fallback, apiKey)
     }
 
-    private suspend fun request(
+    /**
+     * Follow the provider's cursor to the end of the list.
+     *
+     * A single GET truncates on Anthropic (20 by default) and Google (50), both of
+     * which report a cursor — and a quietly clipped list is the same failure mode as
+     * the stale hardcoded lists this replaced. Bounded by [MAX_PAGES]; stopping early
+     * is logged rather than passed off as a complete list.
+     */
+    private suspend fun fetchAllPages(
         descriptor: ProviderDescriptor,
         endpoint: String,
         apiKey: String,
-    ): Result<List<AiModel>> =
+    ): Result<List<AiModel>> {
+        val collected = mutableListOf<AiModel>()
+        var cursor: String? = null
+        var pages = 0
+
+        while (pages < MAX_PAGES) {
+            val page = requestPage(descriptor, endpoint, apiKey, cursor)
+            val body = page.getOrElse { return Result.failure(it) }
+
+            collected += body.models
+            pages++
+
+            cursor = body.nextCursor ?: break
+        }
+
+        if (pages >= MAX_PAGES && cursor != null) {
+            logger.warn(
+                LogCategory.NETWORK,
+                "Stopped paging AI model list at page cap — list may be incomplete",
+                mapOf("provider" to descriptor.id, "pages" to pages, "models" to collected.size),
+            )
+        }
+
+        // A 2xx that parses to nothing means the envelope wasn't what we expected, not
+        // that the provider has no models. Reporting success here is what would put an
+        // empty dropdown under a "live · updated just now" label.
+        if (collected.isEmpty()) {
+            return Result.failure(
+                IllegalStateException(
+                    "${descriptor.displayName} returned no recognisable models — response format not recognised.",
+                ),
+            )
+        }
+        return Result.success(collected.distinctBy { it.id }.sortedBy { it.displayName.lowercase() })
+    }
+
+    private data class Page(val models: List<AiModel>, val nextCursor: String?)
+
+    private suspend fun requestPage(
+        descriptor: ProviderDescriptor,
+        endpoint: String,
+        apiKey: String,
+        cursor: String?,
+    ): Result<Page> =
         withContext(Dispatchers.IO) {
+            // Build the request in its own guard. URI.create and header validation embed
+            // the offending value in their exception message, and on the Google path the
+            // credential is in the query string — a key pasted with a space would
+            // otherwise reach the error banner and the log verbatim. Only messages
+            // authored here escape.
+            val request =
+                runCatching { buildRequest(descriptor, endpoint, apiKey, cursor) }
+                    .getOrElse {
+                        return@withContext Result.failure(
+                            IllegalStateException(
+                                "Could not build the ${descriptor.displayName} model list request — check the API key for stray characters.",
+                            ),
+                        )
+                    }
+
             runCatching {
-                val url =
-                    if (descriptor.credentialTransport == CredentialTransport.QUERY_KEY_PARAM) {
-                        val separator = if (endpoint.contains('?')) "&" else "?"
-                        "$endpoint${separator}key=${apiKey.trim()}"
-                    } else {
-                        endpoint
-                    }
-
-                val builder =
-                    HttpRequest
-                        .newBuilder(URI.create(url))
-                        .GET()
-                        .timeout(REQUEST_TIMEOUT)
-                        .header("Accept", "application/json")
-
-                when (descriptor.credentialTransport) {
-                    CredentialTransport.BEARER_HEADER ->
-                        builder.header("Authorization", "Bearer ${apiKey.trim()}")
-
-                    CredentialTransport.X_API_KEY_HEADER -> {
-                        builder.header("x-api-key", apiKey.trim())
-                        builder.header("anthropic-version", ProviderRegistry.ANTHROPIC_VERSION)
-                    }
-
-                    CredentialTransport.QUERY_KEY_PARAM -> Unit // already in the URL
-                }
-
-                val response =
-                    httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString())
-
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
                 if (response.statusCode() !in 200..299) {
                     error(describeFailure(descriptor, response.statusCode()))
                 }
-
-                parse(descriptor, response.body())
+                parsePage(descriptor, response.body())
+            }.recoverCatching { cause ->
+                // Anything from send/parse that isn't already one of our messages
+                // (timeouts, TLS, malformed JSON) is reported without its text, since
+                // that text is not ours and the request carried a credential.
+                if (cause is IllegalStateException && cause.message?.isNotBlank() == true) {
+                    throw cause
+                }
+                throw IllegalStateException("Could not reach ${descriptor.displayName} (${cause::class.simpleName}).")
             }
         }
+
+    private fun buildRequest(
+        descriptor: ProviderDescriptor,
+        endpoint: String,
+        apiKey: String,
+        cursor: String?,
+    ): HttpRequest {
+        val key = apiKey.trim()
+        val params = mutableListOf<Pair<String, String>>()
+
+        when (descriptor.pagingStyle) {
+            PagingStyle.ANTHROPIC_CURSOR -> {
+                params += "limit" to PAGE_LIMIT.toString()
+                cursor?.let { params += "after_id" to it }
+            }
+
+            PagingStyle.GOOGLE_PAGE_TOKEN -> {
+                params += "pageSize" to PAGE_LIMIT.toString()
+                cursor?.let { params += "pageToken" to it }
+            }
+
+            PagingStyle.NONE -> Unit
+        }
+
+        if (descriptor.credentialTransport == CredentialTransport.QUERY_KEY_PARAM) {
+            params += "key" to key
+        }
+
+        val query =
+            params.joinToString("&") { (name, value) ->
+                "${enc(name)}=${enc(value)}"
+            }
+        val separator = if (endpoint.contains('?')) "&" else "?"
+        val url = if (query.isEmpty()) endpoint else "$endpoint$separator$query"
+
+        val builder =
+            HttpRequest
+                .newBuilder(URI.create(url))
+                .GET()
+                .timeout(REQUEST_TIMEOUT)
+                .header("Accept", "application/json")
+
+        when (descriptor.credentialTransport) {
+            CredentialTransport.BEARER_HEADER -> builder.header("Authorization", "Bearer $key")
+
+            CredentialTransport.X_API_KEY_HEADER -> {
+                builder.header("x-api-key", key)
+                builder.header("anthropic-version", ProviderRegistry.ANTHROPIC_VERSION)
+            }
+
+            CredentialTransport.QUERY_KEY_PARAM -> Unit // already in the URL
+        }
+
+        return builder.build()
+    }
+
+    /** Percent-encode a query component; a raw key can contain `&`, `=`, spaces or quotes. */
+    private fun enc(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
 
     /**
      * Turn a status code into something a user can act on. The body is deliberately
@@ -118,14 +228,15 @@ class ModelCatalogClient(
             else -> "${descriptor.displayName} model list failed (HTTP $status)."
         }
 
-    private fun parse(
+    private fun parsePage(
         descriptor: ProviderDescriptor,
         body: String,
-    ): List<AiModel> {
+    ): Page {
         val root = json.parseToJsonElement(body)
         val entries = modelArray(root)
+        val cursor = nextCursor(descriptor, root)
 
-        return entries
+        val models = entries
             .filterIsInstance<JsonObject>()
             .mapNotNull { obj ->
                 when {
@@ -136,8 +247,29 @@ class ModelCatalogClient(
                     descriptor.id == ProviderRegistry.XAI -> xaiModel(obj)
                     else -> openAiModel(obj)
                 }
-            }.distinctBy { it.id }
-            .sortedBy { it.displayName.lowercase() }
+            }
+        return Page(models = models, nextCursor = cursor)
+    }
+
+    /**
+     * The cursor for the next page, or null when this was the last one.
+     *
+     * Anthropic reports `has_more` plus `last_id`; Google reports a non-empty
+     * `nextPageToken`. Anything else pages once.
+     */
+    private fun nextCursor(
+        descriptor: ProviderDescriptor,
+        root: JsonElement,
+    ): String? {
+        val obj = root as? JsonObject ?: return null
+        return when (descriptor.pagingStyle) {
+            PagingStyle.ANTHROPIC_CURSOR ->
+                if (obj.bool("has_more") == true) obj.str("last_id") else null
+
+            PagingStyle.GOOGLE_PAGE_TOKEN -> obj.str("nextPageToken")
+
+            PagingStyle.NONE -> null
+        }
     }
 
     /**
@@ -267,6 +399,12 @@ class ModelCatalogClient(
         private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
 
         private val TOGETHER_CHAT_TYPES = setOf("chat", "language", "code")
+
+        /** Page size requested where the provider supports one. */
+        private const val PAGE_LIMIT = 1000
+
+        /** Bound on cursor-following, so a misbehaving cursor can't loop forever. */
+        private const val MAX_PAGES = 20
 
         fun defaultHttpClient(): HttpClient =
             HttpClient

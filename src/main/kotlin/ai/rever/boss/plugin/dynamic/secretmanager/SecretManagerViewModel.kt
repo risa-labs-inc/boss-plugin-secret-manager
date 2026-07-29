@@ -302,9 +302,8 @@ class SecretManagerViewModel(
 
         val store = aiProviderStore ?: return
         scope.launch {
-            val sources = store.loadAll().getOrNull()
-                ?.mapValues { (_, connection) -> connection.source }
-                ?: emptyMap()
+            val sources =
+                store.loadAll().connections.mapValues { (_, connection) -> connection.source }
 
             // Pre-select the first provider that has no key yet, since adding is the
             // common case; changing an existing one is then an explicit pick.

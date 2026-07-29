@@ -3,6 +3,8 @@ package ai.rever.boss.plugin.dynamic.secretmanager.ai
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -22,39 +24,80 @@ class ActiveProviderPrefs(
 ) {
     private val logger = BossLogger.forComponent("AiProviderPrefs")
     private val json = Json { ignoreUnknownKeys = true }
+    private val mutex = Mutex()
 
     private val file: File get() = File(bossRootDir, FILE_NAME)
 
     /** The stored active provider id, or null when none has been chosen yet. */
     suspend fun read(): String? =
+        readPrefs().activeProviderId?.takeIf { ProviderRegistry.find(it) != null }
+
+    /**
+     * Model selections held here rather than on a secret.
+     *
+     * A provider whose key comes from the environment has no secret to attach settings
+     * to, and creating a key-less one to hold a model id would mean writing a secret
+     * with a blank password (which the store may reject) and showing a credential-less
+     * AI-provider card in the secret list. The choice lives here instead.
+     */
+    suspend fun readModels(): Map<String, String> =
+        readPrefs().modelByProvider.filterKeys { ProviderRegistry.find(it) != null }
+
+    /** Persist [providerId] as the active provider. */
+    suspend fun write(providerId: String) {
+        update { it.copy(activeProviderId = providerId) }
+    }
+
+    /** Persist [modelId] as [providerId]'s selected model. */
+    suspend fun writeModel(
+        providerId: String,
+        modelId: String,
+    ) {
+        update { it.copy(modelByProvider = it.modelByProvider + (providerId to modelId)) }
+    }
+
+    private suspend fun readPrefs(): Prefs =
         withContext(Dispatchers.IO) {
             runCatching {
                 if (!file.exists()) return@runCatching null
-                json
-                    .decodeFromString(Prefs.serializer(), file.readText())
-                    .activeProviderId
-                    ?.takeIf { ProviderRegistry.find(it) != null }
-            }.getOrNull()
+                json.decodeFromString(Prefs.serializer(), file.readText())
+            }.getOrNull() ?: Prefs()
         }
 
-    /** Persist [providerId] as the active provider. */
-    suspend fun write(providerId: String) =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                file.parentFile?.mkdirs()
-                file.writeText(json.encodeToString(Prefs.serializer(), Prefs(providerId)))
-            }.onFailure {
-                logger.warn(
-                    LogCategory.SYSTEM,
-                    "Could not persist active AI provider",
-                    mapOf("exception" to (it::class.simpleName ?: "Exception")),
-                )
+    /**
+     * Read-modify-write under [mutex]: the active provider and the model map live in one
+     * file, so concurrent writers would otherwise drop each other's field.
+     */
+    private suspend fun update(transform: (Prefs) -> Prefs) {
+        mutex.withLock {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val current =
+                        if (file.exists()) {
+                            runCatching { json.decodeFromString(Prefs.serializer(), file.readText()) }
+                                .getOrDefault(Prefs())
+                        } else {
+                            Prefs()
+                        }
+                    file.parentFile?.mkdirs()
+                    file.writeText(json.encodeToString(Prefs.serializer(), transform(current)))
+                }.onFailure {
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "Could not persist AI provider preferences",
+                        mapOf("exception" to (it::class.simpleName ?: "Exception")),
+                    )
+                }
+                Unit
             }
-            Unit
         }
+    }
 
     @Serializable
-    private data class Prefs(val activeProviderId: String? = null)
+    private data class Prefs(
+        val activeProviderId: String? = null,
+        val modelByProvider: Map<String, String> = emptyMap(),
+    )
 
     companion object {
         private const val FILE_NAME = "ai_provider_prefs.json"

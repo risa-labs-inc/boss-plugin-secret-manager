@@ -22,6 +22,24 @@ enum class WireFormat {
 }
 
 /**
+ * How a provider pages its model list.
+ *
+ * A single unpaged GET silently truncates: Anthropic's `/v1/models` defaults to 20 items
+ * and Google's `ListModels` to 50, both with a cursor. A quietly clipped list is the same
+ * failure mode as the hardcoded lists this feature replaced, so the cursor is followed.
+ */
+enum class PagingStyle {
+    /** One request. The provider documents no pagination for this endpoint. */
+    NONE,
+
+    /** `limit` + `after_id` query params; `has_more` / `last_id` in the body (Anthropic). */
+    ANTHROPIC_CURSOR,
+
+    /** `pageSize` + `pageToken` query params; `nextPageToken` in the body (Google). */
+    GOOGLE_PAGE_TOKEN,
+}
+
+/**
  * How a provider expects its credential to travel on a request. The six supported
  * providers use three distinct shapes, so this cannot be folded into [WireFormat]
  * (Google speaks a different wire format *and* a different credential transport;
@@ -80,6 +98,8 @@ data class ProviderDescriptor(
     val consoleUrl: String? = null,
     /** Shape hint shown in the empty key field, e.g. `sk-ant-...`. */
     val keyPlaceholder: String = "",
+    /** How [modelsEndpoint] pages, so a long list isn't silently clipped. */
+    val pagingStyle: PagingStyle = PagingStyle.NONE,
 ) {
     /**
      * Canonical name for this provider's key, used as the stored secret's name so an

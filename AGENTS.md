@@ -103,6 +103,20 @@ directly. Under KERNEL mode the API crosses a process boundary and the panel is 
 expected to render — the host falls back to its "plugin isn't loaded yet" notice
 rather than failing.
 
+### Tests
+
+`./gradlew test` — 38 host-independent cases, no live credential needed. The
+model-list parsers are the point: each was written from a provider's published
+reference, and xAI's and Together's envelopes aren't documented at all, so
+`ModelCatalogClientParseTest` pins the captured shapes (Google's `models/` prefix
+stripping, Together's type filter, Anthropic's capability tree, and that a rejected key
+never reaches an error message). Also covered: `env_vars` parsing (`=` inside values),
+`ProviderSettings` round-trip and tolerance, and the catalog TTL / cache-seeding rules.
+
+Two test-only dependencies exist because the api is `compileOnly`: the api jar itself,
+and an slf4j backend — `BossLogger` binds slf4j at class-init, so without one every
+class holding a logger fails with `NoClassDefFoundError`.
+
 ## Code Quality
 
 - Use Compose Multiplatform APIs (not Android-specific)

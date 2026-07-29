@@ -10,6 +10,8 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.LegacySettingsImport
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.LlmProviderSettingsApiImpl
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ModelCatalog
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
+import ai.rever.boss.plugin.logging.BossLogger
+import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import java.io.File
@@ -21,12 +23,27 @@ import java.io.File
  * Uses SecretDataProvider, SupabaseDataProvider, and PluginStoreApiKeyProvider from PluginContext.
  */
 class SecretManagerDynamicPlugin : DynamicPlugin {
+    private val logger = BossLogger.forComponent("SecretManagerPlugin")
+
     override val pluginId: String = "ai.rever.boss.plugin.dynamic.secretmanager"
     override val displayName: String = "Secret Manager (Dynamic)"
-    override val version: String = "1.0.8"
+    /**
+     * Read from the jar manifest, which `buildPluginJar` stamps from the Gradle version.
+     *
+     * Previously a hardcoded third copy that had drifted out of step with both
+     * build.gradle.kts and the plugin.json it syncs. Falls back to "unknown" only when
+     * running outside a packaged jar (tests, IDE).
+     */
+    override val version: String =
+        javaClass.`package`?.implementationVersion ?: "unknown"
     override val description: String = "Manage encrypted credentials and secrets, including Plugin Store API keys"
     override val author: String = "Risa Labs"
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-secret-manager"
+
+    private companion object {
+        /** api release that introduced LlmProviderSettingsAPI. */
+        const val REQUIRED_API_VERSION = "1.0.70"
+    }
 
     override fun register(context: PluginContext) {
         val secretDataProvider = context.secretDataProvider
@@ -89,6 +106,9 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         pluginScope: CoroutineScope,
     ) {
         try {
+            // Constructed inside the guard: the ViewModel starts a catalog.states
+            // collector, and on a host that can't link the impl below that coroutine
+            // would be started and then orphaned.
             val cacheDir =
                 context.cacheProvider
                     ?.getPluginCacheDirectory(pluginId)
@@ -110,8 +130,15 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
             // the load. Network-free — model lists are still fetched lazily, when the
             // panel is opened or refreshed, so this costs nothing at startup.
             viewModel.ensureConnectionsLoaded()
-        } catch (e: LinkageError) {
+        } catch (_: LinkageError) {
             // Host predates LlmProviderSettingsAPI — skip; everything else works.
+            // Logged rather than swallowed: without this, "the AI Providers section is
+            // missing" has no explanation anywhere.
+            logger.info(
+                LogCategory.SYSTEM,
+                "AI provider settings not served — host api predates LlmProviderSettingsAPI",
+                mapOf("requiredApiVersion" to REQUIRED_API_VERSION),
+            )
         }
     }
 }

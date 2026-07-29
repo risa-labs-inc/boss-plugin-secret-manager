@@ -7,6 +7,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -28,6 +30,14 @@ class ModelCatalog(
 ) {
     private val logger = BossLogger.forComponent("AiModelCatalog")
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
+
+    /**
+     * Serialises cache writes. [writeCacheEntry] is a read-modify-write over one file
+     * shared by all providers, and refreshes can overlap (a manual Refresh or Test
+     * connection while the open-panel sweep is still running), so an unguarded writer
+     * can drop another provider's entry.
+     */
+    private val cacheMutex = Mutex()
 
     private val _states = MutableStateFlow<Map<String, CatalogState>>(emptyMap())
 
@@ -142,7 +152,10 @@ class ModelCatalog(
             val file = cacheFile ?: return@withContext null
             runCatching {
                 if (!file.exists()) return@runCatching null
-                json.decodeFromString<CachedCatalog>(file.readText())
+                val parsed = json.decodeFromString<CachedCatalog>(file.readText())
+                // Written but previously never checked. A future format change would
+                // otherwise be read as if it were the current one.
+                if (parsed.version != CACHE_FORMAT_VERSION) null else parsed
             }.onFailure {
                 // A corrupt or older-format cache is not worth reporting: it is
                 // rebuilt on the next fetch. Deliberately no throwable in the log —
@@ -159,32 +172,42 @@ class ModelCatalog(
     private suspend fun writeCacheEntry(
         providerId: String,
         loaded: CatalogState.Loaded,
-    ) = withContext(Dispatchers.IO) {
-        val file = cacheFile ?: return@withContext
-        runCatching {
-            val existing = readCacheBlocking(file)
-            val merged =
-                CachedCatalog(
-                    providers =
-                        existing.providers +
-                            (
-                                providerId to
-                                    CachedProvider(
-                                        models = loaded.models.map { CachedModel.from(it) },
-                                        fetchedAtEpochMs = loaded.fetchedAtEpochMs,
-                                    )
-                            ),
+    ) = cacheMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val file = cacheFile ?: return@withContext
+            runCatching {
+                val existing = readCacheBlocking(file)
+                val merged =
+                    CachedCatalog(
+                        providers =
+                            existing.providers +
+                                (
+                                    providerId to
+                                        CachedProvider(
+                                            models = loaded.models.map { CachedModel.from(it) },
+                                            fetchedAtEpochMs = loaded.fetchedAtEpochMs,
+                                        )
+                                ),
+                    )
+                file.parentFile?.mkdirs()
+                // Write-then-rename: writeText truncates in place, so an interrupted write
+                // leaves a partial file, and readCache discards *every* provider's list on
+                // a parse failure rather than just the entry being written.
+                val temp = File(file.parentFile, "${file.name}.tmp")
+                temp.writeText(json.encodeToString(CachedCatalog.serializer(), merged))
+                if (!temp.renameTo(file)) {
+                    temp.copyTo(file, overwrite = true)
+                    temp.delete()
+                }
+            }.onFailure {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Could not persist AI model cache",
+                    mapOf("exception" to (it::class.simpleName ?: "Exception")),
                 )
-            file.parentFile?.mkdirs()
-            file.writeText(json.encodeToString(CachedCatalog.serializer(), merged))
-        }.onFailure {
-            logger.debug(
-                LogCategory.SYSTEM,
-                "Could not persist AI model cache",
-                mapOf("exception" to (it::class.simpleName ?: "Exception")),
-            )
+            }
+            Unit
         }
-        Unit
     }
 
     private fun readCacheBlocking(file: File): CachedCatalog =

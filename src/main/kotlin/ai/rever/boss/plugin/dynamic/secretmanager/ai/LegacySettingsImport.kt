@@ -51,21 +51,35 @@ class LegacySettingsImport(
                         )
                     }.getOrNull() ?: return@withContext null
 
+            // Keys the file holds for providers this build knows, regardless of the
+            // environment. Whether the file is worth keeping depends on this, not on
+            // what happens to be exported right now.
+            val known =
+                parsed.apiKeys.filterKeys { ProviderRegistry.find(it) != null }
+                    .filterValues { it.isNotBlank() }
+
+            if (known.isEmpty()) {
+                // Genuinely nothing here for us — safe to retire so the offer stops
+                // appearing.
+                archive()
+                return@withContext null
+            }
+
             val importable =
-                parsed.apiKeys
-                    .filter { (providerId, key) ->
-                        val descriptor = ProviderRegistry.find(providerId)
-                        descriptor != null &&
-                            key.isNotBlank() &&
-                            // A key already supplied by the environment needs no import;
-                            // storing it would recreate the leak this replaced.
-                            envResolver.resolve(descriptor.envVarNames).isNullOrBlank()
+                known
+                    .filter { (providerId, _) ->
+                        val descriptor = ProviderRegistry.findOrDefault(providerId)
+                        // A key already supplied by the environment needs no import;
+                        // storing it would recreate the leak this replaced.
+                        envResolver.resolve(descriptor.envVarNames).isNullOrBlank()
                     }.keys
                     .sorted()
 
             if (importable.isEmpty()) {
-                // Nothing worth moving — retire the file so the offer stops appearing.
-                archive()
+                // Every key is currently shadowed by an environment variable. Do NOT
+                // archive: unsetting that variable later must bring the offer back, and
+                // renaming here would strand real keys behind a file the user was never
+                // told about.
                 return@withContext null
             }
 

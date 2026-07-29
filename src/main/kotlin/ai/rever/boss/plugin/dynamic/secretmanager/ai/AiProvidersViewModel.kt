@@ -4,6 +4,9 @@ import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,6 +64,8 @@ class AiProvidersViewModel(
     /** Guards [ensureConnectionsLoaded] so concurrent callers load credentials once. */
     private val connectionsLoadStarted = AtomicBoolean(false)
 
+    private val _connectionsLoaded = MutableStateFlow(false)
+
     init {
         scope.launch { catalog.states.collect { states -> _state.update { it.copy(catalogs = states) } } }
     }
@@ -69,20 +74,57 @@ class AiProvidersViewModel(
      * Load credentials only — no cache seeding, no model fetches, runs at most once.
      *
      * `activeConfig()` is answered from this state, and other plugins can ask for it
-     * before the settings panel has ever been opened. Without this the first AI action
-     * after a restart would see an empty map and conclude nothing is configured.
-     * Deliberately network-free so it is safe to call during plugin registration.
+     * before the settings panel has ever been opened, so this warms it at registration.
+     *
+     * **It does not close the race.** This launches and returns; a caller on the very
+     * next line still reads empty state, because the load does a paginated store read.
+     * [connectionsLoaded] is the signal for callers that can wait — `activeConfig()`
+     * cannot (it is a non-suspend api member), so a null from it may mean "not loaded
+     * yet" rather than "nothing configured".
      */
     fun ensureConnectionsLoaded() {
         if (!connectionsLoadStarted.compareAndSet(false, true)) return
-        scope.launch {
-            val storedActive = prefs.read()
-            val connections = store?.loadAll()?.getOrNull() ?: envOnlyConnections()
-            _state.update { current ->
-                current.copy(
-                    connections = connections,
-                    activeProviderId = current.activeProviderId ?: storedActive ?: firstConfigured(connections),
-                )
+        scope.launch { loadConnections() }
+    }
+
+    /**
+     * Whether credentials have been read at least once. Callers that can suspend should
+     * await this before treating a null `activeConfig()` as "nothing configured".
+     */
+    val connectionsLoaded: StateFlow<Boolean> = _connectionsLoaded.asStateFlow()
+
+    private suspend fun loadConnections(): Map<String, ProviderConnection> {
+        val storedActive = prefs.read()
+        val snapshot = store?.loadAll()
+        val connections = withPreferredModels(snapshot?.connections ?: envOnlyConnections())
+
+        _state.update { current ->
+            current.copy(
+                connections = connections,
+                activeProviderId = current.activeProviderId ?: storedActive ?: firstConfigured(connections),
+                storeAvailable = store != null && snapshot?.storeReadFailed != true,
+            )
+        }
+        _connectionsLoaded.value = true
+        return connections
+    }
+
+    /**
+     * Overlay model selections held in prefs.
+     *
+     * A provider keyed by an environment variable has no secret to carry its settings,
+     * so its chosen model lives in prefs; the stored value still wins where one exists.
+     */
+    private suspend fun withPreferredModels(
+        connections: Map<String, ProviderConnection>,
+    ): Map<String, ProviderConnection> {
+        val preferred = prefs.readModels()
+        if (preferred.isEmpty()) return connections
+        return connections.mapValues { (providerId, connection) ->
+            if (connection.selectedModelId != null) {
+                connection
+            } else {
+                preferred[providerId]?.let { connection.copy(selectedModelId = it) } ?: connection
             }
         }
     }
@@ -94,20 +136,21 @@ class AiProvidersViewModel(
             _state.update { it.copy(isLoading = true, error = null) }
 
             catalog.seedFromCache()
-
-            val storedActive = prefs.read()
-            val result = store?.loadAll()
-            val connections = result?.getOrNull() ?: envOnlyConnections()
+            val connections = loadConnections()
 
             _state.update { current ->
                 current.copy(
-                    connections = connections,
-                    activeProviderId = storedActive ?: firstConfigured(connections),
-                    selectedProviderId = storedActive ?: firstConfigured(connections) ?: current.selectedProviderId,
                     isLoading = false,
-                    storeAvailable = store != null && result?.isFailure != true,
+                    // Keep whichever provider the user had expanded. This runs from a
+                    // LaunchedEffect on every entry into the section, so resetting the
+                    // selection here discarded their place each time.
+                    selectedProviderId =
+                        current.selectedProviderId.takeIf { ProviderRegistry.find(it) != null }
+                            ?: current.activeProviderId
+                            ?: firstConfigured(connections)
+                            ?: ProviderRegistry.default.id,
                     error =
-                        if (result?.isFailure == true) {
+                        if (!current.storeAvailable && store != null) {
                             "Stored credentials are unavailable — environment variables still apply."
                         } else {
                             null
@@ -125,7 +168,7 @@ class AiProvidersViewModel(
      * variable must still work. Building the map directly from the resolver keeps the
      * panel useful in that state instead of showing everything as unconfigured.
      */
-    private fun envOnlyConnections(): Map<String, ProviderConnection> {
+    private suspend fun envOnlyConnections(): Map<String, ProviderConnection> {
         val resolver = EnvResolver()
         return ProviderRegistry.all.associate { descriptor ->
             val key = resolver.resolve(descriptor.envVarNames)
@@ -142,17 +185,28 @@ class AiProvidersViewModel(
     private fun firstConfigured(connections: Map<String, ProviderConnection>): String? =
         ProviderRegistry.all.firstOrNull { connections[it.id]?.isConfigured == true }?.id
 
-    private suspend fun refreshStale(connections: Map<String, ProviderConnection>) {
-        ProviderRegistry.all.forEach { descriptor ->
-            val connection = connections[descriptor.id] ?: return@forEach
-            if (!connection.isConfigured) {
-                catalog.markNotConfigured(descriptor.id)
-                return@forEach
-            }
-            if (descriptor.modelsEndpoint == null) return@forEach
-            catalog.refresh(descriptor, connection.apiKey, force = false)
+    /**
+     * Refresh every stale provider concurrently.
+     *
+     * Sequentially, at a 20 s per-request timeout, the last provider's list could appear
+     * minutes after the panel opened; in parallel the sweep settles in roughly one
+     * request's time.
+     */
+    private suspend fun refreshStale(connections: Map<String, ProviderConnection>) =
+        coroutineScope {
+            ProviderRegistry.all.map { descriptor ->
+                async {
+                    val connection = connections[descriptor.id] ?: return@async
+                    if (!connection.isConfigured) {
+                        catalog.markNotConfigured(descriptor.id)
+                        return@async
+                    }
+                    if (descriptor.modelsEndpoint == null) return@async
+                    catalog.refresh(descriptor, connection.apiKey, force = false)
+                }
+            }.awaitAll()
+            Unit
         }
-    }
 
     fun selectProvider(providerId: String) {
         _state.update { it.copy(selectedProviderId = providerId, notice = null, error = null) }
@@ -237,22 +291,61 @@ class AiProvidersViewModel(
             )
         }
 
-        if (currentStore == null) return
         scope.launch {
-            currentStore
-                .saveSettings(
-                    providerId,
-                    ProviderSettings(
-                        selectedModelId = modelId,
-                        customEndpoint = existing.customEndpoint,
-                        temperature = existing.temperature,
-                        maxTokens = existing.maxTokens,
-                    ),
-                ).onFailure { error ->
-                    _state.update { it.copy(error = error.message ?: "Could not save the model choice.") }
-                }
+            val settings =
+                ProviderSettings(
+                    selectedModelId = modelId,
+                    customEndpoint = existing.customEndpoint,
+                    temperature = existing.temperature,
+                    maxTokens = existing.maxTokens,
+                )
+
+            val written =
+                currentStore?.saveSettings(providerId, settings)
+                    ?.onFailure { error ->
+                        // Revert rather than leaving the picker showing an unsaved choice.
+                        _state.update {
+                            it.copy(
+                                connections = it.connections + (providerId to existing),
+                                error = error.message ?: "Could not save the model choice.",
+                            )
+                        }
+                    }?.getOrNull()
+
+            // No secret to attach settings to (an env-keyed provider), so the choice goes
+            // to prefs — see ActiveProviderPrefs.readModels.
+            if (written == false) prefs.writeModel(providerId, modelId)
         }
     }
+
+    /** Persist a custom provider's endpoint, which has no models endpoint to discover. */
+    fun setCustomEndpoint(providerId: String, endpoint: String) {
+        val existing = _state.value.connectionOf(providerId)
+        val trimmed = endpoint.trim()
+        _state.update {
+            it.copy(connections = it.connections + (providerId to existing.copy(customEndpoint = trimmed)))
+        }
+        scope.launch {
+            val settings =
+                ProviderSettings(
+                    selectedModelId = existing.selectedModelId,
+                    customEndpoint = trimmed.takeIf { it.isNotBlank() },
+                    temperature = existing.temperature,
+                    maxTokens = existing.maxTokens,
+                )
+            store?.saveSettings(providerId, settings)?.onFailure { error ->
+                _state.update { it.copy(error = error.message ?: "Could not save the endpoint.") }
+            }
+        }
+    }
+
+    /**
+     * Set a model id by hand, for a provider with no models endpoint to ask.
+     *
+     * Without this a custom endpoint could never be used: `activeConfig()` requires a
+     * model id, and the picker is fed only from a fetched list.
+     */
+    fun setManualModelId(providerId: String, modelId: String) = selectModel(providerId, modelId.trim())
 
     /** Re-fetch [providerId]'s model list, bypassing the TTL. */
     fun refreshModels(providerId: String) {
@@ -353,8 +446,8 @@ class AiProvidersViewModel(
     }
 
     private suspend fun reloadConnections() {
-        val reloaded = store?.loadAll()?.getOrNull() ?: return
-        _state.update { it.copy(connections = reloaded) }
+        val reloaded = store?.loadAll() ?: return
+        _state.update { it.copy(connections = withPreferredModels(reloaded.connections)) }
     }
 
     private suspend fun refreshOne(providerId: String, force: Boolean) {

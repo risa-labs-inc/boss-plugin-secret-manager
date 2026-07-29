@@ -25,6 +25,9 @@ class LlmProviderSettingsApiImpl(
     private val viewModel: AiProvidersViewModel,
 ) : LlmProviderSettingsAPI {
 
+    /** This implementation does render a panel, so the host shouldn't show its notice. */
+    override val supportsSettingsPanel: Boolean = true
+
     @Composable
     override fun LlmProviderSettingsPanel(modifier: Modifier) {
         // The host renders this section on demand; loading here (rather than at

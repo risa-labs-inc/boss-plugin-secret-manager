@@ -40,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -265,6 +266,8 @@ private fun ProviderDetail(
             onSelectModel = { viewModel.selectModel(descriptor.id, it) },
             onRefresh = { viewModel.refreshModels(descriptor.id) },
             onTest = { viewModel.testConnection(descriptor.id) },
+            onEndpointChange = { viewModel.setCustomEndpoint(descriptor.id, it) },
+            onManualModelChange = { viewModel.setManualModelId(descriptor.id, it) },
         )
 
         if (connection.isConfigured && descriptor.id != state.activeProviderId) {
@@ -287,6 +290,8 @@ private fun ModelSection(
     onSelectModel: (String) -> Unit,
     onRefresh: () -> Unit,
     onTest: () -> Unit,
+    onEndpointChange: (String) -> Unit,
+    onManualModelChange: (String) -> Unit,
 ) {
     BossCard {
         Column(
@@ -323,14 +328,25 @@ private fun ModelSection(
             }
 
             when {
-                descriptor.modelsEndpoint == null ->
+                // No models endpoint (a custom/self-hosted runtime): there is nothing
+                // authoritative to ask, so the endpoint and model id are typed in. Without
+                // these two fields a custom provider could be given a key and still never
+                // be usable, because activeConfig() requires both.
+                descriptor.modelsEndpoint == null -> {
                     Text(
                         text =
                             "${descriptor.displayName} has no model list to query — " +
-                                "enter the model id your endpoint expects.",
+                                "enter the endpoint and the model id it expects.",
                         fontSize = 12.sp,
                         color = BossThemeColors.TextSecondary,
                     )
+                    ManualEndpointAndModel(
+                        connection = connection,
+                        enabled = !busy,
+                        onEndpointCommit = onEndpointChange,
+                        onModelCommit = onManualModelChange,
+                    )
+                }
 
                 catalog is CatalogState.NotConfigured ->
                     Text(
@@ -559,5 +575,56 @@ private fun MessageBanner(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Text(text = text, fontSize = 12.sp, color = BossThemeColors.TextPrimary)
+    }
+}
+
+/**
+ * Endpoint and model id for a provider with no model list to query.
+ *
+ * Committed on focus loss rather than per keystroke, so a partly-typed URL isn't
+ * persisted and every character doesn't cost a store write.
+ */
+@Composable
+private fun ManualEndpointAndModel(
+    connection: ProviderConnection,
+    enabled: Boolean,
+    onEndpointCommit: (String) -> Unit,
+    onModelCommit: (String) -> Unit,
+) {
+    var endpoint by remember(connection.providerId) {
+        mutableStateOf(connection.customEndpoint.orEmpty())
+    }
+    var modelId by remember(connection.providerId) {
+        mutableStateOf(connection.selectedModelId.orEmpty())
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        BossTextField(
+            value = endpoint,
+            onValueChange = { endpoint = it },
+            label = "Endpoint",
+            placeholder = "http://localhost:11434/v1/chat/completions",
+            enabled = enabled,
+            singleLine = true,
+            modifier = Modifier.onFocusChanged { focus ->
+                if (!focus.isFocused) onEndpointCommit(endpoint)
+            },
+        )
+        BossTextField(
+            value = modelId,
+            onValueChange = { modelId = it },
+            label = "Model id",
+            placeholder = "llama3.1:8b",
+            enabled = enabled,
+            singleLine = true,
+            modifier = Modifier.onFocusChanged { focus ->
+                if (!focus.isFocused) onModelCommit(modelId)
+            },
+        )
+        Text(
+            text = "Saved when you click away from a field.",
+            fontSize = 11.sp,
+            color = BossThemeColors.TextMuted,
+        )
     }
 }

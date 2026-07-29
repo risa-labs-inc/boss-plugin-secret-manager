@@ -35,6 +35,7 @@ object ProviderRegistry {
             envVarNames = listOf("ANTHROPIC_API_KEY"),
             consoleUrl = "https://console.anthropic.com/settings/keys",
             keyPlaceholder = "sk-ant-...",
+            pagingStyle = PagingStyle.ANTHROPIC_CURSOR,
         )
 
     private val openai =
@@ -61,6 +62,7 @@ object ProviderRegistry {
             envVarNames = listOf("GEMINI_API_KEY", "GOOGLE_API_KEY"),
             consoleUrl = "https://aistudio.google.com/apikey",
             keyPlaceholder = "AIza...",
+            pagingStyle = PagingStyle.GOOGLE_PAGE_TOKEN,
         )
 
     private val xai =

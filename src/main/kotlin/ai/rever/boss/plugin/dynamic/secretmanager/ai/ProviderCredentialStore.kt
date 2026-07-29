@@ -6,8 +6,22 @@ import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.api.UpdateSecretRequestData
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+
+/**
+ * Every provider's effective credential, plus whether the secret store could be read.
+ *
+ * Not a `Result`: environment-supplied keys work even when the store is unreachable, so
+ * the connections are always usable and the failure is a separate fact rather than a
+ * reason to throw the map away.
+ */
+data class ConnectionsSnapshot(
+    val connections: Map<String, ProviderConnection>,
+    val storeReadFailed: Boolean,
+)
 
 /**
  * Stores AI provider credentials and per-provider settings as ordinary secrets, so
@@ -30,6 +44,12 @@ import kotlinx.serialization.json.Json
  *
  * Resolution precedence is environment → stored secret → unconfigured. A key found in
  * the environment is never written here.
+ *
+ * Mutations are serialised through [mutex]: each one is a read-modify-write over the
+ * whole store, and the settings panel and the Secret Manager dialog drive this from
+ * separate ViewModels with separate busy flags. Two interleaved saves for one provider
+ * would otherwise both observe "no existing secret", both create one, and leave a
+ * duplicate whose winner is decided arbitrarily on the next read.
  */
 class ProviderCredentialStore(
     private val secrets: SecretDataProvider,
@@ -38,14 +58,22 @@ class ProviderCredentialStore(
     private val logger = BossLogger.forComponent("AiCredentialStore")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
+    private val mutex = Mutex()
+
     /**
-     * Read every provider's effective connection.
-     *
-     * Returns a failure only when the secret store itself could not be read — an
-     * unreadable store still lets environment-supplied keys work, so callers that
-     * only need those can ignore it.
+     * Last known provider secrets, so a save doesn't re-page the whole store three
+     * times. Cleared by every mutation and by [invalidate].
      */
-    suspend fun loadAll(): Result<Map<String, ProviderConnection>> {
+    @Volatile
+    private var cached: Map<String, StoredProvider>? = null
+
+    /** Drop the cached provider map, e.g. after an external edit in the secret list. */
+    fun invalidate() {
+        cached = null
+    }
+
+    /** Read every provider's effective connection. */
+    suspend fun loadAll(): ConnectionsSnapshot {
         val storedResult = loadStoredSecrets()
         val stored = storedResult.getOrElse { emptyMap() }
 
@@ -54,11 +82,10 @@ class ProviderCredentialStore(
                 descriptor.id to resolveConnection(descriptor, stored[descriptor.id])
             }
 
-        return if (storedResult.isFailure) {
-            Result.failure(storedResult.exceptionOrNull() ?: IllegalStateException("Secret store unavailable"))
-        } else {
-            Result.success(connections)
-        }
+        return ConnectionsSnapshot(
+            connections = connections,
+            storeReadFailed = storedResult.isFailure,
+        )
     }
 
     /**
@@ -67,7 +94,7 @@ class ProviderCredentialStore(
      * if the key itself came from the environment — the user still gets to pick a
      * model for a provider they authenticate through an env var.
      */
-    private fun resolveConnection(
+    private suspend fun resolveConnection(
         descriptor: ProviderDescriptor,
         stored: StoredProvider?,
     ): ProviderConnection {
@@ -125,48 +152,60 @@ class ProviderCredentialStore(
             )
         }
 
-        val existing = loadStoredSecrets().getOrElse { emptyMap() }[providerId]
-        return upsert(
-            descriptor = descriptor,
-            // Default to the provider's standard key name (TOGETHER_API_KEY, …) so the
-            // entry is identifiable at a glance in the secret list.
-            label = label ?: existing?.label ?: descriptor.standardKeyName,
-            apiKey = apiKey.trim(),
-            settings = existing?.settings ?: ProviderSettings(),
-            existingSecretId = existing?.secretId,
-        )
+        return mutex.withLock {
+            val existing = loadStoredSecrets().getOrElse { emptyMap() }[providerId]
+            upsert(
+                descriptor = descriptor,
+                // Default to the provider's standard key name (TOGETHER_API_KEY, …) so the
+                // entry is identifiable at a glance in the secret list.
+                label = label ?: existing?.label ?: descriptor.standardKeyName,
+                apiKey = apiKey.trim(),
+                settings = existing?.settings ?: ProviderSettings(),
+                existingSecretId = existing?.secretId,
+            ).also { invalidate() }
+        }
     }
 
-    /** Persist the non-secret settings for [providerId] without touching its key. */
+    /**
+     * Update the non-secret settings on [providerId]'s existing secret.
+     *
+     * Returns `false` when there is no secret to attach them to, which is the normal
+     * case for a provider whose key comes from the environment. It deliberately does
+     * **not** create a key-less entry: the store may reject a blank password, and an
+     * AI-provider card carrying no credential reads as broken in the secret list. The
+     * caller persists the choice elsewhere in that case — see `ActiveProviderPrefs`.
+     */
     suspend fun saveSettings(
         providerId: String,
         settings: ProviderSettings,
-    ): Result<Unit> {
+    ): Result<Boolean> {
         val descriptor =
             ProviderRegistry.find(providerId)
                 ?: return Result.failure(IllegalArgumentException("Unknown provider: $providerId"))
 
-        val existing = loadStoredSecrets().getOrElse { emptyMap() }[providerId]
+        return mutex.withLock {
+            val existing =
+                loadStoredSecrets().getOrElse { emptyMap() }[providerId]
+                    ?: return@withLock Result.success(false)
 
-        // With no stored secret there is nothing to attach settings to — which happens
-        // when the key comes from the environment. Create a key-less entry to hold the
-        // model choice so it survives a restart.
-        return upsert(
-            descriptor = descriptor,
-            apiKey = existing?.apiKey.orEmpty(),
-            label = existing?.label ?: descriptor.standardKeyName,
-            settings = settings,
-            existingSecretId = existing?.secretId,
-        )
+            upsert(
+                descriptor = descriptor,
+                apiKey = existing.apiKey,
+                label = existing.label ?: descriptor.standardKeyName,
+                settings = settings,
+                existingSecretId = existing.secretId,
+            ).also { invalidate() }.map { true }
+        }
     }
 
     /** Delete the stored secret for [providerId]. Environment keys are unaffected. */
-    suspend fun clearKey(providerId: String): Result<Unit> {
-        val existing =
-            loadStoredSecrets().getOrElse { emptyMap() }[providerId]
-                ?: return Result.success(Unit)
-        return secrets.deleteSecret(existing.secretId)
-    }
+    suspend fun clearKey(providerId: String): Result<Unit> =
+        mutex.withLock {
+            val existing =
+                loadStoredSecrets().getOrElse { emptyMap() }[providerId]
+                    ?: return@withLock Result.success(Unit)
+            secrets.deleteSecret(existing.secretId).also { invalidate() }
+        }
 
     private suspend fun upsert(
         descriptor: ProviderDescriptor,
@@ -211,8 +250,10 @@ class ProviderCredentialStore(
      * Pages through the store rather than taking the first page: a user with many
      * password entries would otherwise appear to have no providers configured.
      */
-    private suspend fun loadStoredSecrets(): Result<Map<String, StoredProvider>> =
-        runCatching {
+    private suspend fun loadStoredSecrets(): Result<Map<String, StoredProvider>> {
+        cached?.let { return Result.success(it) }
+
+        return runCatching {
             val found = mutableMapOf<String, StoredProvider>()
             var offset = 0
 
@@ -242,14 +283,16 @@ class ProviderCredentialStore(
                     break
                 }
             }
-            found
-        }.onFailure {
-            logger.warn(
-                LogCategory.SYSTEM,
-                "Could not read AI provider credentials",
-                mapOf("exception" to (it::class.simpleName ?: "Exception")),
-            )
-        }
+            found.toMap()
+        }.onSuccess { cached = it }
+            .onFailure {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Could not read AI provider credentials",
+                    mapOf("exception" to (it::class.simpleName ?: "Exception")),
+                )
+            }
+    }
 
     /**
      * Provider id from a secret. Prefers `website`, falling back to whichever tag

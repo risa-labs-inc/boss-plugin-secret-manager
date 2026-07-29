@@ -72,6 +72,27 @@ dependencies {
 
     // Serialization (for JSON parsing of SupabaseDataProvider responses)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+
+    // Tests. The model-list parsers are hand-written from provider docs and had no
+    // coverage; these run without a host or a live credential.
+    testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    // BossLogger binds slf4j at class-init, so a backend is required or every class
+    // holding a logger fails with NoClassDefFoundError in tests. The host provides one
+    // at runtime; tests have to supply their own.
+    testRuntimeOnly("org.slf4j:slf4j-simple:2.0.17")
+    // The api is compileOnly (the host supplies it at runtime), so it is absent from the
+    // test runtime by default — BossLogger lives there and would fail with
+    // NoClassDefFoundError. Tests need it on the classpath explicitly.
+    if (useLocalDependencies) {
+        testImplementation(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.70.jar"))
+    } else {
+        testImplementation(files("build/downloaded-deps/boss-plugin-api.jar"))
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
 }
 
 // Task to build plugin JAR with compiled classes only

@@ -2,7 +2,12 @@ package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Optional
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /**
  * Resolves provider API keys supplied through the environment.
@@ -23,24 +28,54 @@ class EnvResolver(
     private val logger = BossLogger.forComponent("AiEnvResolver")
 
     /**
+     * Memoised per variable name, including misses.
+     *
+     * [lookup] can spawn `launchctl` and read a file, and it is called for every
+     * provider on every credential load — a clean machine means all misses, so without
+     * this a single `loadAll()` cost roughly nine process spawns and nine file reads,
+     * and that happens again on every save and every model selection. Env vars don't
+     * change under a running process; the env file can, hence [invalidate].
+     */
+    private val cache = ConcurrentHashMap<String, Optional<String>>()
+
+    /**
      * First non-blank value among [names], or null.
      *
      * Providers list more than one variable where both are in common use (Google
      * accepts `GEMINI_API_KEY` and `GOOGLE_API_KEY`), and the order in the registry
      * is the priority order.
+     *
+     * Suspending because a cache miss does process and file I/O, which must not land on
+     * the UI dispatcher — the plugin scope falls back to `Dispatchers.Main`, and the
+     * `launchctl` path exists precisely for packaged macOS builds.
      */
-    fun resolve(names: List<String>): String? =
+    suspend fun resolve(names: List<String>): String? =
         names.firstNotNullOfOrNull { name -> lookup(name)?.takeIf { it.isNotBlank() } }
 
     /** Which variable actually supplied a value, for display next to the field. */
-    fun resolveSourceName(names: List<String>): String? =
+    suspend fun resolveSourceName(names: List<String>): String? =
         names.firstOrNull { !lookup(it).isNullOrBlank() }
 
-    private fun lookup(name: String): String? =
-        fromProcessEnv(name)
-            ?: fromSystemProperty(name)
-            ?: fromLaunchctl(name)
-            ?: fromEnvFile(name)
+    /** Drop memoised results, e.g. after the user edits `~/.boss/env_vars`. */
+    fun invalidate() = cache.clear()
+
+    private suspend fun lookup(name: String): String? {
+        cache[name]?.let { return it.orElse(null) }
+
+        // Cheap sources first, and only enter IO when they miss.
+        val quick = fromProcessEnv(name) ?: fromSystemProperty(name)
+        if (quick != null) {
+            cache[name] = Optional.of(quick)
+            return quick
+        }
+
+        val slow =
+            withContext(Dispatchers.IO) {
+                fromLaunchctl(name) ?: fromEnvFile(name)
+            }
+        cache[name] = Optional.ofNullable(slow)
+        return slow
+    }
 
     private fun fromProcessEnv(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
 
@@ -55,7 +90,12 @@ class EnvResolver(
         return runCatching {
             val process = ProcessBuilder("launchctl", "getenv", name).start()
             val output = process.inputStream.bufferedReader().readText().trim()
-            process.waitFor()
+            // Bounded: an unbounded waitFor lets a wedged launchctl hang the lookup, and
+            // this runs for every provider on every credential load.
+            if (!process.waitFor(LAUNCHCTL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return@runCatching null
+            }
             if (process.exitValue() == 0) output.takeIf { it.isNotBlank() } else null
         }.getOrNull()
     }
@@ -90,6 +130,7 @@ class EnvResolver(
 
     companion object {
         private const val ENV_FILE_NAME = "env_vars"
+        private const val LAUNCHCTL_TIMEOUT_SECONDS = 2L
 
         /**
          * Mirrors the host's BossDirectories: `~/.boss`, or `~/.boss_debug` in dev
