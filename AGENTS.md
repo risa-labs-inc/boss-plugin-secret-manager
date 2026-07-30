@@ -65,6 +65,20 @@ deliberately no bundled fallback list: the host implementation this replaced shi
 hardcoded models that drifted years out of date, and a provider with no credential
 now reports "not configured" instead of guessing.
 
+### Provider keys are readable by agents through `secret_get`
+
+Storing provider keys as ordinary secrets buys encryption, RLS and an audit trail for free,
+but it has a second half worth stating: `secret_get` (`SecretManagerMcpTools.kt`) returns any
+secret's `password` by id to the calling agent, so **every provider API key is agent-readable
+through a tool this same plugin registers**. That is arguably intended — an agent using a
+provider needs its key, and `PluginContext.llmProvider` already hands `LlmConfig.apiKey` to
+plugins — but the MCP surface is a wider trust boundary than the in-process one, and this
+feature is what put provider keys behind it. It is *not* a new mechanism (`secret_get` already
+exposed every other secret, including Plugin Store keys), only new data in an existing channel.
+
+If that is not wanted, exclude `TAG_AI_PROVIDER` entries from `secret_get` — the tag is
+already on every entry this feature writes.
+
 ### Do not add OAuth without re-checking the docs
 
 Sign-in is intentionally absent. As of July 2026:
@@ -96,6 +110,13 @@ guard — a member newer than the floor would throw `NoSuchMethodError` there an
 *whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
 unconstrained.
 
+The audit also has to cover the UI kit, not just `PluginContext`: this feature added
+first-time uses of `BossSection`, `BossCard`, `BossTextField`, `BossPrimaryButton` and
+`BossSecondaryButton` (only `BossTheme`/`BossThemeColors` were used before). Containment holds
+because `AiProvidersPanel` is reachable only from `LlmProviderSettingsApiImpl`, so those
+symbols never load on a pre-1.0.71 host — but that stops being true the moment the panel is
+rendered from `SecretManagerContent`, which is exactly why it is written down here.
+
 `LlmProviderSettingsApiImpl` is the **only** file referencing api symbols added in
 1.0.71 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE`). Everything else
 uses the plugin-local `WireFormat` enum. That is why `registerAiProviderSettings`
@@ -114,7 +135,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 70 host-independent cases, no live credential needed, run on every
+`./gradlew test` — 74 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
@@ -139,7 +160,14 @@ unconditionally is indistinguishable from no test:
 - removing the write-path cache-version check fails
   `a rejected cache version is not laundered back in by the write path`.
 
-The second only got teeth after a correction worth remembering: the first version of that
+A third: reverting the `EnvResolver` stubbing in `ProviderCredentialStoreTest` fails 9 tests
+*only if* provider variables are exported. `EnvResolver` consults the process environment and
+system properties **before** the `env_vars` file, and these tests must use the registry's real
+variable names, so they are hermetic only because all three sources are injected. CI never
+caught this because CI exports none of them — run the suite with `OPENAI_API_KEY` set if you
+touch it.
+
+The cache-laundering test only got teeth after a correction worth remembering: the first version of that
 test seeded the stale entry under the *same* provider it then refreshed, so the merge
 replaced it either way and the test passed against the bug. The laundering only shows up on a
 *bystander* provider's entry. If you extend these, re-run the mutation.

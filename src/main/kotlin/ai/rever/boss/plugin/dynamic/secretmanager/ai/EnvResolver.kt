@@ -24,6 +24,23 @@ import java.util.concurrent.TimeUnit
  */
 class EnvResolver(
     private val bossRootDir: File = defaultBossRootDir(),
+    /**
+     * The process environment, injectable so tests can be hermetic.
+     *
+     * Production behaviour is unchanged. Tests need this because the file is only the
+     * *last* source consulted: a developer with `OPENAI_API_KEY` or `TOGETHER_API_KEY`
+     * exported — likely for anyone working on this feature — otherwise saw the real value
+     * win over the fixture and several credential-store tests fail. CI passed only because
+     * it happens to export none of them.
+     */
+    private val processEnv: (String) -> String? = System::getenv,
+    /** As [processEnv], for `-D` system properties. */
+    private val systemProperty: (String) -> String? = System::getProperty,
+    /**
+     * Whether to consult `launchctl getenv`. Off in tests: it really spawns a process on
+     * macOS, which is both slow and another route for the host environment to leak in.
+     */
+    private val useLaunchctl: Boolean = true,
 ) {
     private val logger = BossLogger.forComponent("AiEnvResolver")
 
@@ -71,15 +88,15 @@ class EnvResolver(
 
         val slow =
             withContext(Dispatchers.IO) {
-                fromLaunchctl(name) ?: fromEnvFile(name)
+                (if (useLaunchctl) fromLaunchctl(name) else null) ?: fromEnvFile(name)
             }
         cache[name] = Optional.ofNullable(slow)
         return slow
     }
 
-    private fun fromProcessEnv(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
+    private fun fromProcessEnv(name: String): String? = processEnv(name)?.takeIf { it.isNotBlank() }
 
-    private fun fromSystemProperty(name: String): String? = System.getProperty(name)?.takeIf { it.isNotBlank() }
+    private fun fromSystemProperty(name: String): String? = systemProperty(name)?.takeIf { it.isNotBlank() }
 
     /**
      * `launchctl getenv` picks up machine-wide variables set with `launchctl setenv`,

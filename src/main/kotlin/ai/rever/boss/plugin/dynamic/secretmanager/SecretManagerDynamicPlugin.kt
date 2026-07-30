@@ -28,14 +28,17 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
     override val pluginId: String = "ai.rever.boss.plugin.dynamic.secretmanager"
     override val displayName: String = "Secret Manager (Dynamic)"
     /**
-     * Read from the jar manifest, which `buildPluginJar` stamps from the Gradle version.
+     * Read from the bundled `plugin.json`, which `processResources` stamps from the Gradle
+     * version — the same file the host and store read, so it cannot disagree with them.
      *
-     * Previously a hardcoded third copy that had drifted out of step with both
-     * build.gradle.kts and the plugin.json it syncs. Falls back to "unknown" only when
-     * running outside a packaged jar (tests, IDE).
+     * Deliberately **not** `javaClass.package?.implementationVersion`. `buildPluginJar` does
+     * write `Implementation-Version` into the manifest, but `getImplementationVersion()`
+     * returns null in practice — verified empirically against a plain `URLClassLoader`, which
+     * is what the host's `PluginClassLoader` extends — so that reported this plugin's version
+     * as "unknown" to the host and store. The manifest is kept as a fallback rather than
+     * removed: it costs nothing and covers the resource ever moving.
      */
-    override val version: String =
-        javaClass.`package`?.implementationVersion ?: "unknown"
+    override val version: String = readVersion()
     override val description: String = "Manage encrypted credentials and secrets, including Plugin Store API keys"
     override val author: String = "Risa Labs"
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-secret-manager"
@@ -43,6 +46,29 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
     private companion object {
         /** api release that introduced LlmProviderSettingsAPI. */
         const val REQUIRED_API_VERSION = "1.0.71"
+
+        private const val MANIFEST_RESOURCE = "META-INF/boss-plugin/plugin.json"
+
+        /** Matches `"version": "1.2.6"` without pulling a JSON parser into class init. */
+        private val VERSION_PATTERN = Regex(""""version"\s*:\s*"([^"]+)"""")
+
+        /**
+         * plugin.json first, jar manifest second, "unknown" only if both are unavailable
+         * (running from classes in an IDE or a test, where no version exists to report).
+         */
+        private fun readVersion(): String {
+            val fromResource =
+                runCatching {
+                    SecretManagerDynamicPlugin::class.java.classLoader
+                        ?.getResourceAsStream(MANIFEST_RESOURCE)
+                        ?.bufferedReader()
+                        ?.use { reader -> VERSION_PATTERN.find(reader.readText())?.groupValues?.get(1) }
+                }.getOrNull()
+
+            return fromResource?.takeIf { it.isNotBlank() }
+                ?: SecretManagerDynamicPlugin::class.java.`package`?.implementationVersion
+                ?: "unknown"
+        }
     }
 
     override fun register(context: PluginContext) {

@@ -203,6 +203,37 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `a failed fetch is not papered over by seeding a cached list`() =
+        runTest {
+            // load() calls seedFromCache on every entry into the section. A Failed state used
+            // to be overwritten by a within-TTL cached list, isStale then reported "fresh" so
+            // no refetch happened, and the panel showed a working model picker for a
+            // credential that does not authenticate — the 401 message simply gone.
+            val dir = Files.createTempDirectory("catalog-failed").toFile()
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${descriptor.id}":{"models":[{"id":"cached","displayName":"Cached"}],
+                "fetchedAtEpochMs":1000000}},"version":1}""".trimIndent(),
+            )
+
+            val fake = QueuedHttpClient(listOf(401 to """{"error":"bad key"}"""))
+            val catalog = ModelCatalog(client = ModelCatalogClient(fake), cacheDir = dir)
+
+            catalog.refresh(descriptor, apiKey = "a-rejected-key", force = true)
+            assertTrue(catalog.stateOf(descriptor.id) is CatalogState.Failed, "the 401 did not land")
+
+            // Re-entering the section must not erase the failure.
+            catalog.seedFromCache()
+
+            val state = catalog.stateOf(descriptor.id)
+            assertTrue(
+                state is CatalogState.Failed,
+                "seeding replaced a rejected-key failure with a cached list: $state",
+            )
+            // ...and it stays stale, so the next sweep actually retries.
+            assertTrue(catalog.isStale(descriptor.id, nowEpochMs = 1_000_000))
+        }
+
+    @Test
     fun `the TTL boundary is six hours`() {
         // Documented as six hours and shown to the user as an age; pin it so a change is
         // deliberate.

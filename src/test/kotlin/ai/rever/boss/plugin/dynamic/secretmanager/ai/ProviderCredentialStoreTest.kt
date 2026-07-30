@@ -31,11 +31,24 @@ class ProviderCredentialStoreTest {
     private val together = ProviderRegistry.find(ProviderRegistry.TOGETHER)!!
     private val openai = ProviderRegistry.find(ProviderRegistry.OPENAI)!!
 
-    /** An [EnvResolver] backed by a temp `env_vars` file, so no real environment leaks in. */
+    /**
+     * A hermetic [EnvResolver]: the fixture file is the *only* source of variables.
+     *
+     * The file alone isn't enough — it is consulted last, after the process environment,
+     * system properties and `launchctl`. These tests use the registry's real variable names
+     * (they have to: that is what the store looks up), so a developer with `OPENAI_API_KEY`
+     * exported would otherwise have the real value beat the fixture. Stubbing all three
+     * makes the suite independent of whoever runs it.
+     */
     private fun envWith(contents: String = ""): EnvResolver {
         val dir: File = Files.createTempDirectory("cred-store-env").toFile()
         File(dir, "env_vars").writeText(contents)
-        return EnvResolver(bossRootDir = dir)
+        return EnvResolver(
+            bossRootDir = dir,
+            processEnv = { null },
+            systemProperty = { null },
+            useLaunchctl = false,
+        )
     }
 
     private fun secret(

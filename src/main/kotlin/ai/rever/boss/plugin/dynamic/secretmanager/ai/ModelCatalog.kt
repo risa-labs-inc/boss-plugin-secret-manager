@@ -60,6 +60,12 @@ class ModelCatalog(
             val seeded = current.toMutableMap()
             cached.providers.forEach { (providerId, entry) ->
                 if (seeded[providerId] is CatalogState.Loaded) return@forEach
+                // A Failed state must survive seeding, or a rejected key is papered over:
+                // load() runs seedFromCache on every entry into the section, so a 401 got
+                // overwritten by a within-TTL cached list, isStale then said "fresh", no
+                // refetch happened, and the panel showed a working model picker for a
+                // credential that does not authenticate.
+                if (seeded[providerId] is CatalogState.Failed) return@forEach
                 if (entry.models.isEmpty()) return@forEach
                 seeded[providerId] =
                     CatalogState.Loaded(
