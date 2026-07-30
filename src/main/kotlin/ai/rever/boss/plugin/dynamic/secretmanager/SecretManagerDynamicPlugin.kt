@@ -120,6 +120,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     catalog = ModelCatalog(cacheDir = cacheDir),
                     prefs = ActiveProviderPrefs(),
                     legacyImport = LegacySettingsImport(credentialStore, envResolver),
+                    envResolver = envResolver,
                     splitViewOperations = context.splitViewOperations,
                     scope = pluginScope,
                 )

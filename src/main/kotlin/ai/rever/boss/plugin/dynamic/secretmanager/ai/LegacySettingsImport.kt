@@ -34,7 +34,7 @@ class LegacySettingsImport(
     private val legacyFile: File get() = File(bossRootDir, LEGACY_FILE_NAME)
 
     /** What an import would do, or null when there is nothing to import. */
-    suspend fun inspect(): LegacyImportOffer? =
+    suspend fun inspectAndRetireIfEmpty(): LegacyImportOffer? =
         withContext(Dispatchers.IO) {
             val file = legacyFile
             if (!file.exists()) return@withContext null
@@ -60,7 +60,8 @@ class LegacySettingsImport(
 
             if (known.isEmpty()) {
                 // Genuinely nothing here for us — safe to retire so the offer stops
-                // appearing.
+                // appearing. This write is why the method is not called `inspect`: it is
+                // the one path where merely looking changes the filesystem.
                 archive()
                 return@withContext null
             }
@@ -96,7 +97,7 @@ class LegacySettingsImport(
      * omitted and the file is left in place so the attempt can be repeated.
      */
     suspend fun import(): Result<List<String>> {
-        val offer = inspect() ?: return Result.success(emptyList())
+        val offer = inspectAndRetireIfEmpty() ?: return Result.success(emptyList())
 
         val parsed =
             withContext(Dispatchers.IO) {
@@ -136,6 +137,15 @@ class LegacySettingsImport(
     }
 
     /** Rename the legacy file so it is no longer picked up, keeping it recoverable. */
+    /**
+     * Renamed, not deleted — deliberately.
+     *
+     * The host kernel's self-healing resolves its repair key before any plugin loads, so it
+     * cannot reach this plugin's store; `llm_settings.json.migrated` is its only remaining
+     * legacy source (see BossConsole's `SelfHealingSettings.LEGACY_KEY_FILE_NAMES`).
+     * Shredding the file here would silently break that. The import banner therefore tells
+     * the user the keys are still in it and that deleting it is their call.
+     */
     private suspend fun archive() =
         withContext(Dispatchers.IO) {
             runCatching {

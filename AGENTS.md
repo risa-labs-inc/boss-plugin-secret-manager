@@ -105,7 +105,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 43 host-independent cases, no live credential needed. The
+`./gradlew test` — 64 host-independent cases, no live credential needed. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
 `ModelCatalogClientParseTest` pins the captured shapes (Google's `models/` prefix
@@ -114,6 +114,17 @@ never reaches an error message). Also covered: `env_vars` parsing (`=` inside va
 `ProviderSettings` round-trip and tolerance, the catalog TTL / cache-seeding rules, and the
 preference file's read-modify-write (one file holds the active provider *and* every model
 selection, and for env-keyed providers it is the only record of that choice).
+
+`ProviderCredentialStore` is covered through a fake `SecretDataProvider`, because its
+invariants *are* the security story: env-then-stored-then-none precedence, refusing to write
+an env-supplied key back to disk, updating rather than duplicating a provider entry, paging
+past the first page, and the cache honouring `invalidate()`. `ModelCatalogClientPagingTest`
+uses a response *queue* rather than one fixed body, which is what makes cursor-following, the
+`MAX_PAGES` bound and the xAI primary-then-fallback path reachable at all.
+
+The paging suite was validated against a deliberate mutation (dropping the `after_id`
+parameter) to confirm it fails when propagation breaks — worth repeating if you extend it,
+since a paging test that passes unconditionally is indistinguishable from no test.
 
 Two test-only dependencies exist because the api is `compileOnly`: the api jar itself,
 and an slf4j backend — `BossLogger` binds slf4j at class-init, so without one every

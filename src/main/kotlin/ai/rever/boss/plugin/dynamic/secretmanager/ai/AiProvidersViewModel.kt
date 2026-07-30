@@ -55,7 +55,7 @@ class AiProvidersViewModel(
     private val legacyImport: LegacySettingsImport?,
     private val splitViewOperations: SplitViewOperations?,
     private val scope: CoroutineScope,
-    private val envResolver: EnvResolver = EnvResolver(),
+    private val envResolver: EnvResolver,
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -120,13 +120,19 @@ class AiProvidersViewModel(
         connections: Map<String, ProviderConnection>,
     ): Map<String, ProviderConnection> {
         val preferred = prefs.readModels()
-        if (preferred.isEmpty()) return connections
+        val endpoints = prefs.readCustomEndpoints()
+        if (preferred.isEmpty() && endpoints.isEmpty()) return connections
         return connections.mapValues { (providerId, connection) ->
-            if (connection.selectedModelId != null) {
-                connection
-            } else {
-                preferred[providerId]?.let { connection.copy(selectedModelId = it) } ?: connection
+            // A stored secret's settings win: prefs are the fallback for providers that
+            // have no secret to attach settings to, not a second source of truth.
+            var merged = connection
+            if (merged.selectedModelId == null) {
+                merged = preferred[providerId]?.let { merged.copy(selectedModelId = it) } ?: merged
             }
+            if (merged.customEndpoint.isNullOrBlank()) {
+                merged = endpoints[providerId]?.let { merged.copy(customEndpoint = it) } ?: merged
+            }
+            merged
         }
     }
 
@@ -137,6 +143,11 @@ class AiProvidersViewModel(
             _state.update { it.copy(isLoading = true, error = null) }
 
             catalog.seedFromCache()
+            // Re-read the environment on every entry into the section. The panel tells
+            // users they can unset a variable to take key management over in BOSS, and the
+            // resolver memoises misses as well as hits — so without this that instruction
+            // was only true after an app restart.
+            envResolver.invalidate()
             val connections = loadConnections()
 
             _state.update { current ->
@@ -319,9 +330,12 @@ class AiProvidersViewModel(
                         }
                     }?.getOrNull()
 
-            // No secret to attach settings to (an env-keyed provider), so the choice goes
-            // to prefs — see ActiveProviderPrefs.readModels.
-            if (written == false) prefs.writeModel(providerId, modelId)
+            // `written` is three-way: true = stored, false = no secret to attach to (an
+            // env-keyed provider), null = no store at all (not signed in). Only a genuine
+            // save failure should be left to the revert above; both other cases fall back
+            // to prefs. Testing `== false` missed the null case — precisely the state where
+            // prefs are the *only* place the choice could live.
+            if (written != true) prefs.writeModel(providerId, modelId)
         }
     }
 
@@ -340,9 +354,16 @@ class AiProvidersViewModel(
                     temperature = existing.temperature,
                     maxTokens = existing.maxTokens,
                 )
-            store?.saveSettings(providerId, settings)?.onFailure { error ->
-                _state.update { it.copy(error = error.message ?: "Could not save the endpoint.") }
-            }
+            val written =
+                store?.saveSettings(providerId, settings)
+                    ?.onFailure { error ->
+                        _state.update { it.copy(error = error.message ?: "Could not save the endpoint.") }
+                    }?.getOrNull()
+
+            // Same three-way fallback as selectModel. A keyless local runtime has no secret
+            // to hang settings on, so without this the endpoint was accepted in the UI,
+            // echoed into state, and silently never persisted.
+            if (written != true) prefs.writeCustomEndpoint(providerId, trimmed)
         }
     }
 
@@ -443,7 +464,7 @@ class AiProvidersViewModel(
     }
 
     private suspend fun checkLegacyImport() {
-        val offer = legacyImport?.inspect() ?: return
+        val offer = legacyImport?.inspectAndRetireIfEmpty() ?: return
         _state.update { it.copy(legacyOffer = offer) }
         logger.info(
             LogCategory.SYSTEM,

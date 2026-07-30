@@ -67,8 +67,19 @@ class ProviderCredentialStore(
     @Volatile
     private var cached: Map<String, StoredProvider>? = null
 
+    /**
+     * Bumped by every [invalidate]; a load only seats its result if the generation it
+     * started in is still current.
+     */
+    private val generation = java.util.concurrent.atomic.AtomicLong(0)
+
     /** Drop the cached provider map, e.g. after an external edit in the secret list. */
     fun invalidate() {
+        // Order matters: bump first, so a load that is already paging cannot seat a map it
+        // read before the deletion. Clearing alone left a window where an in-flight
+        // loadStoredSecrets re-seated the pre-delete map and resurrected a deleted
+        // provider for the rest of the session — the exact thing invalidate() prevents.
+        generation.incrementAndGet()
         cached = null
     }
 
@@ -253,6 +264,10 @@ class ProviderCredentialStore(
     private suspend fun loadStoredSecrets(): Result<Map<String, StoredProvider>> {
         cached?.let { return Result.success(it) }
 
+        // Captured before the first page: if invalidate() lands while we are paging, this
+        // result is already stale and must not be seated.
+        val startedAt = generation.get()
+
         return runCatching {
             val found = mutableMapOf<String, StoredProvider>()
             var offset = 0
@@ -284,7 +299,9 @@ class ProviderCredentialStore(
                 }
             }
             found.toMap()
-        }.onSuccess { cached = it }
+        }.onSuccess { loaded ->
+            if (generation.get() == startedAt) cached = loaded
+        }
             .onFailure {
                 logger.warn(
                     LogCategory.SYSTEM,

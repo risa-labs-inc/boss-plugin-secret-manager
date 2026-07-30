@@ -268,7 +268,21 @@ class ModelCatalogClient(
         val obj = root as? JsonObject ?: return null
         return when (descriptor.pagingStyle) {
             PagingStyle.ANTHROPIC_CURSOR ->
-                if (obj.bool("has_more") == true) obj.str("last_id") else null
+                if (obj.bool("has_more") == true) {
+                    // has_more with a missing or blank last_id would otherwise stop paging
+                    // and report the truncated list as complete — the silent clipping this
+                    // whole feature exists to remove. Say so instead.
+                    obj.str("last_id") ?: run {
+                        logger.warn(
+                            LogCategory.NETWORK,
+                            "Provider reported more models but gave no cursor; list may be incomplete",
+                            mapOf("provider" to descriptor.id),
+                        )
+                        null
+                    }
+                } else {
+                    null
+                }
 
             PagingStyle.GOOGLE_PAGE_TOKEN -> obj.str("nextPageToken")
 
@@ -414,7 +428,11 @@ class ModelCatalogClient(
             HttpClient
                 .newBuilder()
                 .connectTimeout(CONNECT_TIMEOUT)
-                .followRedirects(HttpClient.Redirect.NORMAL)
+                // NEVER, not NORMAL: every endpoint here is fixed and first-party, so
+                // following a redirect buys nothing — while Google's key travels in the
+                // query string and OpenAI/Anthropic send an auth header, so a redirect
+                // would hand the credential to whatever host answered.
+                .followRedirects(HttpClient.Redirect.NEVER)
                 .build()
     }
 }

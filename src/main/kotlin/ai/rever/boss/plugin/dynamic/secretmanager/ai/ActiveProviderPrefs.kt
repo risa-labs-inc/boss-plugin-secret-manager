@@ -48,6 +48,34 @@ class ActiveProviderPrefs(
         update { it.copy(activeProviderId = providerId) }
     }
 
+    /**
+     * Endpoints for providers with no secret to attach settings to.
+     *
+     * A keyless local runtime (Ollama, vLLM) is configured by its endpoint alone, so that
+     * endpoint is configuration that must survive a restart even though no credential
+     * exists to carry it. Same reasoning as [readModels].
+     */
+    suspend fun readCustomEndpoints(): Map<String, String> =
+        readPrefs().endpointByProvider.filterKeys { ProviderRegistry.find(it) != null }
+
+    /** Persist [endpoint] as [providerId]'s endpoint, or forget it when blank. */
+    suspend fun writeCustomEndpoint(
+        providerId: String,
+        endpoint: String,
+    ) {
+        update {
+            val trimmed = endpoint.trim()
+            it.copy(
+                endpointByProvider =
+                    if (trimmed.isEmpty()) {
+                        it.endpointByProvider - providerId
+                    } else {
+                        it.endpointByProvider + (providerId to trimmed)
+                    },
+            )
+        }
+    }
+
     /** Persist [modelId] as [providerId]'s selected model. */
     suspend fun writeModel(
         providerId: String,
@@ -105,6 +133,7 @@ class ActiveProviderPrefs(
     private data class Prefs(
         val activeProviderId: String? = null,
         val modelByProvider: Map<String, String> = emptyMap(),
+        val endpointByProvider: Map<String, String> = emptyMap(),
     )
 
     companion object {

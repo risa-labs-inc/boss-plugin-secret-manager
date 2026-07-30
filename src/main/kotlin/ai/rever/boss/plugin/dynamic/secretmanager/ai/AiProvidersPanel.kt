@@ -546,9 +546,11 @@ private fun LegacyImportBanner(
             Text(
                 text =
                     "Keys for ${offer.providerIds.joinToString(", ")} were found in " +
-                        "${offer.sourcePath}. Importing moves them into encrypted storage and " +
-                        "retires that file. Model choices are not imported — pick from each " +
-                        "provider's current list instead.",
+                        "${offer.sourcePath}. Importing copies them into encrypted storage " +
+                        "and renames that file to .migrated — the keys stay in it as plain " +
+                        "text, so delete it yourself once you've confirmed everything works. " +
+                        "Model choices are not imported — pick from each provider's current " +
+                        "list instead.",
                 fontSize = 12.sp,
                 color = BossThemeColors.TextSecondary,
             )

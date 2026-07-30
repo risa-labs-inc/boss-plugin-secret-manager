@@ -170,7 +170,15 @@ data class ProviderConnection(
     /** Label shown alongside the credential, e.g. an account or key name. */
     val label: String? = null,
 ) {
-    val isConfigured: Boolean get() = apiKey.isNotBlank()
+    /**
+     * A local runtime (Ollama, vLLM, llama.cpp) needs no credential, so for [CUSTOM] an
+     * endpoint alone counts. Requiring a key there forced users to invent a dummy one to
+     * make `activeConfig()` resolve at all.
+     */
+    val isConfigured: Boolean
+        get() =
+            apiKey.isNotBlank() ||
+                (providerId == ProviderRegistry.CUSTOM && !customEndpoint.isNullOrBlank())
 
     companion object {
         const val DEFAULT_TEMPERATURE: Float = 0.7f
