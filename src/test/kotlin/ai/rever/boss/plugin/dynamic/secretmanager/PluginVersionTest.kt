@@ -28,9 +28,22 @@ class PluginVersionTest {
     }
 
     @Test
-    fun `matches the version in the bundled plugin manifest`() {
-        // Same file the host and store read, so agreeing with it is the whole point — a
-        // second source of truth is what drifted before.
+    fun `matches the version Gradle is building`() {
+        // Gradle injects this, so the assertion is not circular. Comparing against the
+        // bundled plugin.json instead would pass for *any* value in that file — including
+        // the unstamped 1.0.9 committed to git, which is valid semver and would sail through
+        // a format-only check while build.gradle.kts said something else.
+        val expected =
+            System.getProperty("boss.plugin.expectedVersion")
+                ?: error("boss.plugin.expectedVersion not set — see the Test task in build.gradle.kts")
+
+        assertEquals(expected, plugin.version)
+    }
+
+    @Test
+    fun `the bundled manifest agrees with the reported version`() {
+        // Both must match Gradle, so they must match each other. This is what catches
+        // processResources not having stamped the copy that actually reaches the jar.
         val manifest =
             javaClass.classLoader
                 .getResourceAsStream("META-INF/boss-plugin/plugin.json")
@@ -42,13 +55,14 @@ class PluginVersionTest {
             Regex(""""version"\s*:\s*"([^"]+)"""").find(manifest)?.groupValues?.get(1)
                 ?: error("plugin.json declares no version")
 
-        assertEquals(declared, plugin.version)
+        assertEquals(plugin.version, declared)
+        assertEquals(System.getProperty("boss.plugin.expectedVersion"), declared)
     }
 
     @Test
     fun `looks like a semantic version`() {
-        // Catches a stray placeholder surviving resource filtering, which would otherwise
-        // reach the store as a valid-looking release.
+        // Weak on its own — 1.0.9 would pass — but it catches a placeholder surviving
+        // resource filtering, which would otherwise reach the store looking like a release.
         assertTrue(
             plugin.version.matches(Regex("""\d+\.\d+\.\d+""")),
             "not a semantic version: ${plugin.version}",

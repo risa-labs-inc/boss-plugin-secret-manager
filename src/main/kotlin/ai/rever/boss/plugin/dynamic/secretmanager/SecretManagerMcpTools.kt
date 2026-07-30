@@ -25,9 +25,13 @@ internal class SecretManagerMcpToolProvider(
      * Invalidated after any write, for the same reason the panel's CRUD paths do it: the
      * AI provider cache is keyed off these same secrets, so an agent deleting an
      * `ai-provider` entry would otherwise leave `activeConfig()` handing the revoked
-     * credential to other plugins until restart. Null when no AI provider store exists.
+     * credential to other plugins until restart.
+     *
+     * Deliberately **not** defaulted: a `= null` default is what let the sole call site go
+     * unwired while still compiling, so both invalidate calls were dead code in the shipped
+     * jar. One call site, no default.
      */
-    private val aiProviderStore: ProviderCredentialStore? = null,
+    private val aiProviderStore: ProviderCredentialStore,
 ) : McpToolProvider {
 
     override fun tools(): List<McpToolDefinition> = listOf(
@@ -111,7 +115,7 @@ internal class SecretManagerMcpToolProvider(
                     )
                 ).fold(
                     onSuccess = {
-                        aiProviderStore?.invalidate()
+                        aiProviderStore.invalidate()
                         McpToolResult("Created secret for $website.")
                     },
                     onFailure = { McpToolResult("Failed: ${it.message}", isError = true) },
@@ -128,7 +132,7 @@ internal class SecretManagerMcpToolProvider(
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
                 secrets.deleteSecret(id).fold(
                     onSuccess = {
-                        aiProviderStore?.invalidate()
+                        aiProviderStore.invalidate()
                         McpToolResult("Deleted secret $id.")
                     },
                     onFailure = { McpToolResult("Failed: ${it.message}", isError = true) },

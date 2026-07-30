@@ -65,6 +65,24 @@ deliberately no bundled fallback list: the host implementation this replaced shi
 hardcoded models that drifted years out of date, and a provider with no credential
 now reports "not configured" instead of guessing.
 
+### The version must come from Gradle, not from a second copy of plugin.json
+
+`version` reads the bundled `plugin.json` that `processResources` stamps. Two traps here, both
+hit once already:
+
+- `javaClass.package?.implementationVersion` does **not** work, even though `buildPluginJar`
+  writes `Implementation-Version` into the manifest. `getImplementationVersion()` returns null
+  under a plain `URLClassLoader`, which is what the host's `PluginClassLoader` extends, so the
+  plugin reported `"unknown"` to the host and store for a whole release.
+- The jar tasks must **not** also `from("src/main/resources")`. `sourceSets.main.output` already
+  carries the stamped copy; adding the raw directory put an *unstamped* `plugin.json` in the jar
+  too (the committed one says `1.0.9`), and with `duplicatesStrategy = EXCLUDE` the winner was
+  decided by `from` order alone.
+
+`PluginVersionTest` asserts against `boss.plugin.expectedVersion`, injected by the Test task from
+the Gradle version. Comparing the reported version to the bundled `plugin.json` would be circular
+— both read the same file, so any value in it passes, and `1.0.9` is valid semver.
+
 ### Provider keys are readable by agents through `secret_get`
 
 Storing provider keys as ordinary secrets buys encryption, RLS and an audit trail for free,
@@ -135,7 +153,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 74 host-independent cases, no live credential needed, run on every
+`./gradlew test` — 79 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

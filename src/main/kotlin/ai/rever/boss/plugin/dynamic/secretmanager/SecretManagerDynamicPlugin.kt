@@ -109,7 +109,9 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         }
 
         // Contribute secret_* MCP tools (expose secret values to agents; auto-removed on disable/unload).
-        context.registerMcpToolProvider(SecretManagerMcpToolProvider(pluginId, secretDataProvider))
+        context.registerMcpToolProvider(
+            SecretManagerMcpToolProvider(pluginId, secretDataProvider, credentialStore),
+        )
 
         registerAiProviderSettings(context, credentialStore, envResolver, pluginScope)
     }
