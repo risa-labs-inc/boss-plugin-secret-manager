@@ -1,9 +1,5 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
-import java.util.concurrent.CompletableFuture
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -175,6 +171,34 @@ class ModelCatalogClientPagingTest {
         }
 
     @Test
+    fun `a rejected key does not trigger a second request against the fallback`() =
+        runTest {
+            // The fallback exists because the primary endpoint is a guess, not because the
+            // credential might be. Retrying a 401 would 401 again, and only the second
+            // message would reach the user.
+            val fake = QueuedHttpClient(listOf(401 to """{"error":"bad key"}"""))
+
+            val result = ModelCatalogClient(fake).fetch(descriptor(ProviderRegistry.XAI), "k")
+
+            assertTrue(result.isFailure)
+            assertEquals(1, fake.requests.size, "retried the fallback after an auth failure")
+            assertTrue(result.exceptionOrNull()?.message?.contains("401") == true)
+        }
+
+    @Test
+    fun `a rate-limited provider is not hit twice`() =
+        runTest {
+            // 429 means the provider just asked us to slow down; a second request per
+            // refresh is the opposite of that.
+            val fake = QueuedHttpClient(listOf(429 to """{"error":"slow down"}"""))
+
+            val result = ModelCatalogClient(fake).fetch(descriptor(ProviderRegistry.XAI), "k")
+
+            assertTrue(result.isFailure)
+            assertEquals(1, fake.requests.size, "retried the fallback while rate-limited")
+        }
+
+    @Test
     fun `a provider with no fallback reports the original failure`() =
         runTest {
             val fake = QueuedHttpClient(listOf(500 to """{"error":"boom"}"""))
@@ -185,88 +209,4 @@ class ModelCatalogClientPagingTest {
             assertEquals(1, fake.requests.size, "retried an endpoint that has no fallback")
             assertTrue(result.exceptionOrNull()?.message?.contains("500") == true)
         }
-
-    /**
-     * Serves [responses] in order, then [always] (or the last response) once exhausted, and
-     * records every request URI so cursor propagation and endpoint choice are assertable.
-     */
-    private class QueuedHttpClient(
-        private val responses: List<Pair<Int, String>>,
-        private val always: Pair<Int, String>? = null,
-    ) : HttpClient() {
-        val requests = mutableListOf<String>()
-
-        private fun next(request: HttpRequest): Pair<Int, String> {
-            val index = requests.size
-            requests += request.uri().toString()
-            return responses.getOrNull(index)
-                ?: always
-                ?: responses.lastOrNull()
-                ?: (200 to "{}")
-        }
-
-        override fun cookieHandler() = java.util.Optional.empty<java.net.CookieHandler>()
-
-        override fun connectTimeout() = java.util.Optional.empty<java.time.Duration>()
-
-        override fun followRedirects() = Redirect.NEVER
-
-        override fun proxy() = java.util.Optional.empty<java.net.ProxySelector>()
-
-        override fun sslContext(): javax.net.ssl.SSLContext = javax.net.ssl.SSLContext.getDefault()
-
-        override fun sslParameters(): javax.net.ssl.SSLParameters = javax.net.ssl.SSLParameters()
-
-        override fun authenticator() = java.util.Optional.empty<java.net.Authenticator>()
-
-        override fun version() = Version.HTTP_1_1
-
-        override fun executor() = java.util.Optional.empty<java.util.concurrent.Executor>()
-
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : Any?> send(
-            request: HttpRequest,
-            responseBodyHandler: HttpResponse.BodyHandler<T>,
-        ): HttpResponse<T> {
-            val (status, body) = next(request)
-            return QueuedResponse(status, body, request) as HttpResponse<T>
-        }
-
-        @Suppress("UNCHECKED_CAST")
-        override fun <T : Any?> sendAsync(
-            request: HttpRequest,
-            responseBodyHandler: HttpResponse.BodyHandler<T>,
-        ): CompletableFuture<HttpResponse<T>> {
-            val (status, body) = next(request)
-            return CompletableFuture.completedFuture(QueuedResponse(status, body, request) as HttpResponse<T>)
-        }
-
-        override fun <T : Any?> sendAsync(
-            request: HttpRequest,
-            responseBodyHandler: HttpResponse.BodyHandler<T>,
-            pushPromiseHandler: HttpResponse.PushPromiseHandler<T>?,
-        ): CompletableFuture<HttpResponse<T>> = sendAsync(request, responseBodyHandler)
-    }
-
-    private class QueuedResponse(
-        private val status: Int,
-        private val body: String,
-        private val request: HttpRequest,
-    ) : HttpResponse<String> {
-        override fun statusCode() = status
-
-        override fun request() = request
-
-        override fun previousResponse() = java.util.Optional.empty<HttpResponse<String>>()
-
-        override fun headers() = java.net.http.HttpHeaders.of(emptyMap()) { _, _ -> true }
-
-        override fun body() = body
-
-        override fun sslSession() = java.util.Optional.empty<javax.net.ssl.SSLSession>()
-
-        override fun uri() = request.uri()
-
-        override fun version() = HttpClient.Version.HTTP_1_1
-    }
 }

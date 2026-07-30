@@ -335,6 +335,10 @@ class AiProvidersViewModel(
             // save failure should be left to the revert above; both other cases fall back
             // to prefs. Testing `== false` missed the null case — precisely the state where
             // prefs are the *only* place the choice could live.
+            //
+            // Unlike the endpoint above this stays conditional, and safely so: a blank model
+            // id is rejected at the top of this function, so there is no "cleared" state for
+            // a stale prefs entry to resurrect.
             if (written != true) prefs.writeModel(providerId, modelId)
         }
     }
@@ -360,10 +364,13 @@ class AiProvidersViewModel(
                         _state.update { it.copy(error = error.message ?: "Could not save the endpoint.") }
                     }?.getOrNull()
 
-            // Same three-way fallback as selectModel. A keyless local runtime has no secret
-            // to hang settings on, so without this the endpoint was accepted in the UI,
-            // echoed into state, and silently never persisted.
-            if (written != true) prefs.writeCustomEndpoint(providerId, trimmed)
+            // Written unconditionally, not only when the secret write didn't happen.
+            // withPreferredModels re-overlays prefs whenever the stored endpoint is blank,
+            // so a write-only fallback let a cleared endpoint come back from prefs on the
+            // next load: set A with no key (prefs = A), add a key, clear the endpoint
+            // (stored = null, prefs still A), reload -> A returns. Keeping prefs in step
+            // makes clearing stick; writeCustomEndpoint deletes the entry on blank.
+            prefs.writeCustomEndpoint(providerId, trimmed)
         }
     }
 

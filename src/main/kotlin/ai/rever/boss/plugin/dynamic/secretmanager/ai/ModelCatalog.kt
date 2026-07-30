@@ -210,9 +210,19 @@ class ModelCatalog(
         }
     }
 
+    /**
+     * The write path's read, and it applies the same version test as [readCache] on purpose.
+     *
+     * Without it, a format bump laundered the old file back in: the read path correctly
+     * discarded a v1 cache, then the first successful fetch merged the new provider into
+     * that same parsed v1 map and wrote the result stamped with the current version — so
+     * every entry just rejected was accepted on the next open.
+     */
     private fun readCacheBlocking(file: File): CachedCatalog =
         runCatching {
-            if (file.exists()) json.decodeFromString<CachedCatalog>(file.readText()) else null
+            if (!file.exists()) return@runCatching null
+            json.decodeFromString<CachedCatalog>(file.readText())
+                .takeIf { it.version == CACHE_FORMAT_VERSION }
         }.getOrNull() ?: CachedCatalog(emptyMap())
 
     // Model lists only — never credentials. Keys live in the secret store.

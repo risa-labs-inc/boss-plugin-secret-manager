@@ -87,6 +87,15 @@ Providers instead get an assisted flow: a "Get API key" button opening
 
 ### Linkage containment
 
+The guard covers the `Llm*` symbols only, so anything else this plugin touches must
+genuinely predate the declared `apiVersion` floor of 1.0.20. Verified against the api tags:
+`PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
+`openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. That matters
+because they are read on the always-taken registration path (`registerPanel`), outside any
+guard — a member newer than the floor would throw `NoSuchMethodError` there and take the
+*whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
+unconstrained.
+
 `LlmProviderSettingsApiImpl` is the **only** file referencing api symbols added in
 1.0.71 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE`). Everything else
 uses the plugin-local `WireFormat` enum. That is why `registerAiProviderSettings`
@@ -105,7 +114,8 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 64 host-independent cases, no live credential needed. The
+`./gradlew test` — 69 host-independent cases, no live credential needed, run on every
+pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
 `ModelCatalogClientParseTest` pins the captured shapes (Google's `models/` prefix
@@ -122,9 +132,17 @@ past the first page, and the cache honouring `invalidate()`. `ModelCatalogClient
 uses a response *queue* rather than one fixed body, which is what makes cursor-following, the
 `MAX_PAGES` bound and the xAI primary-then-fallback path reachable at all.
 
-The paging suite was validated against a deliberate mutation (dropping the `after_id`
-parameter) to confirm it fails when propagation breaks — worth repeating if you extend it,
-since a paging test that passes unconditionally is indistinguishable from no test.
+Two suites were validated against deliberate mutations, because a test that passes
+unconditionally is indistinguishable from no test:
+
+- dropping the `after_id` parameter fails the paging suite;
+- removing the write-path cache-version check fails
+  `a rejected cache version is not laundered back in by the write path`.
+
+The second only got teeth after a correction worth remembering: the first version of that
+test seeded the stale entry under the *same* provider it then refreshed, so the merge
+replaced it either way and the test passed against the bug. The laundering only shows up on a
+*bystander* provider's entry. If you extend these, re-run the mutation.
 
 Two test-only dependencies exist because the api is `compileOnly`: the api jar itself,
 and an slf4j backend — `BossLogger` binds slf4j at class-init, so without one every

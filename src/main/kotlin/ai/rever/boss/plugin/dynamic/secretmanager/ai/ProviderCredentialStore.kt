@@ -199,6 +199,27 @@ class ProviderCredentialStore(
                 loadStoredSecrets().getOrElse { emptyMap() }[providerId]
                     ?: return@withLock Result.success(false)
 
+            // UpdateSecretRequestData has no partial-update form, so changing a model id
+            // rewrites the whole record — including the password, which came from
+            // getUserSecrets. That is sound only while list responses carry the full
+            // decrypted secret (they do: the host's SecretDataProviderImpl.toPluginData
+            // copies it verbatim, and decryption happens server-side). If a host ever
+            // redacts passwords in list payloads, picking a model would silently destroy
+            // the credential — so refuse the write instead of performing it blind.
+            if (existing.apiKey.isBlank()) {
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Refusing to save settings: the stored entry read back with no secret",
+                    mapOf("provider" to providerId),
+                )
+                return@withLock Result.failure(
+                    IllegalStateException(
+                        "Could not save settings for ${descriptor.displayName}: its stored key " +
+                            "read back empty, and saving would have overwritten it.",
+                    ),
+                )
+            }
+
             upsert(
                 descriptor = descriptor,
                 apiKey = existing.apiKey,

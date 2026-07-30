@@ -136,9 +136,9 @@ class LegacySettingsImport(
         }
     }
 
-    /** Rename the legacy file so it is no longer picked up, keeping it recoverable. */
     /**
-     * Renamed, not deleted — deliberately.
+     * Rename the legacy file so it is no longer picked up — renamed, not deleted,
+     * deliberately.
      *
      * The host kernel's self-healing resolves its repair key before any plugin loads, so it
      * cannot reach this plugin's store; `llm_settings.json.migrated` is its only remaining

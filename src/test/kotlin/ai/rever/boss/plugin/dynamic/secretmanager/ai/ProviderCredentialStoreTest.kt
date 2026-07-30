@@ -224,6 +224,39 @@ class ProviderCredentialStoreTest {
             assertEquals(0, provider.created.size, "created a credential-less secret")
         }
 
+    @Test
+    fun `saving settings round-trips the password byte-for-byte`() =
+        runTest {
+            // UpdateSecretRequestData has no partial form, so choosing a model rewrites the
+            // whole record — password included, taken from what getUserSecrets returned.
+            // This is the highest-consequence write in the feature: if it ever sends
+            // anything but the exact stored secret, picking a model destroys the credential.
+            val key = "sk-exact-value-with-=-and-padding=="
+            val provider = FakeSecretDataProvider(listOf(secret("1", openai.id, key)))
+            val store = ProviderCredentialStore(provider, envWith())
+
+            val result = store.saveSettings(openai.id, ProviderSettings(selectedModelId = "gpt-5"))
+
+            assertEquals(true, result.getOrNull())
+            assertEquals(key, provider.updated.single().password)
+            assertTrue(provider.updated.single().notes?.contains("gpt-5") == true)
+        }
+
+    @Test
+    fun `settings are refused rather than written when the stored key reads back empty`() =
+        runTest {
+            // Guards the case above from the other side: if a host ever redacts passwords in
+            // list payloads, a full-record write would silently blank the credential. Fail
+            // visibly instead of performing the write.
+            val provider = FakeSecretDataProvider(listOf(secret("1", openai.id, "")))
+            val store = ProviderCredentialStore(provider, envWith())
+
+            val result = store.saveSettings(openai.id, ProviderSettings(selectedModelId = "gpt-5"))
+
+            assertTrue(result.isFailure)
+            assertEquals(0, provider.updated.size, "overwrote an entry whose secret read back empty")
+        }
+
     // ==================== cache invalidation ====================
 
     @Test

@@ -55,12 +55,17 @@ class ModelCatalogClient(
         val first = fetchAllPages(descriptor, primary, apiKey)
         if (first.isSuccess) return first
 
-        // xAI exposes a richer endpoint plus a minimal one; fall back rather than
-        // reporting failure when only the richer route is unavailable. An
-        // unrecognised envelope counts as a failure (see parseOrFail), so a 200 whose
-        // shape we didn't anticipate also reaches the fallback instead of silently
-        // presenting an empty picker.
         val fallback = descriptor.modelsEndpointFallback ?: return first
+
+        // xAI exposes a richer endpoint plus a minimal one; fall back rather than reporting
+        // failure when only the richer route is unavailable.
+        //
+        // Gated on "this endpoint is wrong" rather than on any failure: retrying a 401 is
+        // guaranteed to 401 again and only the second message would reach the user, and
+        // retrying a 429 hits a provider that just asked us to slow down — twice per
+        // refresh. An unrecognised envelope stays in scope because that is the other way a
+        // wrong endpoint presents (a 200 that parses to nothing).
+        if (!worthRetryingOnFallback(first.exceptionOrNull())) return first
         return fetchAllPages(descriptor, fallback, apiKey)
     }
 
@@ -108,7 +113,7 @@ class ModelCatalogClient(
         // empty dropdown under a "live · updated just now" label.
         if (collected.isEmpty()) {
             return Result.failure(
-                IllegalStateException(
+                UnrecognisedEnvelope(
                     "${descriptor.displayName} returned no recognisable models — response format not recognised.",
                 ),
             )
@@ -143,7 +148,7 @@ class ModelCatalogClient(
             runCatching {
                 val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
                 if (response.statusCode() !in 200..299) {
-                    error(describeFailure(descriptor, response.statusCode()))
+                    throw HttpStatusFailure(response.statusCode(), describeFailure(descriptor, response.statusCode()))
                 }
                 parsePage(descriptor, response.body())
             }.recoverCatching { cause ->
@@ -220,6 +225,35 @@ class ModelCatalogClient(
      * not included: provider error bodies can echo the request, and this one carries
      * a credential.
      */
+    /**
+     * Whether a primary-endpoint failure suggests the *endpoint* was wrong, rather than the
+     * credential, the rate limit or the provider being down.
+     *
+     * Only those cases are worth a second request: a 401 would reject the fallback too and
+     * only its message would survive, and a 429 means the provider already asked us to back
+     * off. 404/405 and an unparseable-but-2xx body are the two ways a guessed endpoint shows
+     * up — and xAI's is a guess, which is why a fallback exists at all.
+     */
+    private fun worthRetryingOnFallback(cause: Throwable?): Boolean =
+        when (cause) {
+            is UnrecognisedEnvelope -> true
+            is HttpStatusFailure -> cause.status == 404 || cause.status == 405
+            // Transport failures (timeout, TLS, DNS) carry no status; a different path on
+            // the same host would fail the same way.
+            else -> false
+        }
+
+    /** Carries the status so [worthRetryingOnFallback] doesn't have to parse a message. */
+    private class HttpStatusFailure(
+        val status: Int,
+        message: String,
+    ) : IllegalStateException(message)
+
+    /** A 2xx whose body held nothing we recognised — the other shape of a wrong endpoint. */
+    private class UnrecognisedEnvelope(
+        message: String,
+    ) : IllegalStateException(message)
+
     private fun describeFailure(
         descriptor: ProviderDescriptor,
         status: Int,

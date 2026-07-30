@@ -165,6 +165,44 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `a rejected cache version is not laundered back in by the write path`() =
+        runTest {
+            // The read path discarded a wrong-version file correctly, but the *write* path
+            // read that same file without checking, merged the new provider into it, and
+            // wrote the result stamped with the current version — so everything just
+            // rejected came back on the next open.
+            // The stale entry must belong to a *different* provider than the one refreshed:
+            // refreshing the same provider replaces its entry on merge, so the laundering
+            // would be masked. Here Anthropic's rejected entry is the bystander that used to
+            // be rescued by an unrelated OpenAI fetch.
+            val bystander = ProviderRegistry.find(ProviderRegistry.ANTHROPIC)!!
+            val dir = Files.createTempDirectory("catalog-launder").toFile()
+            val cache = File(dir, "ai-model-catalog.json")
+            cache.writeText(
+                """{"providers":{"${bystander.id}":{"models":[{"id":"stale","displayName":"Stale"}],
+                "fetchedAtEpochMs":1}},"version":999}""".trimIndent(),
+            )
+
+            // A genuinely successful fetch is required: writeCacheEntry is the read-modify-
+            // write that used to launder the rejected file, and only a real result reaches it.
+            val fake = QueuedHttpClient(listOf(200 to """{"data":[{"id":"fresh","object":"model"}]}"""))
+            val catalog = ModelCatalog(client = ModelCatalogClient(fake), cacheDir = dir)
+
+            catalog.seedFromCache()
+            assertEquals(CatalogState.NotConfigured, catalog.stateOf(bystander.id))
+
+            catalog.refresh(descriptor, apiKey = "a-key", force = true)
+            assertTrue(catalog.stateOf(descriptor.id) is CatalogState.Loaded, "the fetch did not land")
+
+            val rewritten = cache.readText()
+            assertFalse(
+                rewritten.contains("stale"),
+                "a rejected-version entry was laundered into the current-version cache",
+            )
+            assertTrue(rewritten.contains("fresh"), "the new result was not cached")
+        }
+
+    @Test
     fun `the TTL boundary is six hours`() {
         // Documented as six hours and shown to the user as an age; pin it so a change is
         // deliberate.
