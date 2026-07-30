@@ -73,7 +73,12 @@ class SecretManagerMcpToolsTest {
     @Test
     fun `secret_create invalidates the provider cache`() =
         runTest {
-            // Symmetric case: a key an agent adds has to become visible without a restart.
+            // Invalidation is unconditional on a successful write. Note what this does NOT
+            // prove: secret_create hardcodes tags = emptyList(), and loadStoredSecrets filters
+            // on TAG_AI_PROVIDER, so an agent-created entry cannot be recognised as provider
+            // configuration today — the invalidation here only costs a re-page. Kept because it
+            // is the cheap, future-proof side, and it becomes load-bearing the moment
+            // secret_create accepts tags. secret_delete is the half that matters now.
             val (store, secrets) = storeWith(emptyList())
             val before = store.invalidations.value
 

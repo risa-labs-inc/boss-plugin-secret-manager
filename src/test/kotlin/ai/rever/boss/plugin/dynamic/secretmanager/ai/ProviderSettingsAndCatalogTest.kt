@@ -234,6 +234,68 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `two consecutive failures keep the last good list`() =
+        runTest {
+            // Regression guard for the fix that made Failed survive seeding: `lastKnown` was
+            // computed with `as? Loaded`, which had only worked because re-entry converted
+            // Failed back to Loaded. Once Failed survived, the second failure yielded
+            // lastKnown = null — emptying the picker for an offline user who just opened the
+            // section twice. CatalogState.Failed exists precisely so the picker keeps working.
+            val fake =
+                QueuedHttpClient(
+                    listOf(
+                        200 to """{"data":[{"id":"gpt-5","object":"model"}]}""",
+                        500 to """{"error":"down"}""",
+                        500 to """{"error":"still down"}""",
+                    ),
+                )
+            val catalog =
+                ModelCatalog(
+                    client = ModelCatalogClient(fake),
+                    cacheDir = Files.createTempDirectory("catalog-chain").toFile(),
+                )
+
+            catalog.refresh(descriptor, apiKey = "k", force = true)
+            val loaded = catalog.stateOf(descriptor.id) as CatalogState.Loaded
+            assertEquals(listOf("gpt-5"), loaded.models.map { it.id })
+
+            catalog.refresh(descriptor, apiKey = "k", force = true)
+            val first = catalog.stateOf(descriptor.id) as CatalogState.Failed
+            assertEquals(listOf("gpt-5"), first.lastKnown?.models?.map { it.id })
+
+            catalog.refresh(descriptor, apiKey = "k", force = true)
+            val second = catalog.stateOf(descriptor.id) as CatalogState.Failed
+            assertEquals(
+                listOf("gpt-5"),
+                second.lastKnown?.models?.map { it.id },
+                "the second consecutive failure dropped the last good list",
+            )
+        }
+
+    @Test
+    fun `seeding never replaces a state that is already present`() =
+        runTest {
+            // markNotConfigured is how clearKey drops a stale list, so a cached list must not
+            // come back over it — the panel would show models for a provider with no
+            // credential until a paginated store read finished.
+            val dir = Files.createTempDirectory("catalog-notconfigured").toFile()
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${descriptor.id}":{"models":[{"id":"cached","displayName":"Cached"}],
+                "fetchedAtEpochMs":1000000}},"version":1}""".trimIndent(),
+            )
+
+            val catalog = ModelCatalog(cacheDir = dir)
+            catalog.markNotConfigured(descriptor.id)
+            catalog.seedFromCache()
+
+            assertEquals(
+                CatalogState.NotConfigured,
+                catalog.stateOf(descriptor.id),
+                "seeding overwrote a deliberate NotConfigured",
+            )
+        }
+
+    @Test
     fun `the TTL boundary is six hours`() {
         // Documented as six hours and shown to the user as an age; pin it so a change is
         // deliberate.

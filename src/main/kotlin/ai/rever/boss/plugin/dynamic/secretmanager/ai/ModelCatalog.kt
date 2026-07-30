@@ -59,13 +59,16 @@ class ModelCatalog(
         _states.update { current ->
             val seeded = current.toMutableMap()
             cached.providers.forEach { (providerId, entry) ->
-                if (seeded[providerId] is CatalogState.Loaded) return@forEach
-                // A Failed state must survive seeding, or a rejected key is papered over:
-                // load() runs seedFromCache on every entry into the section, so a 401 got
-                // overwritten by a within-TTL cached list, isStale then said "fresh", no
-                // refetch happened, and the panel showed a working model picker for a
-                // credential that does not authenticate.
-                if (seeded[providerId] is CatalogState.Failed) return@forEach
+                // Seeding fills an *absence* — any state already present wins, whatever it is.
+                //
+                // Enumerating states to skip kept leaving holes. Skipping only Loaded let a
+                // 401 be papered over: load() seeds on every entry into the section, so Failed
+                // was replaced by a within-TTL cached list, isStale then said "fresh", no
+                // refetch happened, and the panel showed a working picker for a credential
+                // that does not authenticate. Adding Failed still left NotConfigured — which
+                // clearKey sets precisely to drop a stale list — and Loading, contradicting
+                // this method's own promise never to overwrite a live result.
+                if (seeded.containsKey(providerId)) return@forEach
                 if (entry.models.isEmpty()) return@forEach
                 seeded[providerId] =
                     CatalogState.Loaded(
@@ -114,7 +117,17 @@ class ModelCatalog(
         }
         if (!force && !isStale(descriptor.id, nowEpochMs)) return
 
-        val lastKnown = _states.value[descriptor.id] as? CatalogState.Loaded
+        // Carry the previous good list through a *chain* of failures, not just the first.
+        // Before Failed survived seeding, re-entry converted it back to Loaded so this cast
+        // happened to succeed; now that it survives, `as? Loaded` would yield null on the
+        // second attempt — clearing the picker for an offline user who merely opened the
+        // section twice, even with a within-TTL list still on disk.
+        val lastKnown =
+            when (val current = _states.value[descriptor.id]) {
+                is CatalogState.Loaded -> current
+                is CatalogState.Failed -> current.lastKnown
+                else -> null
+            }
         if (lastKnown == null) {
             _states.update { it + (descriptor.id to CatalogState.Loading) }
         }

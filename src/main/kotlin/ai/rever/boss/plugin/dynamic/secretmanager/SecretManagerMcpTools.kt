@@ -6,8 +6,8 @@ import ai.rever.boss.plugin.api.McpToolHandler
 import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
 import ai.rever.boss.plugin.api.SecretDataProvider
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 
 /**
  * MCP tools contributed by the Secret Manager plugin.

@@ -53,16 +53,33 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         private val VERSION_PATTERN = Regex(""""version"\s*:\s*"([^"]+)"""")
 
         /**
+         * Identifies our own manifest among any others reachable on the classpath.
+         *
+         * Also why the loose [VERSION_PATTERN] is safe: it is only ever applied to a document
+         * already confirmed to be this plugin's.
+         */
+        private val PLUGIN_ID_PATTERN =
+            Regex(""""pluginId"\s*:\s*"ai\.rever\.boss\.plugin\.dynamic\.secretmanager"""")
+
+        /**
          * plugin.json first, jar manifest second, "unknown" only if both are unavailable
          * (running from classes in an IDE or a test, where no version exists to report).
          */
         private fun readVersion(): String {
             val fromResource =
                 runCatching {
+                    // Every BOSS plugin ships this same resource path, and getResource is
+                    // parent-first, so taking the *first* match could hand back a neighbour's
+                    // manifest — reporting someone else's version. That is the original bug
+                    // again, only with a plausible-looking value. Enumerate all of them and
+                    // take the one that names this plugin.
                     SecretManagerDynamicPlugin::class.java.classLoader
-                        ?.getResourceAsStream(MANIFEST_RESOURCE)
-                        ?.bufferedReader()
-                        ?.use { reader -> VERSION_PATTERN.find(reader.readText())?.groupValues?.get(1) }
+                        ?.getResources(MANIFEST_RESOURCE)
+                        ?.asSequence()
+                        .orEmpty()
+                        .mapNotNull { url -> runCatching { url.readText() }.getOrNull() }
+                        .firstOrNull { text -> PLUGIN_ID_PATTERN.containsMatchIn(text) }
+                        ?.let { text -> VERSION_PATTERN.find(text)?.groupValues?.get(1) }
                 }.getOrNull()
 
             return fromResource?.takeIf { it.isNotBlank() }

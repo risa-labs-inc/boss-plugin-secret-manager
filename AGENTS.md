@@ -74,6 +74,10 @@ hit once already:
   writes `Implementation-Version` into the manifest. `getImplementationVersion()` returns null
   under a plain `URLClassLoader`, which is what the host's `PluginClassLoader` extends, so the
   plugin reported `"unknown"` to the host and store for a whole release.
+- `getResourceAsStream` is the wrong lookup: every BOSS plugin ships `plugin.json` at the same
+  path and resource lookup is parent-first, so a neighbour's manifest could win and the plugin
+  would report *someone else's* version. Enumerate with `getResources` and pick the document
+  whose `pluginId` is ours.
 - The jar tasks must **not** also `from("src/main/resources")`. `sourceSets.main.output` already
   carries the stamped copy; adding the raw directory put an *unstamped* `plugin.json` in the jar
   too (the committed one says `1.0.9`), and with `duplicatesStrategy = EXCLUDE` the winner was
@@ -153,7 +157,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 79 host-independent cases, no live credential needed, run on every
+`./gradlew test` — 81 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
@@ -178,7 +182,17 @@ unconditionally is indistinguishable from no test:
 - removing the write-path cache-version check fails
   `a rejected cache version is not laundered back in by the write path`.
 
-A third: reverting the `EnvResolver` stubbing in `ProviderCredentialStoreTest` fails 9 tests
+`seedFromCache` fills an **absence** — `if (seeded.containsKey(providerId)) return@forEach`.
+Do not go back to enumerating states to skip: skipping only `Loaded` papered over a rejected
+key (a 401 replaced by a within-TTL cached list, which `isStale` then called fresh), and adding
+`Failed` still left `NotConfigured` — which `clearKey` sets precisely to drop a stale list.
+
+Relatedly, `refresh` must carry `lastKnown` through a *chain* of failures
+(`Failed -> current.lastKnown`), not just the first. `as? Loaded` only ever worked because
+seeding used to convert `Failed` back to `Loaded`; once `Failed` survived, a second consecutive
+failure emptied the picker for an offline user who merely reopened the section. Mutation-checked.
+
+A third env case: reverting the `EnvResolver` stubbing in `ProviderCredentialStoreTest` fails 9 tests
 *only if* provider variables are exported. `EnvResolver` consults the process environment and
 system properties **before** the `env_vars` file, and these tests must use the registry's real
 variable names, so they are hermetic only because all three sources are injected. CI never

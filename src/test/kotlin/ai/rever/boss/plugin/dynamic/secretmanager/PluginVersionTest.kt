@@ -63,8 +63,10 @@ class PluginVersionTest {
     fun `looks like a semantic version`() {
         // Weak on its own — 1.0.9 would pass — but it catches a placeholder surviving
         // resource filtering, which would otherwise reach the store looking like a release.
+        // A pre-release suffix is allowed: 1.2.7-rc1 is a legitimate build and pinning three
+        // bare numbers would reject it for no reason.
         assertTrue(
-            plugin.version.matches(Regex("""\d+\.\d+\.\d+""")),
+            plugin.version.matches(Regex("""\d+\.\d+\.\d+(-[\w.]+)?""")),
             "not a semantic version: ${plugin.version}",
         )
     }
