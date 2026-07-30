@@ -11,7 +11,7 @@ import androidx.compose.ui.Modifier
  * Serves AI provider configuration to the host and to other plugins.
  *
  * **This is the only file in the plugin that references api symbols introduced in
- * 1.0.70** ([LlmProviderSettingsAPI], [LlmApiFormat.GOOGLE_GENERATIVE]). Keeping the
+ * 1.0.71** ([LlmProviderSettingsAPI], [LlmApiFormat.GOOGLE_GENERATIVE]). Keeping the
  * new-api surface confined here is what lets `SecretManagerDynamicPlugin` register it
  * inside a `LinkageError` guard: on a host shipping an older api jar this class fails
  * to link, registration is skipped, and everything else in the plugin still works.

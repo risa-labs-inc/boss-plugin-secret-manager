@@ -88,7 +88,7 @@ Providers instead get an assisted flow: a "Get API key" button opening
 ### Linkage containment
 
 `LlmProviderSettingsApiImpl` is the **only** file referencing api symbols added in
-1.0.70 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE`). Everything else
+1.0.71 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE`). Everything else
 uses the plugin-local `WireFormat` enum. That is why `registerAiProviderSettings`
 can wrap registration in a `LinkageError` guard and why `plugin.json` keeps its lower
 `apiVersion`: on an older host the AI panel is simply not served, and secret

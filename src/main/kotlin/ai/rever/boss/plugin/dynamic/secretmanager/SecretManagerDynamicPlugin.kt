@@ -42,7 +42,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
 
     private companion object {
         /** api release that introduced LlmProviderSettingsAPI. */
-        const val REQUIRED_API_VERSION = "1.0.70"
+        const val REQUIRED_API_VERSION = "1.0.71"
     }
 
     override fun register(context: PluginContext) {
@@ -63,7 +63,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         // wouldn't be recognised as provider configuration by the other.
         //
         // Safe to construct outside the LinkageError guard below — ProviderCredentialStore
-        // and ProviderRegistry reference only api symbols that predate 1.0.70.
+        // and ProviderRegistry reference only api symbols that predate 1.0.71.
         val envResolver = EnvResolver()
         val credentialStore = ProviderCredentialStore(secretDataProvider, envResolver)
 
@@ -94,10 +94,10 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
      * PluginContext.llmProvider.
      *
      * Guarded: LlmProviderSettingsAPI is a shared-package (parent-first) class added in
-     * api 1.0.70, so on hosts that predate it LlmProviderSettingsApiImpl fails to link.
+     * api 1.0.71, so on hosts that predate it LlmProviderSettingsApiImpl fails to link.
      * Skipping registration there costs only the AI panel — secret management, MCP
      * tools and everything else still work. This is why the plugin's declared
-     * apiVersion stays at its true floor instead of being raised to 1.0.70.
+     * apiVersion stays at its true floor instead of being raised to 1.0.71.
      */
     private fun registerAiProviderSettings(
         context: PluginContext,

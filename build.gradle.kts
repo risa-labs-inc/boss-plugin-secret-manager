@@ -40,13 +40,13 @@ dependencies {
         // were introduced in exactly that release (api tag v1.0.20), and that is
         // still the true floor for the plugin to function.
         //
-        // The AI-provider feature compiles against 1.0.70 (LlmProviderSettingsAPI,
+        // The AI-provider feature compiles against 1.0.71 (LlmProviderSettingsAPI,
         // LlmApiFormat.GOOGLE_GENERATIVE) but does not raise the declared minimum:
         // every reference to those symbols is confined to LlmProviderSettingsApiImpl,
         // which is registered inside a LinkageError guard. On an older host the AI
         // settings panel simply isn't served and secret management is unaffected —
         // raising apiVersion instead would stop the plugin loading at all there.
-        compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.70.jar"))
+        compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.71.jar"))
     } else {
         // CI: use downloaded JAR
         compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))
@@ -85,7 +85,7 @@ dependencies {
     // test runtime by default — BossLogger lives there and would fail with
     // NoClassDefFoundError. Tests need it on the classpath explicitly.
     if (useLocalDependencies) {
-        testImplementation(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.70.jar"))
+        testImplementation(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.71.jar"))
     } else {
         testImplementation(files("build/downloaded-deps/boss-plugin-api.jar"))
     }
