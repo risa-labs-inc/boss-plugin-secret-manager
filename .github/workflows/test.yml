@@ -1,0 +1,53 @@
+name: Tests
+
+# The release workflow only runs on pushes to main, so until this existed the unit tests
+# never ran on a pull request — the suite that justifies the two test-only dependencies was
+# not load-bearing on the one event where it matters.
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Selects the downloaded-jar branch in build.gradle.kts rather than the sibling
+      # checkout, which only exists on a developer machine.
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Fetch the latest plugin api jar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Latest, matching boss_plugin_api_version in build.yml — so this job compiles
+          # against the same api the release job will. The api is additive-only, so latest
+          # always carries the symbols this code needs.
+          mkdir -p build/downloaded-deps
+          # Excludes sources/thin classifiers explicitly: --output takes a single file, so a
+          # release that ever ships a second matching asset would fail the job. build.gradle.kts
+          # filters the same two for the same reason.
+          gh release download \
+            --repo risa-labs-inc/boss-plugin-api \
+            --pattern 'boss-plugin-api-*[0-9].jar' \
+            --output build/downloaded-deps/boss-plugin-api.jar
+          test -s build/downloaded-deps/boss-plugin-api.jar
+
+      - name: Run tests
+        run: ./gradlew test --no-daemon
+
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/reports/tests/test

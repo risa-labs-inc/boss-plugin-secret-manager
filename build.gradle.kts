@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.2.4"
+version = "1.2.5"
 
 java {
     toolchain {
@@ -26,6 +26,21 @@ kotlin {
 val useLocalDependencies = System.getenv("CI") != "true"
 val bossPluginApiPath = "../boss-plugin-api"
 
+/**
+ * The most recently built api jar in the sibling checkout, whatever its version.
+ *
+ * Local development only — CI uses the downloaded jar. Deliberately not a hardcoded file
+ * name: that goes stale on every api release and surfaces as "Unresolved reference" on a
+ * symbol that plainly exists, which is a genuinely confusing hour. Newest-by-mtime rather
+ * than by version string, because 1.0.9 sorts above 1.0.71 lexicographically and the jar
+ * you just built is the one you meant.
+ */
+val localBossPluginApiJar: File? =
+    file("$bossPluginApiPath/build/libs")
+        .listFiles { f: File -> f.name.startsWith("boss-plugin-api-") && f.name.endsWith(".jar") }
+        ?.filterNot { it.name.contains("-sources") || it.name.contains("-thin") }
+        ?.maxByOrNull { it.lastModified() }
+
 repositories {
     google()
     mavenCentral()
@@ -35,10 +50,26 @@ repositories {
 dependencies {
     if (useLocalDependencies) {
         // Local development: use boss-plugin-api JAR from sibling repo.
-        // NOTE: plugin.json declares apiVersion 1.0.20 — the ai.rever.boss.plugin.logging
-        // and .scrollbar packages used by this plugin were introduced in exactly that
-        // release (api tag v1.0.20), so the declared minimum is accurate.
-        compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.51.jar"))
+        // NOTE: plugin.json still declares apiVersion 1.0.20 — the
+        // ai.rever.boss.plugin.logging and .scrollbar packages used by this plugin
+        // were introduced in exactly that release (api tag v1.0.20), and that is
+        // still the true floor for the plugin to function.
+        //
+        // The AI-provider feature needs symbols added in api 1.0.71
+        // (LlmProviderSettingsAPI, LlmApiFormat.GOOGLE_GENERATIVE) but does not raise the
+        // declared minimum: every reference to those symbols is confined to
+        // LlmProviderSettingsApiImpl, which is registered inside a LinkageError guard. On an
+        // older host the AI settings panel simply isn't served and secret management is
+        // unaffected — raising apiVersion instead would stop the plugin loading at all there.
+        compileOnly(
+            files(
+                localBossPluginApiJar
+                    ?: error(
+                        "No boss-plugin-api jar in $bossPluginApiPath/build/libs — " +
+                            "run ./gradlew jar in the sibling boss-plugin-api checkout first.",
+                    ),
+            ),
+        )
     } else {
         // CI: use downloaded JAR
         compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))
@@ -64,6 +95,27 @@ dependencies {
 
     // Serialization (for JSON parsing of SupabaseDataProvider responses)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+
+    // Tests. The model-list parsers are hand-written from provider docs and had no
+    // coverage; these run without a host or a live credential.
+    testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    // BossLogger binds slf4j at class-init, so a backend is required or every class
+    // holding a logger fails with NoClassDefFoundError in tests. The host provides one
+    // at runtime; tests have to supply their own.
+    testRuntimeOnly("org.slf4j:slf4j-simple:2.0.17")
+    // The api is compileOnly (the host supplies it at runtime), so it is absent from the
+    // test runtime by default — BossLogger lives there and would fail with
+    // NoClassDefFoundError. Tests need it on the classpath explicitly.
+    if (useLocalDependencies) {
+        testImplementation(files(localBossPluginApiJar ?: error("No boss-plugin-api jar; see above.")))
+    } else {
+        testImplementation(files("build/downloaded-deps/boss-plugin-api.jar"))
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
 }
 
 // Task to build plugin JAR with compiled classes only

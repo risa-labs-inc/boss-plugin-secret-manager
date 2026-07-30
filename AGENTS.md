@@ -51,6 +51,107 @@ build.gradle.kts   → Build config + version (single source of truth)
 
 The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` — only change it in `build.gradle.kts`.
 
+## AI Providers (`ai/` package)
+
+This plugin owns **all** AI provider configuration. The host has none: its
+`Settings → AI Providers` section renders `LlmProviderSettingsPanel` through
+`LlmProviderSettingsAPI`, and `PluginContext.llmProvider` is relayed from the same
+registered instance. Provider registry, credentials, environment-variable resolution
+and the model catalogue all live here.
+
+**Model lists are always fetched live** from each provider's own models endpoint
+(`ModelCatalogClient`), cached with a timestamp and a 6-hour TTL. There is
+deliberately no bundled fallback list: the host implementation this replaced shipped
+hardcoded models that drifted years out of date, and a provider with no credential
+now reports "not configured" instead of guessing.
+
+### Do not add OAuth without re-checking the docs
+
+Sign-in is intentionally absent. As of July 2026:
+
+- **Anthropic** prohibits third-party OAuth outright (policy 2026-02-20, billing
+  enforcement 2026-04-04). Subscription tokens are Claude Code / claude.ai only.
+  Wiring their OAuth client here would breach their terms.
+- **OpenAI**'s "Sign in with ChatGPT" ships only inside Codex tooling; there is no
+  third-party program.
+- **xAI** and **Moonshot (Kimi)** publish Bearer-API-key auth only in their REST
+  references. Their OAuth/device-code flows belong to their own coding CLIs — the
+  same category as Anthropic's, and not a documented third-party surface.
+- **Google** does have a documented installed-app OAuth flow, but it runs through
+  **Vertex AI** — a different base URL needing a GCP project, region and ADC, not the
+  `generativelanguage` key path used here. That is tracked as separate work.
+- **Together** has no OAuth.
+
+Providers instead get an assisted flow: a "Get API key" button opening
+`ProviderDescriptor.consoleUrl` in a BOSS tab.
+
+### Linkage containment
+
+The guard covers the `Llm*` symbols only, so anything else this plugin touches must
+genuinely predate the declared `apiVersion` floor of 1.0.20. Verified against the api tags:
+`PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
+`openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. That matters
+because they are read on the always-taken registration path (`registerPanel`), outside any
+guard — a member newer than the floor would throw `NoSuchMethodError` there and take the
+*whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
+unconstrained.
+
+`LlmProviderSettingsApiImpl` is the **only** file referencing api symbols added in
+1.0.71 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE`). Everything else
+uses the plugin-local `WireFormat` enum. That is why `registerAiProviderSettings`
+can wrap registration in a `LinkageError` guard and why `plugin.json` keeps its lower
+`apiVersion`: on an older host the AI panel is simply not served, and secret
+management still works. Adding a new-api reference outside that file would take the
+whole plugin down on such a host.
+
+### Out-of-process caveat
+
+`plugin.json` declares `isolationMode: out-of-process`, which only engages under
+`BOSS_MODE=KERNEL`. In-process (the default) the `@Composable` panel renders
+directly. Under KERNEL mode the API crosses a process boundary and the panel is not
+expected to render — the host falls back to its "plugin isn't loaded yet" notice
+rather than failing.
+
+### Tests
+
+`./gradlew test` — 70 host-independent cases, no live credential needed, run on every
+pull request by `.github/workflows/test.yml`. The
+model-list parsers are the point: each was written from a provider's published
+reference, and xAI's and Together's envelopes aren't documented at all, so
+`ModelCatalogClientParseTest` pins the captured shapes (Google's `models/` prefix
+stripping, Together's type filter, Anthropic's capability tree, and that a rejected key
+never reaches an error message). Also covered: `env_vars` parsing (`=` inside values),
+`ProviderSettings` round-trip and tolerance, the catalog TTL / cache-seeding rules, and the
+preference file's read-modify-write (one file holds the active provider *and* every model
+selection, and for env-keyed providers it is the only record of that choice).
+
+`ProviderCredentialStore` is covered through a fake `SecretDataProvider`, because its
+invariants *are* the security story: env-then-stored-then-none precedence, refusing to write
+an env-supplied key back to disk, updating rather than duplicating a provider entry, paging
+past the first page, and the cache honouring `invalidate()`. `ModelCatalogClientPagingTest`
+uses a response *queue* rather than one fixed body, which is what makes cursor-following, the
+`MAX_PAGES` bound and the xAI primary-then-fallback path reachable at all.
+
+Two suites were validated against deliberate mutations, because a test that passes
+unconditionally is indistinguishable from no test:
+
+- dropping the `after_id` parameter fails the paging suite;
+- removing the write-path cache-version check fails
+  `a rejected cache version is not laundered back in by the write path`.
+
+The second only got teeth after a correction worth remembering: the first version of that
+test seeded the stale entry under the *same* provider it then refreshed, so the merge
+replaced it either way and the test passed against the bug. The laundering only shows up on a
+*bystander* provider's entry. If you extend these, re-run the mutation.
+
+The api jar path is resolved by picking the newest `boss-plugin-api-*.jar` in the sibling
+checkout rather than naming a version, and CI tracks `latest` — the api is additive-only, so
+a pin would just mean hand-bumping this repo on every api release.
+
+Two test-only dependencies exist because the api is `compileOnly`: the api jar itself,
+and an slf4j backend — `BossLogger` binds slf4j at class-init, so without one every
+class holding a logger fails with `NoClassDefFoundError`.
+
 ## Code Quality
 
 - Use Compose Multiplatform APIs (not Android-specific)
