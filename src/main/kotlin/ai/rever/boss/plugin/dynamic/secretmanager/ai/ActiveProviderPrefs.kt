@@ -80,7 +80,15 @@ class ActiveProviderPrefs(
                             Prefs()
                         }
                     file.parentFile?.mkdirs()
-                    file.writeText(json.encodeToString(Prefs.serializer(), transform(current)))
+                    // Temp-then-rename, as with the model cache: writeText truncates in
+                    // place, so an interrupted write loses both the active provider and
+                    // every model selection at once.
+                    val temp = File(file.parentFile, "${file.name}.tmp")
+                    temp.writeText(json.encodeToString(Prefs.serializer(), transform(current)))
+                    if (!temp.renameTo(file)) {
+                        temp.copyTo(file, overwrite = true)
+                        temp.delete()
+                    }
                 }.onFailure {
                     logger.warn(
                         LogCategory.SYSTEM,

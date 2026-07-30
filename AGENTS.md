@@ -105,13 +105,15 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 38 host-independent cases, no live credential needed. The
+`./gradlew test` — 43 host-independent cases, no live credential needed. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
 `ModelCatalogClientParseTest` pins the captured shapes (Google's `models/` prefix
 stripping, Together's type filter, Anthropic's capability tree, and that a rejected key
 never reaches an error message). Also covered: `env_vars` parsing (`=` inside values),
-`ProviderSettings` round-trip and tolerance, and the catalog TTL / cache-seeding rules.
+`ProviderSettings` round-trip and tolerance, the catalog TTL / cache-seeding rules, and the
+preference file's read-modify-write (one file holds the active provider *and* every model
+selection, and for env-keyed providers it is the only record of that choice).
 
 Two test-only dependencies exist because the api is `compileOnly`: the api jar itself,
 and an slf4j backend — `BossLogger` binds slf4j at class-init, so without one every

@@ -591,12 +591,20 @@ private fun ManualEndpointAndModel(
     onEndpointCommit: (String) -> Unit,
     onModelCommit: (String) -> Unit,
 ) {
-    var endpoint by remember(connection.providerId) {
+    // Keyed on the values too, not just the provider id: the store read can land after
+    // first composition, and keying on the id alone left both fields rendering empty even
+    // though values were stored.
+    var endpoint by remember(connection.providerId, connection.customEndpoint) {
         mutableStateOf(connection.customEndpoint.orEmpty())
     }
-    var modelId by remember(connection.providerId) {
+    var modelId by remember(connection.providerId, connection.selectedModelId) {
         mutableStateOf(connection.selectedModelId.orEmpty())
     }
+    // onFocusChanged also fires on the initial focus event, so committing on any
+    // !isFocused would write whatever the field held at composition — blanking a stored
+    // endpoint. Only a genuine focused -> unfocused transition counts.
+    var endpointWasFocused by remember(connection.providerId) { mutableStateOf(false) }
+    var modelWasFocused by remember(connection.providerId) { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         BossTextField(
@@ -607,7 +615,8 @@ private fun ManualEndpointAndModel(
             enabled = enabled,
             singleLine = true,
             modifier = Modifier.onFocusChanged { focus ->
-                if (!focus.isFocused) onEndpointCommit(endpoint)
+                if (endpointWasFocused && !focus.isFocused) onEndpointCommit(endpoint)
+                endpointWasFocused = focus.isFocused
             },
         )
         BossTextField(
@@ -618,7 +627,8 @@ private fun ManualEndpointAndModel(
             enabled = enabled,
             singleLine = true,
             modifier = Modifier.onFocusChanged { focus ->
-                if (!focus.isFocused) onModelCommit(modelId)
+                if (modelWasFocused && !focus.isFocused) onModelCommit(modelId)
+                modelWasFocused = focus.isFocused
             },
         )
         Text(

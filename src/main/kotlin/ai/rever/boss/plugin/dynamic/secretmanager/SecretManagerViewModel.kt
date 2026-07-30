@@ -455,6 +455,10 @@ class SecretManagerViewModel(
 
         scope.launch {
             val result = secretDataProvider?.createSecret(request)
+            // The AI provider cache is keyed off these same secrets; without this a
+            // deleted or hand-edited ai-provider entry keeps being served to other
+            // plugins (and shown as connected) for the rest of the session.
+            aiProviderStore?.invalidate()
 
             result?.onSuccess {
                 state = state.copy(isOperationInProgress = false)
@@ -477,6 +481,10 @@ class SecretManagerViewModel(
 
         scope.launch {
             val result = secretDataProvider?.updateSecret(request)
+            // The AI provider cache is keyed off these same secrets; without this a
+            // deleted or hand-edited ai-provider entry keeps being served to other
+            // plugins (and shown as connected) for the rest of the session.
+            aiProviderStore?.invalidate()
 
             result?.onSuccess {
                 state = state.copy(isOperationInProgress = false)
@@ -499,6 +507,10 @@ class SecretManagerViewModel(
 
         scope.launch {
             val result = secretDataProvider?.deleteSecret(secretId)
+            // The AI provider cache is keyed off these same secrets; without this a
+            // deleted or hand-edited ai-provider entry keeps being served to other
+            // plugins (and shown as connected) for the rest of the session.
+            aiProviderStore?.invalidate()
 
             result?.onSuccess {
                 state = state.copy(isOperationInProgress = false)

@@ -55,6 +55,7 @@ class AiProvidersViewModel(
     private val legacyImport: LegacySettingsImport?,
     private val splitViewOperations: SplitViewOperations?,
     private val scope: CoroutineScope,
+    private val envResolver: EnvResolver = EnvResolver(),
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -169,7 +170,9 @@ class AiProvidersViewModel(
      * panel useful in that state instead of showing everything as unconfigured.
      */
     private suspend fun envOnlyConnections(): Map<String, ProviderConnection> {
-        val resolver = EnvResolver()
+        // The injected resolver, so this degraded path reuses the memo cache instead of
+        // re-spawning launchctl per provider exactly when latency is already bad.
+        val resolver = envResolver
         return ProviderRegistry.all.associate { descriptor ->
             val key = resolver.resolve(descriptor.envVarNames)
             descriptor.id to
@@ -279,6 +282,10 @@ class AiProvidersViewModel(
     }
 
     fun selectModel(providerId: String, modelId: String) {
+        // Blanks are never a valid selection, and nothing downstream but a takeIf in
+        // configFor stopped one reaching a caller. Refusing here kills the class.
+        if (modelId.isBlank()) return
+
         val currentStore = store
         val existing = _state.value.connectionOf(providerId)
 
@@ -457,6 +464,10 @@ class AiProvidersViewModel(
             catalog.markNotConfigured(providerId)
             return
         }
+        // Same skip refreshStale does. Without it, saving a Custom key fetched against a
+        // nonexistent endpoint, logged a NETWORK warn, and parked a Failed state the panel
+        // then hides — noise with no symptom.
+        if (descriptor.modelsEndpoint == null) return
         catalog.refresh(descriptor, connection.apiKey, force = force)
     }
 

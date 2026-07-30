@@ -89,14 +89,17 @@ class EnvResolver(
         if (!System.getProperty("os.name").orEmpty().contains("Mac", ignoreCase = true)) return null
         return runCatching {
             val process = ProcessBuilder("launchctl", "getenv", name).start()
-            val output = process.inputStream.bufferedReader().readText().trim()
-            // Bounded: an unbounded waitFor lets a wedged launchctl hang the lookup, and
-            // this runs for every provider on every credential load.
-            if (!process.waitFor(LAUNCHCTL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            // Wait BEFORE reading. readText() blocks until stdout closes, so reading first
+            // means a wedged launchctl hangs here and the timeout below can never fire —
+            // which is the exact case this is supposed to bound. Credential resolution
+            // awaits this chain at registration, so a hang costs the whole session.
+            val exited = process.waitFor(LAUNCHCTL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            if (!exited) {
                 process.destroyForcibly()
                 return@runCatching null
             }
-            if (process.exitValue() == 0) output.takeIf { it.isNotBlank() } else null
+            if (process.exitValue() != 0) return@runCatching null
+            process.inputStream.bufferedReader().readText().trim().takeIf { it.isNotBlank() }
         }.getOrNull()
     }
 

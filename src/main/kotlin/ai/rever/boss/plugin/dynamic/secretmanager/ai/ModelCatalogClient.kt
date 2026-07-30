@@ -88,7 +88,11 @@ class ModelCatalogClient(
             collected += body.models
             pages++
 
-            cursor = body.nextCursor ?: break
+            // Assign before breaking: leaving the previous page's cursor in place made a
+            // complete list that ended exactly on the last allowed page report itself as
+            // truncated.
+            cursor = body.nextCursor
+            if (cursor == null) break
         }
 
         if (pages >= MAX_PAGES && cursor != null) {
