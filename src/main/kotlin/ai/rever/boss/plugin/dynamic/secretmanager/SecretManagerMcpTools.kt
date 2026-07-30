@@ -7,6 +7,7 @@ import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 
 /**
  * MCP tools contributed by the Secret Manager plugin.
@@ -20,6 +21,17 @@ import ai.rever.boss.plugin.api.SecretEntryData
 internal class SecretManagerMcpToolProvider(
     override val providerId: String,
     private val secrets: SecretDataProvider,
+    /**
+     * Invalidated after any write, for the same reason the panel's CRUD paths do it: the
+     * AI provider cache is keyed off these same secrets, so an agent deleting an
+     * `ai-provider` entry would otherwise leave `activeConfig()` handing the revoked
+     * credential to other plugins until restart.
+     *
+     * Deliberately **not** defaulted: a `= null` default is what let the sole call site go
+     * unwired while still compiling, so both invalidate calls were dead code in the shipped
+     * jar. One call site, no default.
+     */
+    private val aiProviderStore: ProviderCredentialStore,
 ) : McpToolProvider {
 
     override fun tools(): List<McpToolDefinition> = listOf(
@@ -62,6 +74,20 @@ internal class SecretManagerMcpToolProvider(
                 val id = args.string("id")
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
                 findById(id)?.let { s ->
+                    // AI provider keys are withheld here deliberately. secrets_list returns
+                    // ids and this returns the plaintext password, so without the gate it is
+                    // two model-directed tool calls from a prompt-injected agent to every
+                    // configured provider key. An agent that needs to *use* a provider goes
+                    // through PluginContext.llmProvider / activeConfig() and never needs the
+                    // raw value — unlike plugin code, which the operator chose to install.
+                    // Delete this block to restore the old behaviour.
+                    if (s.tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER)) {
+                        return@McpToolHandler McpToolResult(
+                            "Secret $id is an AI provider key and is not readable through this tool. " +
+                                "Use the provider via the host's AI provider settings instead.",
+                            isError = true,
+                        )
+                    }
                     McpToolResult(
                         buildString {
                             appendLine("website: ${s.website}")
@@ -102,7 +128,10 @@ internal class SecretManagerMcpToolProvider(
                         recoveryCodes = emptyList(),
                     )
                 ).fold(
-                    onSuccess = { McpToolResult("Created secret for $website.") },
+                    onSuccess = {
+                        aiProviderStore.invalidate()
+                        McpToolResult("Created secret for $website.")
+                    },
                     onFailure = { McpToolResult("Failed: ${it.message}", isError = true) },
                 )
             },
@@ -116,7 +145,10 @@ internal class SecretManagerMcpToolProvider(
                 val id = args.string("id")
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
                 secrets.deleteSecret(id).fold(
-                    onSuccess = { McpToolResult("Deleted secret $id.") },
+                    onSuccess = {
+                        aiProviderStore.invalidate()
+                        McpToolResult("Deleted secret $id.")
+                    },
                     onFailure = { McpToolResult("Failed: ${it.message}", isError = true) },
                 )
             },

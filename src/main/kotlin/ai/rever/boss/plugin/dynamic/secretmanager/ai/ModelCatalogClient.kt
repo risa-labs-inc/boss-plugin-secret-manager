@@ -244,13 +244,13 @@ class ModelCatalogClient(
         }
 
     /** Carries the status so [worthRetryingOnFallback] doesn't have to parse a message. */
-    private class HttpStatusFailure(
+    internal class HttpStatusFailure(
         val status: Int,
         message: String,
     ) : IllegalStateException(message)
 
     /** A 2xx whose body held nothing we recognised — the other shape of a wrong endpoint. */
-    private class UnrecognisedEnvelope(
+    internal class UnrecognisedEnvelope(
         message: String,
     ) : IllegalStateException(message)
 

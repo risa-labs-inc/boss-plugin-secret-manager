@@ -59,7 +59,16 @@ class ModelCatalog(
         _states.update { current ->
             val seeded = current.toMutableMap()
             cached.providers.forEach { (providerId, entry) ->
-                if (seeded[providerId] is CatalogState.Loaded) return@forEach
+                // Seeding fills an *absence* — any state already present wins, whatever it is.
+                //
+                // Enumerating states to skip kept leaving holes. Skipping only Loaded let a
+                // 401 be papered over: load() seeds on every entry into the section, so Failed
+                // was replaced by a within-TTL cached list, isStale then said "fresh", no
+                // refetch happened, and the panel showed a working picker for a credential
+                // that does not authenticate. Adding Failed still left NotConfigured — which
+                // clearKey sets precisely to drop a stale list — and Loading, contradicting
+                // this method's own promise never to overwrite a live result.
+                if (seeded.containsKey(providerId)) return@forEach
                 if (entry.models.isEmpty()) return@forEach
                 seeded[providerId] =
                     CatalogState.Loaded(
@@ -84,7 +93,11 @@ class ModelCatalog(
     fun isStale(providerId: String, nowEpochMs: Long): Boolean =
         when (val state = _states.value[providerId]) {
             is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs > CACHE_TTL_MS
-            null, is CatalogState.NotConfigured, is CatalogState.Failed -> true
+            // A permanent failure (rejected key) is not stale: nothing changes until the
+            // credential does, and the panel re-enters this on every open. Saving a new key
+            // calls refresh(force = true), so recovery does not depend on staleness.
+            is CatalogState.Failed -> !state.permanent
+            null, is CatalogState.NotConfigured -> true
             is CatalogState.Loading -> false
         }
 
@@ -108,7 +121,17 @@ class ModelCatalog(
         }
         if (!force && !isStale(descriptor.id, nowEpochMs)) return
 
-        val lastKnown = _states.value[descriptor.id] as? CatalogState.Loaded
+        // Carry the previous good list through a *chain* of failures, not just the first.
+        // Before Failed survived seeding, re-entry converted it back to Loaded so this cast
+        // happened to succeed; now that it survives, `as? Loaded` would yield null on the
+        // second attempt — clearing the picker for an offline user who merely opened the
+        // section twice, even with a within-TTL list still on disk.
+        val lastKnown =
+            when (val current = _states.value[descriptor.id]) {
+                is CatalogState.Loaded -> current
+                is CatalogState.Failed -> current.lastKnown
+                else -> null
+            }
         if (lastKnown == null) {
             _states.update { it + (descriptor.id to CatalogState.Loading) }
         }
@@ -132,8 +155,10 @@ class ModelCatalog(
                 )
             }.onFailure { error ->
                 val message = error.message ?: "Could not reach ${descriptor.displayName}."
+                val status = (error as? ModelCatalogClient.HttpStatusFailure)?.status
+                val permanent = status == 401 || status == 403
                 _states.update {
-                    it + (descriptor.id to CatalogState.Failed(message, lastKnown))
+                    it + (descriptor.id to CatalogState.Failed(message, lastKnown, permanent))
                 }
                 // The message is provider-supplied and status-only by construction —
                 // ModelCatalogClient never puts response bodies or keys into it.

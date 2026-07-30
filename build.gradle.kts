@@ -116,6 +116,10 @@ dependencies {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // An *independent* source of truth for PluginVersionTest. Asserting the reported version
+    // against the bundled plugin.json is circular — both read the same file, so any value in
+    // it passes, including a stale one. This comes from Gradle instead.
+    systemProperty("boss.plugin.expectedVersion", version.toString())
 }
 
 // Task to build plugin JAR with compiled classes only
@@ -131,11 +135,34 @@ tasks.register<Jar>("buildPluginJar") {
         )
     }
 
-    // Include compiled classes
+    // Compiled classes AND processed resources — sourceSets output already contains the
+    // plugin.json that processResources stamped with the Gradle version.
+    //
+    // Deliberately does NOT also copy src/main/resources. That added a second, *unstamped*
+    // plugin.json (the committed one says 1.0.9) and with duplicatesStrategy = EXCLUDE the
+    // winner was decided purely by `from` order — so reordering these lines would have made
+    // the plugin report 1.0.9 to the host and the store, silently.
     from(sourceSets.main.get().output)
 
-    // Include plugin manifest
-    from("src/main/resources")
+    // Structural guard, not a comment. The hazard is that an *unstamped* plugin.json reaches
+    // the jar and duplicatesStrategy picks the winner by `from` order — which is how this
+    // plugin could have shipped reporting 1.0.9 (the version committed to src/main/resources)
+    // with every test green.
+    //
+    // Note what is NOT checked: the number of plugin.json entries. duplicatesStrategy =
+    // EXCLUDE means the jar always contains exactly one, so counting can never fail —
+    // verified. Asserting the *content* is what actually catches the reorder.
+    doLast {
+        val jar = archiveFile.get().asFile
+        val entry =
+            zipTree(jar).matching { include("META-INF/boss-plugin/plugin.json") }.singleFile
+        val declared =
+            Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(entry.readText())?.groupValues?.get(1)
+        require(declared == version.toString()) {
+            "plugin.json in ${jar.name} declares version '$declared' but the build is '$version' — " +
+                "processResources did not stamp the copy that reached the jar."
+        }
+    }
 }
 
 // Sync version from build.gradle.kts into plugin.json (single source of truth)
@@ -162,6 +189,19 @@ tasks.register<Jar>("shadowJar") {
         )
     }
     from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
+    // Same reasoning as buildPluginJar: no raw src/main/resources copy, or an unstamped
+    // plugin.json can win on `from` order.
     from(sourceSets.main.get().output)
-    from("src/main/resources")
+
+    // Same assertion too — if this fat jar is ever published, the hazard is identical.
+    doLast {
+        val jar = archiveFile.get().asFile
+        val entry =
+            zipTree(jar).matching { include("META-INF/boss-plugin/plugin.json") }.singleFile
+        val declared =
+            Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(entry.readText())?.groupValues?.get(1)
+        require(declared == version.toString()) {
+            "plugin.json in ${jar.name} declares version '$declared' but the build is '$version'."
+        }
+    }
 }

@@ -65,6 +65,48 @@ deliberately no bundled fallback list: the host implementation this replaced shi
 hardcoded models that drifted years out of date, and a provider with no credential
 now reports "not configured" instead of guessing.
 
+### The version must come from Gradle, not from a second copy of plugin.json
+
+`version` reads the bundled `plugin.json` that `processResources` stamps. Two traps here, both
+hit once already:
+
+- `javaClass.package?.implementationVersion` does **not** work, even though `buildPluginJar`
+  writes `Implementation-Version` into the manifest. `getImplementationVersion()` returns null
+  under a plain `URLClassLoader`, which is what the host's `PluginClassLoader` extends, so the
+  plugin reported `"unknown"` to the host and store for a whole release.
+- The `pluginId` filter alone is not enough either: a bundled or stale copy of *our own*
+  manifest on the host classpath matches it, and `getResources` is parent-first. `PluginVersionSource`
+  therefore prefers the jar the plugin class itself came from, keeping the `pluginId` match as
+  the fallback so IDE and test runs still resolve. The selection rules live in that object,
+  away from the classloader, precisely so they can be tested — they have been wrong twice.
+- `getResourceAsStream` is the wrong lookup: every BOSS plugin ships `plugin.json` at the same
+  path and resource lookup is parent-first, so a neighbour's manifest could win and the plugin
+  would report *someone else's* version. Enumerate with `getResources` and pick the document
+  whose `pluginId` is ours.
+- The jar tasks must **not** also `from("src/main/resources")`. `sourceSets.main.output` already
+  carries the stamped copy; adding the raw directory put an *unstamped* `plugin.json` in the jar
+  too (the committed one says `1.0.9`), and with `duplicatesStrategy = EXCLUDE` the winner was
+  decided by `from` order alone.
+
+`PluginVersionTest` asserts against `boss.plugin.expectedVersion`, injected by the Test task from
+the Gradle version. Comparing the reported version to the bundled `plugin.json` would be circular
+— both read the same file, so any value in it passes, and `1.0.9` is valid semver.
+
+### Provider keys are withheld from `secret_get`
+
+Storing provider keys as ordinary secrets buys encryption, RLS and an audit trail for free.
+The cost would have been agent readability: `secrets_list` hands out ids and `secret_get`
+hands out the plaintext `password`, so ungated it is **two model-directed tool calls from a
+prompt-injected agent to every configured provider key**.
+
+`secret_get` therefore refuses entries tagged `TAG_AI_PROVIDER`. The asymmetry that decided
+it: `PluginContext.llmProvider` also exposes `LlmConfig.apiKey`, but that is plugin code the
+operator chose to install, whereas the MCP path is directed by a model. An agent that needs to
+*use* a provider goes through `llmProvider`/`activeConfig()` and never needs the raw value.
+
+Deleting the tag check in the `secret_get` handler restores the old behaviour; two tests cover
+both halves (provider key withheld, ordinary secret still returned).
+
 ### Do not add OAuth without re-checking the docs
 
 Sign-in is intentionally absent. As of July 2026:
@@ -96,6 +138,13 @@ guard — a member newer than the floor would throw `NoSuchMethodError` there an
 *whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
 unconstrained.
 
+The audit also has to cover the UI kit, not just `PluginContext`: this feature added
+first-time uses of `BossSection`, `BossCard`, `BossTextField`, `BossPrimaryButton` and
+`BossSecondaryButton` (only `BossTheme`/`BossThemeColors` were used before). Containment holds
+because `AiProvidersPanel` is reachable only from `LlmProviderSettingsApiImpl`, so those
+symbols never load on a pre-1.0.71 host — but that stops being true the moment the panel is
+rendered from `SecretManagerContent`, which is exactly why it is written down here.
+
 `LlmProviderSettingsApiImpl` is the **only** file referencing api symbols added in
 1.0.71 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE`). Everything else
 uses the plugin-local `WireFormat` enum. That is why `registerAiProviderSettings`
@@ -114,7 +163,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 70 host-independent cases, no live credential needed, run on every
+`./gradlew test` — 96 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
@@ -139,7 +188,29 @@ unconditionally is indistinguishable from no test:
 - removing the write-path cache-version check fails
   `a rejected cache version is not laundered back in by the write path`.
 
-The second only got teeth after a correction worth remembering: the first version of that
+`buildPluginJar` asserts the packaged `plugin.json` declares the Gradle version. Do not replace
+that with a count of `plugin.json` entries: `duplicatesStrategy = EXCLUDE` means the jar always
+holds exactly one, so counting can never fail (verified — the count check was tried first and
+did nothing). Asserting the content is what catches a `from` reorder.
+
+`seedFromCache` fills an **absence** — `if (seeded.containsKey(providerId)) return@forEach`.
+Do not go back to enumerating states to skip: skipping only `Loaded` papered over a rejected
+key (a 401 replaced by a within-TTL cached list, which `isStale` then called fresh), and adding
+`Failed` still left `NotConfigured` — which `clearKey` sets precisely to drop a stale list.
+
+Relatedly, `refresh` must carry `lastKnown` through a *chain* of failures
+(`Failed -> current.lastKnown`), not just the first. `as? Loaded` only ever worked because
+seeding used to convert `Failed` back to `Loaded`; once `Failed` survived, a second consecutive
+failure emptied the picker for an offline user who merely reopened the section. Mutation-checked.
+
+A third env case: reverting the `EnvResolver` stubbing in `ProviderCredentialStoreTest` fails 9 tests
+*only if* provider variables are exported. `EnvResolver` consults the process environment and
+system properties **before** the `env_vars` file, and these tests must use the registry's real
+variable names, so they are hermetic only because all three sources are injected. CI never
+caught this because CI exports none of them — run the suite with `OPENAI_API_KEY` set if you
+touch it.
+
+The cache-laundering test only got teeth after a correction worth remembering: the first version of that
 test seeded the stale entry under the *same* provider it then refreshed, so the merge
 replaced it either way and the test passed against the bug. The laundering only shows up on a
 *bystander* provider's entry. If you extend these, re-run the mutation.

@@ -20,7 +20,14 @@ class EnvResolverTest {
 
     private fun resolverWith(contents: String): EnvResolver {
         File(tempDir, "env_vars").writeText(contents)
-        return EnvResolver(bossRootDir = tempDir)
+        // uniqueName() already keeps these off real variables; stubbing the other sources as
+        // well means the suite never spawns launchctl and stays fast on macOS.
+        return EnvResolver(
+            bossRootDir = tempDir,
+            processEnv = { null },
+            systemProperty = { null },
+            useLaunchctl = false,
+        )
     }
 
     /** A name no real environment will define, so only the file can satisfy it. */
@@ -108,7 +115,14 @@ class EnvResolverTest {
     fun `a missing env file resolves to null rather than throwing`() =
         runTest {
             val emptyDir = Files.createTempDirectory("env-resolver-empty").toFile()
-            assertNull(EnvResolver(bossRootDir = emptyDir).resolve(listOf(uniqueName("NOFILE"))))
+            val resolver =
+                EnvResolver(
+                    bossRootDir = emptyDir,
+                    processEnv = { null },
+                    systemProperty = { null },
+                    useLaunchctl = false,
+                )
+            assertNull(resolver.resolve(listOf(uniqueName("NOFILE"))))
         }
 
     @Test

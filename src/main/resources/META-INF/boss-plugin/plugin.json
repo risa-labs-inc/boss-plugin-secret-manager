@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "pluginId": "ai.rever.boss.plugin.dynamic.secretmanager",
   "displayName": "Secret Manager (Dynamic)",
-  "version": "1.0.9",
+  "version": "0.0.0-unstamped",
   "apiVersion": "1.0.20",
   "minBossVersion": "9.2.20",
   "mainClass": "ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin",

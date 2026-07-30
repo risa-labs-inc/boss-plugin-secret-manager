@@ -25,17 +25,10 @@ import java.io.File
 class SecretManagerDynamicPlugin : DynamicPlugin {
     private val logger = BossLogger.forComponent("SecretManagerPlugin")
 
-    override val pluginId: String = "ai.rever.boss.plugin.dynamic.secretmanager"
+    override val pluginId: String = PluginVersionSource.PLUGIN_ID
     override val displayName: String = "Secret Manager (Dynamic)"
-    /**
-     * Read from the jar manifest, which `buildPluginJar` stamps from the Gradle version.
-     *
-     * Previously a hardcoded third copy that had drifted out of step with both
-     * build.gradle.kts and the plugin.json it syncs. Falls back to "unknown" only when
-     * running outside a packaged jar (tests, IDE).
-     */
-    override val version: String =
-        javaClass.`package`?.implementationVersion ?: "unknown"
+    /** Resolved from the bundled `plugin.json` — see [PluginVersionSource] for why not the manifest. */
+    override val version: String = PluginVersionSource.read()
     override val description: String = "Manage encrypted credentials and secrets, including Plugin Store API keys"
     override val author: String = "Risa Labs"
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-secret-manager"
@@ -83,7 +76,9 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         }
 
         // Contribute secret_* MCP tools (expose secret values to agents; auto-removed on disable/unload).
-        context.registerMcpToolProvider(SecretManagerMcpToolProvider(pluginId, secretDataProvider))
+        context.registerMcpToolProvider(
+            SecretManagerMcpToolProvider(pluginId, secretDataProvider, credentialStore),
+        )
 
         registerAiProviderSettings(context, credentialStore, envResolver, pluginScope)
     }

@@ -203,6 +203,142 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `a failed fetch is not papered over by seeding a cached list`() =
+        runTest {
+            // load() calls seedFromCache on every entry into the section. A Failed state used
+            // to be overwritten by a within-TTL cached list, isStale then reported "fresh" so
+            // no refetch happened, and the panel showed a working model picker for a
+            // credential that does not authenticate — the 401 message simply gone.
+            val dir = Files.createTempDirectory("catalog-failed").toFile()
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${descriptor.id}":{"models":[{"id":"cached","displayName":"Cached"}],
+                "fetchedAtEpochMs":1000000}},"version":1}""".trimIndent(),
+            )
+
+            val fake = QueuedHttpClient(listOf(401 to """{"error":"bad key"}"""))
+            val catalog = ModelCatalog(client = ModelCatalogClient(fake), cacheDir = dir)
+
+            catalog.refresh(descriptor, apiKey = "a-rejected-key", force = true)
+            assertTrue(catalog.stateOf(descriptor.id) is CatalogState.Failed, "the 401 did not land")
+
+            // Re-entering the section must not erase the failure.
+            catalog.seedFromCache()
+
+            val state = catalog.stateOf(descriptor.id)
+            assertTrue(
+                state is CatalogState.Failed,
+                "seeding replaced a rejected-key failure with a cached list: $state",
+            )
+            // The message survives, which is the point — the user sees why, instead of a
+            // working-looking picker. Staleness is deliberately NOT asserted here: a 401 is
+            // classified permanent so it does not re-request on every open. That split is
+            // covered by `a rejected key does not re-request on every section open` and
+            // `a transient failure stays retryable`.
+            assertTrue((state as CatalogState.Failed).message.contains("401"))
+        }
+
+    @Test
+    fun `two consecutive failures keep the last good list`() =
+        runTest {
+            // Regression guard for the fix that made Failed survive seeding: `lastKnown` was
+            // computed with `as? Loaded`, which had only worked because re-entry converted
+            // Failed back to Loaded. Once Failed survived, the second failure yielded
+            // lastKnown = null — emptying the picker for an offline user who just opened the
+            // section twice. CatalogState.Failed exists precisely so the picker keeps working.
+            val fake =
+                QueuedHttpClient(
+                    listOf(
+                        200 to """{"data":[{"id":"gpt-5","object":"model"}]}""",
+                        500 to """{"error":"down"}""",
+                        500 to """{"error":"still down"}""",
+                    ),
+                )
+            val catalog =
+                ModelCatalog(
+                    client = ModelCatalogClient(fake),
+                    cacheDir = Files.createTempDirectory("catalog-chain").toFile(),
+                )
+
+            catalog.refresh(descriptor, apiKey = "k", force = true)
+            val loaded = catalog.stateOf(descriptor.id) as CatalogState.Loaded
+            assertEquals(listOf("gpt-5"), loaded.models.map { it.id })
+
+            catalog.refresh(descriptor, apiKey = "k", force = true)
+            val first = catalog.stateOf(descriptor.id) as CatalogState.Failed
+            assertEquals(listOf("gpt-5"), first.lastKnown?.models?.map { it.id })
+
+            catalog.refresh(descriptor, apiKey = "k", force = true)
+            val second = catalog.stateOf(descriptor.id) as CatalogState.Failed
+            assertEquals(
+                listOf("gpt-5"),
+                second.lastKnown?.models?.map { it.id },
+                "the second consecutive failure dropped the last good list",
+            )
+        }
+
+    @Test
+    fun `seeding never replaces a state that is already present`() =
+        runTest {
+            // markNotConfigured is how clearKey drops a stale list, so a cached list must not
+            // come back over it — the panel would show models for a provider with no
+            // credential until a paginated store read finished.
+            val dir = Files.createTempDirectory("catalog-notconfigured").toFile()
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${descriptor.id}":{"models":[{"id":"cached","displayName":"Cached"}],
+                "fetchedAtEpochMs":1000000}},"version":1}""".trimIndent(),
+            )
+
+            val catalog = ModelCatalog(cacheDir = dir)
+            catalog.markNotConfigured(descriptor.id)
+            catalog.seedFromCache()
+
+            assertEquals(
+                CatalogState.NotConfigured,
+                catalog.stateOf(descriptor.id),
+                "seeding overwrote a deliberate NotConfigured",
+            )
+        }
+
+    @Test
+    fun `a rejected key does not re-request on every section open`() =
+        runTest {
+            // load() runs from a LaunchedEffect on every entry into the section and isStale
+            // treats a failure as stale, so a revoked key would send an auth-failure request to
+            // the provider every single visit — which some providers act on. A 401 cannot
+            // succeed until the credential changes, and saving a new key calls refresh(force),
+            // so recovery does not depend on staleness.
+            val fake = QueuedHttpClient(listOf(401 to """{"error":"revoked"}"""))
+            val catalog =
+                ModelCatalog(
+                    client = ModelCatalogClient(fake),
+                    cacheDir = Files.createTempDirectory("catalog-permanent").toFile(),
+                )
+
+            catalog.refresh(descriptor, apiKey = "revoked-key", force = true)
+            val failed = catalog.stateOf(descriptor.id) as CatalogState.Failed
+            assertTrue(failed.permanent, "a 401 was not classified as permanent")
+            assertFalse(catalog.isStale(descriptor.id, nowEpochMs = Long.MAX_VALUE))
+        }
+
+    @Test
+    fun `a transient failure stays retryable`() =
+        runTest {
+            // The other half: offline and 5xx genuinely might succeed next time, so those must
+            // keep refreshing on open.
+            val fake = QueuedHttpClient(listOf(503 to """{"error":"maintenance"}"""))
+            val catalog =
+                ModelCatalog(
+                    client = ModelCatalogClient(fake),
+                    cacheDir = Files.createTempDirectory("catalog-transient").toFile(),
+                )
+
+            catalog.refresh(descriptor, apiKey = "good-key", force = true)
+            val failed = catalog.stateOf(descriptor.id) as CatalogState.Failed
+            assertFalse(failed.permanent, "a 503 was treated as permanent")
+            assertTrue(catalog.isStale(descriptor.id, nowEpochMs = 0))
+        }
+
+    @Test
     fun `the TTL boundary is six hours`() {
         // Documented as six hours and shown to the user as an age; pin it so a change is
         // deliberate.
