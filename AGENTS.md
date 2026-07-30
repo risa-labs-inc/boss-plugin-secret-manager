@@ -74,6 +74,11 @@ hit once already:
   writes `Implementation-Version` into the manifest. `getImplementationVersion()` returns null
   under a plain `URLClassLoader`, which is what the host's `PluginClassLoader` extends, so the
   plugin reported `"unknown"` to the host and store for a whole release.
+- The `pluginId` filter alone is not enough either: a bundled or stale copy of *our own*
+  manifest on the host classpath matches it, and `getResources` is parent-first. `PluginVersionSource`
+  therefore prefers the jar the plugin class itself came from, keeping the `pluginId` match as
+  the fallback so IDE and test runs still resolve. The selection rules live in that object,
+  away from the classloader, precisely so they can be tested — they have been wrong twice.
 - `getResourceAsStream` is the wrong lookup: every BOSS plugin ships `plugin.json` at the same
   path and resource lookup is parent-first, so a neighbour's manifest could win and the plugin
   would report *someone else's* version. Enumerate with `getResources` and pick the document
@@ -157,7 +162,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 81 host-independent cases, no live credential needed, run on every
+`./gradlew test` — 92 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
@@ -181,6 +186,11 @@ unconditionally is indistinguishable from no test:
 - dropping the `after_id` parameter fails the paging suite;
 - removing the write-path cache-version check fails
   `a rejected cache version is not laundered back in by the write path`.
+
+`buildPluginJar` asserts the packaged `plugin.json` declares the Gradle version. Do not replace
+that with a count of `plugin.json` entries: `duplicatesStrategy = EXCLUDE` means the jar always
+holds exactly one, so counting can never fail (verified — the count check was tried first and
+did nothing). Asserting the content is what catches a `from` reorder.
 
 `seedFromCache` fills an **absence** — `if (seeded.containsKey(providerId)) return@forEach`.
 Do not go back to enumerating states to skip: skipping only `Loaded` papered over a rejected

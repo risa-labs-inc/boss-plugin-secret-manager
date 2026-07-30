@@ -143,6 +143,26 @@ tasks.register<Jar>("buildPluginJar") {
     // winner was decided purely by `from` order — so reordering these lines would have made
     // the plugin report 1.0.9 to the host and the store, silently.
     from(sourceSets.main.get().output)
+
+    // Structural guard, not a comment. The hazard is that an *unstamped* plugin.json reaches
+    // the jar and duplicatesStrategy picks the winner by `from` order — which is how this
+    // plugin could have shipped reporting 1.0.9 (the version committed to src/main/resources)
+    // with every test green.
+    //
+    // Note what is NOT checked: the number of plugin.json entries. duplicatesStrategy =
+    // EXCLUDE means the jar always contains exactly one, so counting can never fail —
+    // verified. Asserting the *content* is what actually catches the reorder.
+    doLast {
+        val jar = archiveFile.get().asFile
+        val entry =
+            zipTree(jar).matching { include("META-INF/boss-plugin/plugin.json") }.singleFile
+        val declared =
+            Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(entry.readText())?.groupValues?.get(1)
+        require(declared == version.toString()) {
+            "plugin.json in ${jar.name} declares version '$declared' but the build is '$version' — " +
+                "processResources did not stamp the copy that reached the jar."
+        }
+    }
 }
 
 // Sync version from build.gradle.kts into plugin.json (single source of truth)

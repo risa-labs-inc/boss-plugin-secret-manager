@@ -25,20 +25,10 @@ import java.io.File
 class SecretManagerDynamicPlugin : DynamicPlugin {
     private val logger = BossLogger.forComponent("SecretManagerPlugin")
 
-    override val pluginId: String = "ai.rever.boss.plugin.dynamic.secretmanager"
+    override val pluginId: String = PluginVersionSource.PLUGIN_ID
     override val displayName: String = "Secret Manager (Dynamic)"
-    /**
-     * Read from the bundled `plugin.json`, which `processResources` stamps from the Gradle
-     * version — the same file the host and store read, so it cannot disagree with them.
-     *
-     * Deliberately **not** `javaClass.package?.implementationVersion`. `buildPluginJar` does
-     * write `Implementation-Version` into the manifest, but `getImplementationVersion()`
-     * returns null in practice — verified empirically against a plain `URLClassLoader`, which
-     * is what the host's `PluginClassLoader` extends — so that reported this plugin's version
-     * as "unknown" to the host and store. The manifest is kept as a fallback rather than
-     * removed: it costs nothing and covers the resource ever moving.
-     */
-    override val version: String = readVersion()
+    /** Resolved from the bundled `plugin.json` — see [PluginVersionSource] for why not the manifest. */
+    override val version: String = PluginVersionSource.read()
     override val description: String = "Manage encrypted credentials and secrets, including Plugin Store API keys"
     override val author: String = "Risa Labs"
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-secret-manager"
@@ -46,46 +36,6 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
     private companion object {
         /** api release that introduced LlmProviderSettingsAPI. */
         const val REQUIRED_API_VERSION = "1.0.71"
-
-        private const val MANIFEST_RESOURCE = "META-INF/boss-plugin/plugin.json"
-
-        /** Matches `"version": "1.2.6"` without pulling a JSON parser into class init. */
-        private val VERSION_PATTERN = Regex(""""version"\s*:\s*"([^"]+)"""")
-
-        /**
-         * Identifies our own manifest among any others reachable on the classpath.
-         *
-         * Also why the loose [VERSION_PATTERN] is safe: it is only ever applied to a document
-         * already confirmed to be this plugin's.
-         */
-        private val PLUGIN_ID_PATTERN =
-            Regex(""""pluginId"\s*:\s*"ai\.rever\.boss\.plugin\.dynamic\.secretmanager"""")
-
-        /**
-         * plugin.json first, jar manifest second, "unknown" only if both are unavailable
-         * (running from classes in an IDE or a test, where no version exists to report).
-         */
-        private fun readVersion(): String {
-            val fromResource =
-                runCatching {
-                    // Every BOSS plugin ships this same resource path, and getResource is
-                    // parent-first, so taking the *first* match could hand back a neighbour's
-                    // manifest — reporting someone else's version. That is the original bug
-                    // again, only with a plausible-looking value. Enumerate all of them and
-                    // take the one that names this plugin.
-                    SecretManagerDynamicPlugin::class.java.classLoader
-                        ?.getResources(MANIFEST_RESOURCE)
-                        ?.asSequence()
-                        .orEmpty()
-                        .mapNotNull { url -> runCatching { url.readText() }.getOrNull() }
-                        .firstOrNull { text -> PLUGIN_ID_PATTERN.containsMatchIn(text) }
-                        ?.let { text -> VERSION_PATTERN.find(text)?.groupValues?.get(1) }
-                }.getOrNull()
-
-            return fromResource?.takeIf { it.isNotBlank() }
-                ?: SecretManagerDynamicPlugin::class.java.`package`?.implementationVersion
-                ?: "unknown"
-        }
     }
 
     override fun register(context: PluginContext) {
