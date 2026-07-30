@@ -10,6 +10,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
@@ -69,6 +70,20 @@ class AiProvidersViewModel(
 
     init {
         scope.launch { catalog.states.collect { states -> _state.update { it.copy(catalogs = states) } } }
+
+        // Re-read credentials whenever the store is invalidated — which is what the secret
+        // list's own create/update/delete does. Clearing the store cache alone was not
+        // enough: activeConfig() answers other plugins from the snapshot below, so a secret
+        // deleted from the list kept being served for the session unless the user happened
+        // to open Settings → AI Providers. drop(1) skips the initial value; only real
+        // invalidations should trigger a read.
+        store?.let { credentialStore ->
+            scope.launch {
+                credentialStore.invalidations.drop(1).collect {
+                    if (connectionsLoadStarted.get()) reloadConnections()
+                }
+            }
+        }
     }
 
     /**
@@ -318,7 +333,7 @@ class AiProvidersViewModel(
                     maxTokens = existing.maxTokens,
                 )
 
-            val written =
+            val result =
                 currentStore?.saveSettings(providerId, settings)
                     ?.onFailure { error ->
                         // Revert rather than leaving the picker showing an unsaved choice.
@@ -328,18 +343,16 @@ class AiProvidersViewModel(
                                 error = error.message ?: "Could not save the model choice.",
                             )
                         }
-                    }?.getOrNull()
+                    }
 
-            // `written` is three-way: true = stored, false = no secret to attach to (an
-            // env-keyed provider), null = no store at all (not signed in). Only a genuine
-            // save failure should be left to the revert above; both other cases fall back
-            // to prefs. Testing `== false` missed the null case — precisely the state where
-            // prefs are the *only* place the choice could live.
-            //
-            // Unlike the endpoint above this stays conditional, and safely so: a blank model
-            // id is rejected at the top of this function, so there is no "cleared" state for
-            // a stale prefs entry to resurrect.
-            if (written != true) prefs.writeModel(providerId, modelId)
+            // Three genuinely distinct outcomes, and the Result has to be kept to tell them
+            // apart: null = no store at all (not signed in), success(false) = no secret to
+            // attach settings to (an env-keyed provider) — both fall back to prefs, which is
+            // the only place the choice could live. A *failure* must not: getOrNull()
+            // collapsed it into null, so a save that failed still wrote prefs, and the
+            // overlay in withPreferredModels then re-applied the choice the user was just
+            // told wasn't saved.
+            if (result == null || result.getOrNull() == false) prefs.writeModel(providerId, modelId)
         }
     }
 
@@ -364,7 +377,11 @@ class AiProvidersViewModel(
                         _state.update { it.copy(error = error.message ?: "Could not save the endpoint.") }
                     }?.getOrNull()
 
-            // Written unconditionally, not only when the secret write didn't happen.
+            // Written unconditionally, not only when the secret write didn't happen — which
+            // does mean a *failed* store write still takes effect via the prefs overlay.
+            // Accepted deliberately here: an endpoint the user typed is worth keeping over
+            // losing it to a transient store failure, and unlike a model id it can be
+            // cleared, so a wrong value is recoverable.
             // withPreferredModels re-overlays prefs whenever the stored endpoint is blank,
             // so a write-only fallback let a cleared endpoint come back from prefs on the
             // next load: set A with no key (prefs = A), add a key, clear the endpoint

@@ -6,6 +6,9 @@ import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.api.UpdateSecretRequestData
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -73,6 +76,18 @@ class ProviderCredentialStore(
      */
     private val generation = java.util.concurrent.atomic.AtomicLong(0)
 
+    /**
+     * Bumped on every [invalidate] so holders of a derived snapshot can re-read.
+     *
+     * Clearing this class's own cache is necessary but not sufficient: `AiProvidersViewModel`
+     * keeps its own `connections` map and `activeConfig()` answers other plugins from that,
+     * so without a signal a secret deleted from the list kept being served for the session
+     * unless the user happened to open Settings → AI Providers.
+     */
+    val invalidations: StateFlow<Long> get() = _invalidations.asStateFlow()
+
+    private val _invalidations = MutableStateFlow(0L)
+
     /** Drop the cached provider map, e.g. after an external edit in the secret list. */
     fun invalidate() {
         // Order matters: bump first, so a load that is already paging cannot seat a map it
@@ -81,6 +96,7 @@ class ProviderCredentialStore(
         // provider for the rest of the session — the exact thing invalidate() prevents.
         generation.incrementAndGet()
         cached = null
+        _invalidations.value = _invalidations.value + 1
     }
 
     /** Read every provider's effective connection. */

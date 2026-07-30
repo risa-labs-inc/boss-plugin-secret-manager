@@ -114,7 +114,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 69 host-independent cases, no live credential needed, run on every
+`./gradlew test` — 70 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

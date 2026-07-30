@@ -311,16 +311,29 @@ class SecretManagerViewModel(
                 .firstOrNull { (sources[it.id] ?: CredentialSource.NONE) == CredentialSource.NONE }
                 ?.id
 
+            // Only pre-select if the user hasn't chosen in the meantime. loadAll() pages the
+            // whole store, so on a large one this lands well after the dialog is usable and
+            // would otherwise overwrite an explicit pick.
+            val userHasPicked = state.aiProviderKeyProviderId != ProviderRegistry.default.id ||
+                state.aiProviderKeyDraft.isNotEmpty()
+
             state = state.copy(
                 aiProviderSources = sources,
-                aiProviderKeyProviderId = firstUnset ?: state.aiProviderKeyProviderId
+                aiProviderKeyProviderId =
+                    if (userHasPicked) {
+                        state.aiProviderKeyProviderId
+                    } else {
+                        firstUnset ?: state.aiProviderKeyProviderId
+                    }
             )
         }
     }
 
     fun hideAiProviderKeyDialog() {
+        // errorMessage is shared panel state, so a failed save would otherwise leave its
+        // banner behind after the dialog it belonged to is gone.
         // Clear the draft on close so key material doesn't linger in state.
-        state = state.copy(showAiProviderKeyDialog = false, aiProviderKeyDraft = "")
+        state = state.copy(showAiProviderKeyDialog = false, aiProviderKeyDraft = "", errorMessage = null)
     }
 
     fun setAiProviderKeyProvider(providerId: String) {

@@ -33,9 +33,12 @@ jobs:
           # against the same api the release job will. The api is additive-only, so latest
           # always carries the symbols this code needs.
           mkdir -p build/downloaded-deps
+          # Excludes sources/thin classifiers explicitly: --output takes a single file, so a
+          # release that ever ships a second matching asset would fail the job. build.gradle.kts
+          # filters the same two for the same reason.
           gh release download \
             --repo risa-labs-inc/boss-plugin-api \
-            --pattern 'boss-plugin-api-*.jar' \
+            --pattern 'boss-plugin-api-*[0-9].jar' \
             --output build/downloaded-deps/boss-plugin-api.jar
           test -s build/downloaded-deps/boss-plugin-api.jar
 

@@ -284,6 +284,26 @@ class ProviderCredentialStoreTest {
         }
 
     @Test
+    fun `invalidate publishes a signal so derived snapshots can re-read`() =
+        runTest {
+            // Clearing this class's cache is not enough on its own: AiProvidersViewModel holds
+            // its own connections map and activeConfig() answers other plugins from that. This
+            // flow is how it learns to re-read, so a secret deleted from the list stops being
+            // served without the user having to open the AI settings panel.
+            val provider = FakeSecretDataProvider(listOf(secret("1", openai.id, "k")))
+            val store = ProviderCredentialStore(provider, envWith())
+
+            val before = store.invalidations.value
+            store.invalidate()
+            assertTrue(store.invalidations.value > before, "invalidate() published no signal")
+
+            // Writes invalidate too, so a key added here reaches other readers the same way.
+            val afterManual = store.invalidations.value
+            store.saveKey(together.id, "new-key")
+            assertTrue(store.invalidations.value > afterManual, "a write published no signal")
+        }
+
+    @Test
     fun `clearKey removes the stored entry`() =
         runTest {
             val provider = FakeSecretDataProvider(listOf(secret("1", openai.id, "k")))
