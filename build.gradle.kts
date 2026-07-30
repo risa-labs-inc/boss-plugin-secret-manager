@@ -192,4 +192,16 @@ tasks.register<Jar>("shadowJar") {
     // Same reasoning as buildPluginJar: no raw src/main/resources copy, or an unstamped
     // plugin.json can win on `from` order.
     from(sourceSets.main.get().output)
+
+    // Same assertion too — if this fat jar is ever published, the hazard is identical.
+    doLast {
+        val jar = archiveFile.get().asFile
+        val entry =
+            zipTree(jar).matching { include("META-INF/boss-plugin/plugin.json") }.singleFile
+        val declared =
+            Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(entry.readText())?.groupValues?.get(1)
+        require(declared == version.toString()) {
+            "plugin.json in ${jar.name} declares version '$declared' but the build is '$version'."
+        }
+    }
 }

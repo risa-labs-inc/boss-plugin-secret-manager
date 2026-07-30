@@ -216,5 +216,15 @@ sealed interface CatalogState {
     data class Failed(
         val message: String,
         val lastKnown: Loaded? = null,
+        /**
+         * True when retrying cannot help until the credential changes (a 401/403).
+         *
+         * `load()` runs from a LaunchedEffect on every entry into the section and `isStale`
+         * treats a failure as stale, so without this a user with a revoked key sent an
+         * auth-failure request to the provider on every visit — which some providers notice.
+         * Transient failures (offline, 5xx, timeouts) stay retryable, because there the next
+         * attempt genuinely might succeed.
+         */
+        val permanent: Boolean = false,
     ) : CatalogState
 }

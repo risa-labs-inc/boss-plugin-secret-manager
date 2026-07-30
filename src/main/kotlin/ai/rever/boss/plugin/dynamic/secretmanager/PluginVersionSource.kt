@@ -1,5 +1,8 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
+import ai.rever.boss.plugin.logging.BossLogger
+import ai.rever.boss.plugin.logging.LogCategory
+
 /**
  * Resolves this plugin's own version from its bundled `plugin.json`.
  *
@@ -111,6 +114,14 @@ internal object PluginVersionSource {
                         }.toList()
 
                 pickOwnManifest(candidates, ownRoot)?.let { versionIn(it) }
+            }.onFailure { error ->
+                // A future "unknown" should be a one-line answer, not the investigation this
+                // PR just paid for. Debug level: on a normal run this never fires.
+                BossLogger.forComponent("SecretManagerPlugin").debug(
+                    LogCategory.SYSTEM,
+                    "Could not read the plugin version from $MANIFEST_RESOURCE",
+                    mapOf("exception" to (error::class.simpleName ?: "Exception")),
+                )
             }.getOrNull()
 
         return fromResource

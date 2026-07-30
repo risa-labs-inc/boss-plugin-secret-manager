@@ -134,6 +134,47 @@ class SecretManagerMcpToolsTest {
             assertEquals(before, store.invalidations.value)
         }
 
+    @Test
+    fun `secret_get withholds an AI provider key`() =
+        runTest {
+            // secrets_list hands out ids and secret_get hands out plaintext, so ungated this is
+            // two model-directed calls from a prompt-injected agent to every provider key.
+            val (store, secrets) = storeWith(listOf(aiProviderSecret("1", "OPENAI", "sk-live-secret")))
+
+            val result =
+                tool(store, secrets, "secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "1")))
+
+            assertTrue(result.isError)
+            assertFalse(result.text.contains("sk-live-secret"), "the key leaked: ${result.text}")
+        }
+
+    @Test
+    fun `secret_get still returns an ordinary secret`() =
+        runTest {
+            // The gate must be scoped to provider keys — this tool's whole purpose otherwise.
+            val ordinary =
+                SecretEntryData(
+                    id = "2",
+                    website = "example.com",
+                    username = "me",
+                    password = "hunter2",
+                    tags = listOf("personal"),
+                    createdAt = "2026-01-01",
+                    updatedAt = "2026-01-01",
+                )
+            val (store, secrets) = storeWith(listOf(ordinary))
+
+            val result =
+                tool(store, secrets, "secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "2")))
+
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains("hunter2"))
+        }
+
     private fun aiProviderSecret(
         id: String,
         providerId: String,

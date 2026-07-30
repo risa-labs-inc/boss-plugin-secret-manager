@@ -229,8 +229,12 @@ class ModelCatalogStateTest {
                 state is CatalogState.Failed,
                 "seeding replaced a rejected-key failure with a cached list: $state",
             )
-            // ...and it stays stale, so the next sweep actually retries.
-            assertTrue(catalog.isStale(descriptor.id, nowEpochMs = 1_000_000))
+            // The message survives, which is the point — the user sees why, instead of a
+            // working-looking picker. Staleness is deliberately NOT asserted here: a 401 is
+            // classified permanent so it does not re-request on every open. That split is
+            // covered by `a rejected key does not re-request on every section open` and
+            // `a transient failure stays retryable`.
+            assertTrue((state as CatalogState.Failed).message.contains("401"))
         }
 
     @Test
@@ -293,6 +297,45 @@ class ModelCatalogStateTest {
                 catalog.stateOf(descriptor.id),
                 "seeding overwrote a deliberate NotConfigured",
             )
+        }
+
+    @Test
+    fun `a rejected key does not re-request on every section open`() =
+        runTest {
+            // load() runs from a LaunchedEffect on every entry into the section and isStale
+            // treats a failure as stale, so a revoked key would send an auth-failure request to
+            // the provider every single visit — which some providers act on. A 401 cannot
+            // succeed until the credential changes, and saving a new key calls refresh(force),
+            // so recovery does not depend on staleness.
+            val fake = QueuedHttpClient(listOf(401 to """{"error":"revoked"}"""))
+            val catalog =
+                ModelCatalog(
+                    client = ModelCatalogClient(fake),
+                    cacheDir = Files.createTempDirectory("catalog-permanent").toFile(),
+                )
+
+            catalog.refresh(descriptor, apiKey = "revoked-key", force = true)
+            val failed = catalog.stateOf(descriptor.id) as CatalogState.Failed
+            assertTrue(failed.permanent, "a 401 was not classified as permanent")
+            assertFalse(catalog.isStale(descriptor.id, nowEpochMs = Long.MAX_VALUE))
+        }
+
+    @Test
+    fun `a transient failure stays retryable`() =
+        runTest {
+            // The other half: offline and 5xx genuinely might succeed next time, so those must
+            // keep refreshing on open.
+            val fake = QueuedHttpClient(listOf(503 to """{"error":"maintenance"}"""))
+            val catalog =
+                ModelCatalog(
+                    client = ModelCatalogClient(fake),
+                    cacheDir = Files.createTempDirectory("catalog-transient").toFile(),
+                )
+
+            catalog.refresh(descriptor, apiKey = "good-key", force = true)
+            val failed = catalog.stateOf(descriptor.id) as CatalogState.Failed
+            assertFalse(failed.permanent, "a 503 was treated as permanent")
+            assertTrue(catalog.isStale(descriptor.id, nowEpochMs = 0))
         }
 
     @Test

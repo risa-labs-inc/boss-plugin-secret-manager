@@ -92,19 +92,20 @@ hit once already:
 the Gradle version. Comparing the reported version to the bundled `plugin.json` would be circular
 — both read the same file, so any value in it passes, and `1.0.9` is valid semver.
 
-### Provider keys are readable by agents through `secret_get`
+### Provider keys are withheld from `secret_get`
 
-Storing provider keys as ordinary secrets buys encryption, RLS and an audit trail for free,
-but it has a second half worth stating: `secret_get` (`SecretManagerMcpTools.kt`) returns any
-secret's `password` by id to the calling agent, so **every provider API key is agent-readable
-through a tool this same plugin registers**. That is arguably intended — an agent using a
-provider needs its key, and `PluginContext.llmProvider` already hands `LlmConfig.apiKey` to
-plugins — but the MCP surface is a wider trust boundary than the in-process one, and this
-feature is what put provider keys behind it. It is *not* a new mechanism (`secret_get` already
-exposed every other secret, including Plugin Store keys), only new data in an existing channel.
+Storing provider keys as ordinary secrets buys encryption, RLS and an audit trail for free.
+The cost would have been agent readability: `secrets_list` hands out ids and `secret_get`
+hands out the plaintext `password`, so ungated it is **two model-directed tool calls from a
+prompt-injected agent to every configured provider key**.
 
-If that is not wanted, exclude `TAG_AI_PROVIDER` entries from `secret_get` — the tag is
-already on every entry this feature writes.
+`secret_get` therefore refuses entries tagged `TAG_AI_PROVIDER`. The asymmetry that decided
+it: `PluginContext.llmProvider` also exposes `LlmConfig.apiKey`, but that is plugin code the
+operator chose to install, whereas the MCP path is directed by a model. An agent that needs to
+*use* a provider goes through `llmProvider`/`activeConfig()` and never needs the raw value.
+
+Deleting the tag check in the `secret_get` handler restores the old behaviour; two tests cover
+both halves (provider key withheld, ordinary secret still returned).
 
 ### Do not add OAuth without re-checking the docs
 
@@ -162,7 +163,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` — 92 host-independent cases, no live credential needed, run on every
+`./gradlew test` — 96 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

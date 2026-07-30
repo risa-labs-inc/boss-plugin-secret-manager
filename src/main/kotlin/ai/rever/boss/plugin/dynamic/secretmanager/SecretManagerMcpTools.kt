@@ -74,6 +74,20 @@ internal class SecretManagerMcpToolProvider(
                 val id = args.string("id")
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
                 findById(id)?.let { s ->
+                    // AI provider keys are withheld here deliberately. secrets_list returns
+                    // ids and this returns the plaintext password, so without the gate it is
+                    // two model-directed tool calls from a prompt-injected agent to every
+                    // configured provider key. An agent that needs to *use* a provider goes
+                    // through PluginContext.llmProvider / activeConfig() and never needs the
+                    // raw value — unlike plugin code, which the operator chose to install.
+                    // Delete this block to restore the old behaviour.
+                    if (s.tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER)) {
+                        return@McpToolHandler McpToolResult(
+                            "Secret $id is an AI provider key and is not readable through this tool. " +
+                                "Use the provider via the host's AI provider settings instead.",
+                            isError = true,
+                        )
+                    }
                     McpToolResult(
                         buildString {
                             appendLine("website: ${s.website}")

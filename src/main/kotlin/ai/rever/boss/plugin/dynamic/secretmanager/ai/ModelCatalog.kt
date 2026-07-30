@@ -93,7 +93,11 @@ class ModelCatalog(
     fun isStale(providerId: String, nowEpochMs: Long): Boolean =
         when (val state = _states.value[providerId]) {
             is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs > CACHE_TTL_MS
-            null, is CatalogState.NotConfigured, is CatalogState.Failed -> true
+            // A permanent failure (rejected key) is not stale: nothing changes until the
+            // credential does, and the panel re-enters this on every open. Saving a new key
+            // calls refresh(force = true), so recovery does not depend on staleness.
+            is CatalogState.Failed -> !state.permanent
+            null, is CatalogState.NotConfigured -> true
             is CatalogState.Loading -> false
         }
 
@@ -151,8 +155,10 @@ class ModelCatalog(
                 )
             }.onFailure { error ->
                 val message = error.message ?: "Could not reach ${descriptor.displayName}."
+                val status = (error as? ModelCatalogClient.HttpStatusFailure)?.status
+                val permanent = status == 401 || status == 403
                 _states.update {
-                    it + (descriptor.id to CatalogState.Failed(message, lastKnown))
+                    it + (descriptor.id to CatalogState.Failed(message, lastKnown, permanent))
                 }
                 // The message is provider-supplied and status-only by construction —
                 // ModelCatalogClient never puts response bodies or keys into it.
