@@ -26,6 +26,21 @@ kotlin {
 val useLocalDependencies = System.getenv("CI") != "true"
 val bossPluginApiPath = "../boss-plugin-api"
 
+/**
+ * The most recently built api jar in the sibling checkout, whatever its version.
+ *
+ * Local development only — CI uses the downloaded jar. Deliberately not a hardcoded file
+ * name: that goes stale on every api release and surfaces as "Unresolved reference" on a
+ * symbol that plainly exists, which is a genuinely confusing hour. Newest-by-mtime rather
+ * than by version string, because 1.0.9 sorts above 1.0.71 lexicographically and the jar
+ * you just built is the one you meant.
+ */
+val localBossPluginApiJar: File? =
+    file("$bossPluginApiPath/build/libs")
+        .listFiles { f: File -> f.name.startsWith("boss-plugin-api-") && f.name.endsWith(".jar") }
+        ?.filterNot { it.name.contains("-sources") || it.name.contains("-thin") }
+        ?.maxByOrNull { it.lastModified() }
+
 repositories {
     google()
     mavenCentral()
@@ -40,13 +55,21 @@ dependencies {
         // were introduced in exactly that release (api tag v1.0.20), and that is
         // still the true floor for the plugin to function.
         //
-        // The AI-provider feature compiles against 1.0.71 (LlmProviderSettingsAPI,
-        // LlmApiFormat.GOOGLE_GENERATIVE) but does not raise the declared minimum:
-        // every reference to those symbols is confined to LlmProviderSettingsApiImpl,
-        // which is registered inside a LinkageError guard. On an older host the AI
-        // settings panel simply isn't served and secret management is unaffected —
-        // raising apiVersion instead would stop the plugin loading at all there.
-        compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.71.jar"))
+        // The AI-provider feature needs symbols added in api 1.0.71
+        // (LlmProviderSettingsAPI, LlmApiFormat.GOOGLE_GENERATIVE) but does not raise the
+        // declared minimum: every reference to those symbols is confined to
+        // LlmProviderSettingsApiImpl, which is registered inside a LinkageError guard. On an
+        // older host the AI settings panel simply isn't served and secret management is
+        // unaffected — raising apiVersion instead would stop the plugin loading at all there.
+        compileOnly(
+            files(
+                localBossPluginApiJar
+                    ?: error(
+                        "No boss-plugin-api jar in $bossPluginApiPath/build/libs — " +
+                            "run ./gradlew jar in the sibling boss-plugin-api checkout first.",
+                    ),
+            ),
+        )
     } else {
         // CI: use downloaded JAR
         compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))
@@ -85,7 +108,7 @@ dependencies {
     // test runtime by default — BossLogger lives there and would fail with
     // NoClassDefFoundError. Tests need it on the classpath explicitly.
     if (useLocalDependencies) {
-        testImplementation(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.71.jar"))
+        testImplementation(files(localBossPluginApiJar ?: error("No boss-plugin-api jar; see above.")))
     } else {
         testImplementation(files("build/downloaded-deps/boss-plugin-api.jar"))
     }

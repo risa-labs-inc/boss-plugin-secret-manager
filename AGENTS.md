@@ -144,6 +144,10 @@ test seeded the stale entry under the *same* provider it then refreshed, so the 
 replaced it either way and the test passed against the bug. The laundering only shows up on a
 *bystander* provider's entry. If you extend these, re-run the mutation.
 
+The api jar path is resolved by picking the newest `boss-plugin-api-*.jar` in the sibling
+checkout rather than naming a version, and CI tracks `latest` — the api is additive-only, so
+a pin would just mean hand-bumping this repo on every api release.
+
 Two test-only dependencies exist because the api is `compileOnly`: the api jar itself,
 and an slf4j backend — `BossLogger` binds slf4j at class-init, so without one every
 class holding a logger fails with `NoClassDefFoundError`.

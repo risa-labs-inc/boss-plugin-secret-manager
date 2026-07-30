@@ -9,11 +9,9 @@ jobs:
   release:
     uses: risa-labs-inc/BossConsole-Releases/.github/workflows/plugin-release.yml@main
     with:
-      # Pinned rather than 'latest'. The AI provider code compiles against symbols added in
-      # api 1.0.71; the LinkageError guard around registration buys runtime tolerance on an
-      # older host, not build tolerance. 'latest' silently required latest >= 1.0.71, so a
-      # future api release would surface here as a confusing compile failure instead of an
-      # explicit version bump.
-      boss_plugin_api_version: '1.0.71'
+      # 'latest', as every plugin repo does. The api is additive-only (apiCheck gates it), so
+      # latest is always >= the 1.0.71 symbols this code compiles against, and a pin would
+      # mean hand-bumping every plugin repo on each api release.
+      boss_plugin_api_version: 'latest'
     secrets:
       BOSS_STORE_PLUGIN_PUBLISH_KEY: ${{ secrets.BOSS_STORE_PLUGIN_PUBLISH_KEY }}

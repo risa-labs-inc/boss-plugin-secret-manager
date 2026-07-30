@@ -24,18 +24,18 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Fetch the pinned plugin api jar
+      - name: Fetch the latest plugin api jar
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Kept in step with boss_plugin_api_version in build.yml and the jar names in
-          # build.gradle.kts. Pinned, not 'latest': the code compiles against 1.0.71 symbols.
-          API_VERSION='1.0.71'
+          # Latest, matching boss_plugin_api_version in build.yml — so this job compiles
+          # against the same api the release job will. The api is additive-only, so latest
+          # always carries the symbols this code needs.
           mkdir -p build/downloaded-deps
-          gh release download "v${API_VERSION}" \
+          gh release download \
             --repo risa-labs-inc/boss-plugin-api \
-            --pattern "boss-plugin-api-${API_VERSION}.jar" \
+            --pattern 'boss-plugin-api-*.jar' \
             --output build/downloaded-deps/boss-plugin-api.jar
           test -s build/downloaded-deps/boss-plugin-api.jar
 
