@@ -23,8 +23,6 @@ import java.io.File
  * Uses SecretDataProvider, SupabaseDataProvider, and PluginStoreApiKeyProvider from PluginContext.
  */
 class SecretManagerDynamicPlugin : DynamicPlugin {
-    private val logger = BossLogger.forComponent("SecretManagerPlugin")
-
     override val pluginId: String = PluginVersionSource.PLUGIN_ID
     override val displayName: String = "Secret Manager (Dynamic)"
     /** Resolved from the bundled `plugin.json` — see [PluginVersionSource] for why not the manifest. */
@@ -36,6 +34,24 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
     private companion object {
         /** api release that introduced LlmProviderSettingsAPI. */
         const val REQUIRED_API_VERSION = "1.0.71"
+
+        /**
+         * Deliberately on the companion, not an instance property.
+         *
+         * A `ComponentLogger`-typed property on this class makes the Compose compiler emit a
+         * `$stable` field for the class whose initialiser *reads*
+         * `ai.rever.boss.plugin.logging.ComponentLogger.$stable`. That field exists in the
+         * boss-plugin-api jar we compile against but NOT in the host's bundled
+         * `plugin-logging-desktop` jar, which shadows it parent-first at runtime — so
+         * BinaryCompatibilityValidator rejected the whole plugin with
+         * "ComponentLogger.$stable: field not found" and the host disabled it as binary
+         * incompatible. Shipped broken in 1.2.6 and 1.2.7. Now prevented module-wide by
+         * compose-stability.conf and proved by the bytecode guard in buildPluginJar — there is
+         * deliberately no unit test, because on the test classpath the api jar IS ComponentLogger
+         * and everything links. This companion placement is belt-and-braces for the one class the
+         * validator takes the whole plugin down over.
+         */
+        private val logger = BossLogger.forComponent("SecretManagerPlugin")
     }
 
     override fun register(context: PluginContext) {

@@ -45,6 +45,15 @@ jobs:
       - name: Run tests
         run: ./gradlew test --no-daemon
 
+      # buildPluginJar carries the packaged-bytecode guards (no Compose $stable read against
+      # ai.rever.boss.plugin.logging, and plugin.json stamped with the built version). They live in
+      # a doLast, so without this step they first ran in the RELEASE workflow on push to main —
+      # meaning the regression class they defend against reached main before anything noticed, and
+      # surfaced as a red release rather than a red PR. That is how 1.2.6 and 1.2.7 shipped
+      # unloadable.
+      - name: Build the plugin jar (runs the packaged-bytecode guards)
+        run: ./gradlew buildPluginJar --no-daemon
+
       - name: Upload test report on failure
         if: failure()
         uses: actions/upload-artifact@v4

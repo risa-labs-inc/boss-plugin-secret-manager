@@ -22,6 +22,13 @@ kotlin {
     }
 }
 
+composeCompiler {
+    // Resolves ai.rever.boss.plugin.logging stability at compile time so no runtime
+    // `$stable` read is emitted for it anywhere in this module. See compose-stability.conf
+    // for why that is load-bearing rather than an optimisation.
+    stabilityConfigurationFiles.add(layout.projectDirectory.file("compose-stability.conf"))
+}
+
 // Auto-detect CI environment
 val useLocalDependencies = System.getenv("CI") != "true"
 val bossPluginApiPath = "../boss-plugin-api"
@@ -122,6 +129,90 @@ tasks.withType<Test>().configureEach {
     systemProperty("boss.plugin.expectedVersion", version.toString())
 }
 
+// Packaged-jar assertions, shared by buildPluginJar and shadowJar so the two cannot drift.
+// A lambda rather than a top-level fun: it needs the script receiver for zipTree().
+val verifyPackagedJar: (File, String) -> Unit = { jar, expectedVersion ->
+    // 1. No runtime Compose `$stable` read against ai.rever.boss.plugin.logging.
+    //
+    // boss-plugin-api ships that package and IS a Compose project, so its ComponentLogger has the
+    // field; the host bundles its own copy WITHOUT it and shadows the api's parent-first inside
+    // plugin classloaders. An emitted read links at build time and is missing at load time, so
+    // BinaryCompatibilityValidator rejects the WHOLE plugin — that is what made 1.2.6 and 1.2.7
+    // unloadable. compose-stability.conf should prevent it module-wide; this proves it did.
+    //
+    // javap, not constant-pool string matching: a raw scan flags every class that merely has its
+    // own $stable AND mentions the package, which is most of them. The fieldref is what matters.
+    // ai/rever/** rather than a hardcoded package: catches a package move inside our own
+    // namespace, while excluding vendored dependency classes — shadowJar bundles the whole
+    // runtime classpath and scanning kotlin-stdlib for our logging refs is pointless.
+    val classNames = mutableListOf<String>()
+    zipTree(jar).matching { include("ai/rever/**/*.class") }.visit {
+        if (!isDirectory) {
+            classNames += relativePath.pathString.removeSuffix(".class").replace('/', '.')
+        }
+    }
+
+    if (classNames.isNotEmpty()) {
+        val javapExe = File(System.getProperty("java.home"), "bin/javap").absolutePath
+
+        // Chunked, because javap does NOT support @argfile (it reads it as a class name) and one
+        // splatted list blows ARG_MAX on the fat jar — "Argument list too long". 150 keeps every
+        // chunk well under Windows' 8 KB command limit too.
+        val disassembly =
+            classNames.chunked(150).joinToString("\n") { chunk ->
+                val process =
+                    ProcessBuilder(
+                        listOf(javapExe, "-p", "-c", "-cp", jar.absolutePath) + chunk,
+                    ).redirectErrorStream(true)
+                        .start()
+                val chunkOutput = process.inputStream.bufferedReader().use { it.readText() }
+                val exit = process.waitFor()
+                // Without this the guard passes for the WRONG reason: a javap that errored, was
+                // missing from a JRE-shaped java.home, or got a truncated arg list simply produces
+                // output that does not contain the pattern.
+                require(exit == 0) {
+                    "javap exited $exit while scanning ${jar.name}; the bytecode guard did not " +
+                        "run:\n" + chunkOutput.take(1000)
+                }
+                chunkOutput
+            }
+
+        // Positive control: prove the guard actually saw every class it claims to have checked.
+        val disassembled = disassembly.lineSequence().count { it.startsWith("Compiled from") }
+        require(disassembled == classNames.size) {
+            "javap disassembled $disassembled of ${classNames.size} packaged classes in " +
+                "${jar.name} — the guard did not see everything"
+        }
+
+        val bad =
+            disassembly
+                .lineSequence()
+                .filter { line ->
+                    line.contains("boss/plugin/logging/") && line.contains("\u0024stable")
+                }.toList()
+        require(bad.isEmpty()) {
+            "Bytecode references a Compose \$stable field on ai.rever.boss.plugin.logging, which the " +
+                "host's bundled plugin-logging jar does not have — the host would disable this plugin " +
+                "as binary incompatible (as it did for 1.2.6 and 1.2.7). Check that " +
+                "compose-stability.conf still lists that package.\n" +
+                bad.joinToString("\n").take(1000)
+        }
+    }
+
+    // 2. The packaged plugin.json declares the version being built.
+    //
+    // The committed copy says 0.0.0-unstamped; processResources stamps the one that reaches the
+    // jar. Asserting the CONTENT, not the entry count: duplicatesStrategy = EXCLUDE means exactly
+    // one is ever packaged, so counting can never fail (verified — that was tried first).
+    val entry = zipTree(jar).matching { include("META-INF/boss-plugin/plugin.json") }.singleFile
+    val declared =
+        Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(entry.readText())?.groupValues?.get(1)
+    require(declared == expectedVersion) {
+        "plugin.json in ${jar.name} declares version '$declared' but the build is " +
+            "'$expectedVersion' — processResources did not stamp the copy that reached the jar."
+    }
+}
+
 // Task to build plugin JAR with compiled classes only
 tasks.register<Jar>("buildPluginJar") {
     archiveFileName.set("boss-plugin-secret-manager-${version}.jar")
@@ -152,17 +243,7 @@ tasks.register<Jar>("buildPluginJar") {
     // Note what is NOT checked: the number of plugin.json entries. duplicatesStrategy =
     // EXCLUDE means the jar always contains exactly one, so counting can never fail —
     // verified. Asserting the *content* is what actually catches the reorder.
-    doLast {
-        val jar = archiveFile.get().asFile
-        val entry =
-            zipTree(jar).matching { include("META-INF/boss-plugin/plugin.json") }.singleFile
-        val declared =
-            Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(entry.readText())?.groupValues?.get(1)
-        require(declared == version.toString()) {
-            "plugin.json in ${jar.name} declares version '$declared' but the build is '$version' — " +
-                "processResources did not stamp the copy that reached the jar."
-        }
-    }
+    doLast { verifyPackagedJar(archiveFile.get().asFile, version.toString()) }
 }
 
 // Sync version from build.gradle.kts into plugin.json (single source of truth)
@@ -193,15 +274,7 @@ tasks.register<Jar>("shadowJar") {
     // plugin.json can win on `from` order.
     from(sourceSets.main.get().output)
 
-    // Same assertion too — if this fat jar is ever published, the hazard is identical.
-    doLast {
-        val jar = archiveFile.get().asFile
-        val entry =
-            zipTree(jar).matching { include("META-INF/boss-plugin/plugin.json") }.singleFile
-        val declared =
-            Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(entry.readText())?.groupValues?.get(1)
-        require(declared == version.toString()) {
-            "plugin.json in ${jar.name} declares version '$declared' but the build is '$version'."
-        }
-    }
+    // Same assertions as buildPluginJar — this fat jar is a real shipping surface
+    // (plugin.json declares isolationMode: out-of-process).
+    doLast { verifyPackagedJar(archiveFile.get().asFile, version.toString()) }
 }
