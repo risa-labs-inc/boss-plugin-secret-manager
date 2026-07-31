@@ -65,7 +65,7 @@ deliberately no bundled fallback list: the host implementation this replaced shi
 hardcoded models that drifted years out of date, and a provider with no credential
 now reports "not configured" instead of guessing.
 
-### Never let `ComponentLogger` be a class property
+### `ai.rever.boss.plugin.logging` must never trigger a runtime `$stable` read
 
 The host bundles `plugin-logging-desktop.jar`, whose `ComponentLogger` has **no** Compose
 `$stable` field, and it shadows the boss-plugin-api copy (which *does* have one) parent-first at
@@ -79,7 +79,21 @@ SecretManagerDynamicPlugin -> ai.rever.boss.plugin.logging.ComponentLogger.$stab
 ```
 
 **This shipped broken in 1.2.6 and 1.2.7** — the plugin could not load on any host, and the
-store served it for hours. Keep the logger on a `companion object` (or any non-property scope).
+store served it for hours.
+
+The primary defence is **`compose-stability.conf`**, which lists
+`ai.rever.boss.plugin.logging.**` and is wired in via `composeCompiler.stabilityConfigurationFiles`.
+That resolves the stability at compile time, so no runtime read is emitted *anywhere* in the
+module — including from the eight other classes that hold a logger as an ordinary instance
+property. Those are safe today only because they infer as unstable outright and the compiler bakes
+in a constant; a refactor leaving one all-`val` with otherwise-stable types would have resurrected
+this. Do not remove that file to "clean up".
+
+`SecretManagerDynamicPlugin` additionally keeps its logger on the `companion object`. That is
+belt-and-braces for the one class whose failure takes the entire plugin down, not a rule to apply
+everywhere — and note a companion `val` is still a *property*, just of the companion class, so the
+reason it helps is that it is no longer a property of the class whose stability is being computed.
+Moving a logger to a nested class or top-level object is **not** equivalent reasoning.
 
 No unit test can catch this: on the test classpath the api jar *is* the ComponentLogger, so
 everything links. `buildPluginJar` therefore runs `javap` over the packaged classes and fails
