@@ -154,6 +154,52 @@ tasks.register<Jar>("buildPluginJar") {
     // verified. Asserting the *content* is what actually catches the reorder.
     doLast {
         val jar = archiveFile.get().asFile
+
+        // The host bundles its own plugin-logging jar whose ComponentLogger has NO Compose
+        // `$stable` field, and it shadows the api jar's copy parent-first at runtime. So a
+        // compiled reference to ComponentLogger.$stable resolves against the api at build time
+        // and vanishes at load time: BinaryCompatibilityValidator rejects the plugin and the
+        // host disables it as binary incompatible. That shipped in 1.2.6 and 1.2.7, and no unit
+        // test could catch it — the classes load fine against the api jar on the test classpath.
+        // Only the bytecode tells the truth.
+        //
+        // javap rather than string-matching the constant pool: a raw scan flags every class that
+        // merely has its own $stable field AND mentions the logging package, which is most of
+        // them. The fieldref is what matters.
+        val classNames = mutableListOf<String>()
+        zipTree(jar)
+            .matching { include("ai/rever/boss/plugin/dynamic/secretmanager/**/*.class") }
+            .visit {
+                if (!isDirectory) {
+                    classNames += relativePath.pathString.removeSuffix(".class").replace('/', '.')
+                }
+            }
+
+        if (classNames.isNotEmpty()) {
+            val javapExe = File(System.getProperty("java.home"), "bin/javap").absolutePath
+            val process =
+                ProcessBuilder(listOf(javapExe, "-p", "-c", "-cp", jar.absolutePath) + classNames)
+                    .redirectErrorStream(true)
+                    .start()
+            val disassembly = process.inputStream.bufferedReader().use { it.readText() }
+            process.waitFor()
+
+            val bad =
+                disassembly
+                    .lineSequence()
+                    .filter { line ->
+                        line.contains("boss/plugin/logging/") && line.contains("\u0024stable")
+                    }.toList()
+
+            require(bad.isEmpty()) {
+                "Bytecode references a Compose \$stable field on ai.rever.boss.plugin.logging, which " +
+                    "the host's bundled plugin-logging jar does not have — the host would disable this " +
+                    "plugin as binary incompatible (as it did for 1.2.6 and 1.2.7). Keep ComponentLogger " +
+                    "off class properties; put the logger on a companion object.\n" +
+                    bad.joinToString("\n").take(1000)
+            }
+        }
+
         val entry =
             zipTree(jar).matching { include("META-INF/boss-plugin/plugin.json") }.singleFile
         val declared =

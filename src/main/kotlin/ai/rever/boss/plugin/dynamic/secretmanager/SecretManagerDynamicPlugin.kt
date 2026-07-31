@@ -23,7 +23,6 @@ import java.io.File
  * Uses SecretDataProvider, SupabaseDataProvider, and PluginStoreApiKeyProvider from PluginContext.
  */
 class SecretManagerDynamicPlugin : DynamicPlugin {
-    private val logger = BossLogger.forComponent("SecretManagerPlugin")
 
     override val pluginId: String = PluginVersionSource.PLUGIN_ID
     override val displayName: String = "Secret Manager (Dynamic)"
@@ -36,6 +35,20 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
     private companion object {
         /** api release that introduced LlmProviderSettingsAPI. */
         const val REQUIRED_API_VERSION = "1.0.71"
+
+        /**
+         * Deliberately on the companion, not an instance property.
+         *
+         * A `ComponentLogger`-typed property on this class makes the Compose compiler emit a
+         * `$stable` field for the class whose initialiser *reads*
+         * `ai.rever.boss.plugin.logging.ComponentLogger.$stable`. That field exists in the
+         * boss-plugin-api jar we compile against but NOT in the host's bundled
+         * `plugin-logging-desktop` jar, which shadows it parent-first at runtime — so
+         * BinaryCompatibilityValidator rejected the whole plugin with
+         * "ComponentLogger.$stable: field not found" and the host disabled it as binary
+         * incompatible. Shipped broken in 1.2.6 and 1.2.7; see PluginLoggerStabilityTest.
+         */
+        private val logger = BossLogger.forComponent("SecretManagerPlugin")
     }
 
     override fun register(context: PluginContext) {

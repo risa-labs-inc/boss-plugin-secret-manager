@@ -65,6 +65,27 @@ deliberately no bundled fallback list: the host implementation this replaced shi
 hardcoded models that drifted years out of date, and a provider with no credential
 now reports "not configured" instead of guessing.
 
+### Never let `ComponentLogger` be a class property
+
+The host bundles `plugin-logging-desktop.jar`, whose `ComponentLogger` has **no** Compose
+`$stable` field, and it shadows the boss-plugin-api copy (which *does* have one) parent-first at
+runtime. So a `ComponentLogger`-typed **property** makes the Compose compiler emit a `$stable`
+field on that class whose initialiser reads `ComponentLogger.$stable` — it resolves against the
+api jar at build time and is missing at load time. `BinaryCompatibilityValidator` then rejects
+the plugin outright and the host disables it as binary incompatible:
+
+```
+SecretManagerDynamicPlugin -> ai.rever.boss.plugin.logging.ComponentLogger.$stable: field not found
+```
+
+**This shipped broken in 1.2.6 and 1.2.7** — the plugin could not load on any host, and the
+store served it for hours. Keep the logger on a `companion object` (or any non-property scope).
+
+No unit test can catch this: on the test classpath the api jar *is* the ComponentLogger, so
+everything links. `buildPluginJar` therefore runs `javap` over the packaged classes and fails
+the build if any of them references a `$stable` field on `ai.rever.boss.plugin.logging`.
+Mutation-verified — putting the logger back as an instance property fails the build.
+
 ### The version must come from Gradle, not from a second copy of plugin.json
 
 `version` reads the bundled `plugin.json` that `processResources` stamps. Two traps here, both
