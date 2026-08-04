@@ -49,7 +49,7 @@ build.gradle.kts   → Build config + version (single source of truth)
 
 **`build.gradle.kts` is the single source of truth for version.**
 
-The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` — only change it in `build.gradle.kts`.
+The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` - only change it in `build.gradle.kts`.
 
 ## AI Providers (`ai/` package)
 
@@ -70,7 +70,7 @@ now reports "not configured" instead of guessing.
 The host bundles `plugin-logging-desktop.jar`, whose `ComponentLogger` has **no** Compose
 `$stable` field, and it shadows the boss-plugin-api copy (which *does* have one) parent-first at
 runtime. So a `ComponentLogger`-typed **property** makes the Compose compiler emit a `$stable`
-field on that class whose initialiser reads `ComponentLogger.$stable` — it resolves against the
+field on that class whose initialiser reads `ComponentLogger.$stable` - it resolves against the
 api jar at build time and is missing at load time. `BinaryCompatibilityValidator` then rejects
 the plugin outright and the host disables it as binary incompatible:
 
@@ -78,27 +78,27 @@ the plugin outright and the host disables it as binary incompatible:
 SecretManagerDynamicPlugin -> ai.rever.boss.plugin.logging.ComponentLogger.$stable: field not found
 ```
 
-**This shipped broken in 1.2.6 and 1.2.7** — the plugin could not load on any host, and the
+**This shipped broken in 1.2.6 and 1.2.7** - the plugin could not load on any host, and the
 store served it for hours.
 
 The primary defence is **`compose-stability.conf`**, which lists
 `ai.rever.boss.plugin.logging.**` and is wired in via `composeCompiler.stabilityConfigurationFiles`.
 That resolves the stability at compile time, so no runtime read is emitted *anywhere* in the
-module — including from the eight other classes that hold a logger as an ordinary instance
+module - including from the eight other classes that hold a logger as an ordinary instance
 property. Those are safe today only because they infer as unstable outright and the compiler bakes
 in a constant; a refactor leaving one all-`val` with otherwise-stable types would have resurrected
 this. Do not remove that file to "clean up".
 
 `SecretManagerDynamicPlugin` additionally keeps its logger on the `companion object`. That is
 belt-and-braces for the one class whose failure takes the entire plugin down, not a rule to apply
-everywhere — and note a companion `val` is still a *property*, just of the companion class, so the
+everywhere - and note a companion `val` is still a *property*, just of the companion class, so the
 reason it helps is that it is no longer a property of the class whose stability is being computed.
 Moving a logger to a nested class or top-level object is **not** equivalent reasoning.
 
 No unit test can catch this: on the test classpath the api jar *is* the ComponentLogger, so
 everything links. `buildPluginJar` therefore runs `javap` over the packaged classes and fails
 the build if any of them references a `$stable` field on `ai.rever.boss.plugin.logging`.
-Mutation-verified — putting the logger back as an instance property fails the build.
+Mutation-verified - putting the logger back as an instance property fails the build.
 
 ### The version must come from Gradle, not from a second copy of plugin.json
 
@@ -113,7 +113,7 @@ hit once already:
   manifest on the host classpath matches it, and `getResources` is parent-first. `PluginVersionSource`
   therefore prefers the jar the plugin class itself came from, keeping the `pluginId` match as
   the fallback so IDE and test runs still resolve. The selection rules live in that object,
-  away from the classloader, precisely so they can be tested — they have been wrong twice.
+  away from the classloader, precisely so they can be tested - they have been wrong twice.
 - `getResourceAsStream` is the wrong lookup: every BOSS plugin ships `plugin.json` at the same
   path and resource lookup is parent-first, so a neighbour's manifest could win and the plugin
   would report *someone else's* version. Enumerate with `getResources` and pick the document
@@ -152,10 +152,10 @@ Sign-in is intentionally absent. As of July 2026:
 - **OpenAI**'s "Sign in with ChatGPT" ships only inside Codex tooling; there is no
   third-party program.
 - **xAI** and **Moonshot (Kimi)** publish Bearer-API-key auth only in their REST
-  references. Their OAuth/device-code flows belong to their own coding CLIs — the
+  references. Their OAuth/device-code flows belong to their own coding CLIs - the
   same category as Anthropic's, and not a documented third-party surface.
 - **Google** does have a documented installed-app OAuth flow, but it runs through
-  **Vertex AI** — a different base URL needing a GCP project, region and ADC, not the
+  **Vertex AI** - a different base URL needing a GCP project, region and ADC, not the
   `generativelanguage` key path used here. That is tracked as separate work.
 - **Together** has no OAuth.
 
@@ -169,7 +169,7 @@ genuinely predate the declared `apiVersion` floor of 1.0.20. Verified against th
 `PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
 `openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. That matters
 because they are read on the always-taken registration path (`registerPanel`), outside any
-guard — a member newer than the floor would throw `NoSuchMethodError` there and take the
+guard - a member newer than the floor would throw `NoSuchMethodError` there and take the
 *whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
 unconstrained.
 
@@ -177,7 +177,7 @@ The audit also has to cover the UI kit, not just `PluginContext`: this feature a
 first-time uses of `BossSection`, `BossCard`, `BossTextField`, `BossPrimaryButton` and
 `BossSecondaryButton` (only `BossTheme`/`BossThemeColors` were used before). Containment holds
 because `AiProvidersPanel` is reachable only from `LlmProviderSettingsApiImpl`, so those
-symbols never load on a pre-1.0.71 host — but that stops being true the moment the panel is
+symbols never load on a pre-1.0.71 host - but that stops being true the moment the panel is
 rendered from `SecretManagerContent`, which is exactly why it is written down here.
 
 `LlmProviderSettingsApiImpl` is the **only** file referencing api symbols added in
@@ -193,12 +193,12 @@ whole plugin down on such a host.
 `plugin.json` declares `isolationMode: out-of-process`, which only engages under
 `BOSS_MODE=KERNEL`. In-process (the default) the `@Composable` panel renders
 directly. Under KERNEL mode the API crosses a process boundary and the panel is not
-expected to render — the host falls back to its "plugin isn't loaded yet" notice
+expected to render - the host falls back to its "plugin isn't loaded yet" notice
 rather than failing.
 
 ### Tests
 
-`./gradlew test` — 96 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 96 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
@@ -225,13 +225,13 @@ unconditionally is indistinguishable from no test:
 
 `buildPluginJar` asserts the packaged `plugin.json` declares the Gradle version. Do not replace
 that with a count of `plugin.json` entries: `duplicatesStrategy = EXCLUDE` means the jar always
-holds exactly one, so counting can never fail (verified — the count check was tried first and
+holds exactly one, so counting can never fail (verified - the count check was tried first and
 did nothing). Asserting the content is what catches a `from` reorder.
 
-`seedFromCache` fills an **absence** — `if (seeded.containsKey(providerId)) return@forEach`.
+`seedFromCache` fills an **absence** - `if (seeded.containsKey(providerId)) return@forEach`.
 Do not go back to enumerating states to skip: skipping only `Loaded` papered over a rejected
 key (a 401 replaced by a within-TTL cached list, which `isStale` then called fresh), and adding
-`Failed` still left `NotConfigured` — which `clearKey` sets precisely to drop a stale list.
+`Failed` still left `NotConfigured` - which `clearKey` sets precisely to drop a stale list.
 
 Relatedly, `refresh` must carry `lastKnown` through a *chain* of failures
 (`Failed -> current.lastKnown`), not just the first. `as? Loaded` only ever worked because
@@ -242,7 +242,7 @@ A third env case: reverting the `EnvResolver` stubbing in `ProviderCredentialSto
 *only if* provider variables are exported. `EnvResolver` consults the process environment and
 system properties **before** the `env_vars` file, and these tests must use the registry's real
 variable names, so they are hermetic only because all three sources are injected. CI never
-caught this because CI exports none of them — run the suite with `OPENAI_API_KEY` set if you
+caught this because CI exports none of them - run the suite with `OPENAI_API_KEY` set if you
 touch it.
 
 The cache-laundering test only got teeth after a correction worth remembering: the first version of that
@@ -251,18 +251,18 @@ replaced it either way and the test passed against the bug. The laundering only 
 *bystander* provider's entry. If you extend these, re-run the mutation.
 
 The api jar path is resolved by picking the newest `boss-plugin-api-*.jar` in the sibling
-checkout rather than naming a version, and CI tracks `latest` — the api is additive-only, so
+checkout rather than naming a version, and CI tracks `latest` - the api is additive-only, so
 a pin would just mean hand-bumping this repo on every api release.
 
 Two test-only dependencies exist because the api is `compileOnly`: the api jar itself,
-and an slf4j backend — `BossLogger` binds slf4j at class-init, so without one every
+and an slf4j backend - `BossLogger` binds slf4j at class-init, so without one every
 class holding a logger fails with `NoClassDefFoundError`.
 
 ## Code Quality
 
 - Use Compose Multiplatform APIs (not Android-specific)
 - All Kotlin files must end with a newline
-- Handle null providers gracefully — show fallback UI, never crash
+- Handle null providers gracefully - show fallback UI, never crash
 
 ## CI/CD
 
