@@ -124,8 +124,8 @@ hit once already:
   decided by `from` order alone.
 
 `PluginVersionTest` asserts against `boss.plugin.expectedVersion`, injected by the Test task from
-the Gradle version. Comparing the reported version to the bundled `plugin.json` would be circular
-— both read the same file, so any value in it passes, and `1.0.9` is valid semver.
+the Gradle version. Comparing the reported version to the bundled `plugin.json` would be circular -
+both read the same file, so any value in it passes, and `1.0.9` is valid semver.
 
 ### Provider keys are withheld from `secret_get`
 
