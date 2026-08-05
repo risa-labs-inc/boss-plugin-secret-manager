@@ -59,6 +59,42 @@ This plugin owns **all** AI provider configuration. The host has none: its
 registered instance. Provider registry, credentials, environment-variable resolution
 and the model catalogue all live here.
 
+### Legacy plaintext key import
+
+`LegacySettingsImport` migrates keys out of the plaintext files that predate this plugin. It
+iterates a list of `LegacySource`s (file + parser), so adding another historical location is a
+one-entry change rather than a second code path:
+
+- `~/.boss/llm_settings.json` — the host's old file, nested `apiKeys` map.
+- `~/.boss/config/llm-settings.json` — `llmrpa`'s own file, one flat field per provider. That
+  plugin rewrote it on every keystroke of its own API-key field; it now reads
+  `PluginContext.llmProvider` instead, so without this source migrating it would have silently
+  stranded whatever the user had typed there.
+
+The llmrpa source resolves against the real `~/.boss`, **not** `bossRootDir`: llmrpa hardcoded
+`File(user.home, ".boss/config")` and never honoured `boss.dev.mode`, so under a dev host its
+keys are still in `.boss` and following the root would miss them.
+
+Three invariants exist to avoid losing or leaking a key, each retained per-file:
+
+- a key already supplied by an environment variable is **not** imported and its file is **not**
+  retired — storing it would recreate the plaintext-persistence leak this feature removed, and
+  renaming would strand a real key behind a file the user was never told about;
+- a file is retired only when every key it offered was stored, so a failed write can be retried;
+- retiring is a rename to `.migrated`, never a delete. The host kernel's self-healing resolves
+  its repair key before any plugin loads and cannot reach this store, so
+  `llm_settings.json.migrated` is its only remaining legacy source.
+
+Model ids are dropped (both files name retired models, and the picker's whole purpose is to be
+live), and so is llmrpa's `customEndpoint` — writing it needs `saveSettings`, which would blank
+any `selectedModelId` already chosen for `CUSTOM`. The banner tells the user to re-enter it.
+
+`LegacySettingsImportTest` (8 cases) mutation-verified twice: ignoring env shadowing fails
+*a key shadowed by an environment variable is neither imported nor retired*, and retiring
+regardless of write failures fails *a file whose writes all fail is kept so the import can be
+retried*. `FakeSecretDataProvider` was lifted out of `ProviderCredentialStoreTest` so both
+suites assert against one fake rather than two that can drift.
+
 **Model lists are always fetched live** from each provider's own models endpoint
 (`ModelCatalogClient`), cached with a timestamp and a 6-hour TTL. There is
 deliberately no bundled fallback list: the host implementation this replaced shipped
