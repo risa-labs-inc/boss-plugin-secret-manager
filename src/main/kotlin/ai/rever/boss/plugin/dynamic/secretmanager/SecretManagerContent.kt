@@ -1,5 +1,7 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
+import ai.rever.boss.plugin.ui.BossAlertDialog
+import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.api.*
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
@@ -30,7 +32,6 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
@@ -1010,7 +1011,7 @@ private fun CreateSecretDialog(
     var showPassword by remember { mutableStateOf(false) }
     var isApiKey by remember { mutableStateOf(false) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.width(400.dp),
             color = BossThemeColors.SurfaceColor,
@@ -1145,7 +1146,7 @@ private fun EditSecretDialog(
     var showPassword by remember { mutableStateOf(false) }
     var isApiKey by remember { mutableStateOf(secret.tags.contains("api_key")) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.width(400.dp),
             color = BossThemeColors.SurfaceColor,
@@ -1276,7 +1277,7 @@ private fun DeleteConfirmationDialog(
     onDismiss: () -> Unit,
     isLoading: Boolean
 ) {
-    AlertDialog(
+    BossAlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text("Delete Secret?", color = BossThemeColors.TextPrimary, fontWeight = FontWeight.Bold)
@@ -1344,7 +1345,7 @@ private fun ShareSecretDialog(
     var searchQuery by remember { mutableStateOf("") }
     var selectedTab by remember { mutableStateOf(0) } // 0 = Users, 1 = Roles
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.width(450.dp).heightIn(max = 500.dp),
             color = BossThemeColors.SurfaceColor,
@@ -1704,7 +1705,7 @@ private fun CreateApiKeyDialog(
     var hasExpiration by remember { mutableStateOf(false) }
     var expirationDays by remember { mutableStateOf("90") }
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.width(450.dp),
             color = BossThemeColors.SurfaceColor,
@@ -2048,7 +2049,7 @@ private fun ApiKeysListDialog(
 ) {
     var keyToRevoke by remember { mutableStateOf<ApiKeyInfo?>(null) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.width(500.dp).heightIn(max = 450.dp),
             color = BossThemeColors.SurfaceColor,
@@ -2185,7 +2186,7 @@ private fun ApiKeysListDialog(
 
     // Revoke confirmation dialog
     keyToRevoke?.let { key ->
-        AlertDialog(
+        BossAlertDialog(
             onDismissRequest = { keyToRevoke = null },
             title = {
                 Text("Revoke API Key?", color = BossThemeColors.TextPrimary, fontWeight = FontWeight.Bold)
@@ -2403,7 +2404,7 @@ private fun AiProviderKeyDialog(
     // front instead of letting the save fail after the key has been typed.
     val fromEnvironment = existingSource == CredentialSource.ENVIRONMENT
 
-    AlertDialog(
+    BossAlertDialog(
         onDismissRequest = onDismiss,
         backgroundColor = BossThemeColors.SurfaceColor,
         title = {
