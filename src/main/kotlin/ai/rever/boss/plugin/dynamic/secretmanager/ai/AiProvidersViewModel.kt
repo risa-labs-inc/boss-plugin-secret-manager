@@ -405,6 +405,35 @@ class AiProvidersViewModel(
     }
 
     /**
+     * Re-ask a brokered provider's broker, and report what came back.
+     *
+     * The credential is cached for as long as the broker said it may be reused, so
+     * without this there is no way to retry after signing in - the panel would keep
+     * showing the failure it cached. Invalidating the store first is what forces the
+     * next resolve to go back to the broker rather than serve the cached answer.
+     */
+    fun refreshBrokeredCredential(providerId: String) {
+        val currentStore = store ?: return
+        scope.launch {
+            withBusy(providerId) {
+                currentStore.invalidate()
+                reloadConnections()
+                val configured = _state.value.connectionOf(providerId).isConfigured
+                _state.update {
+                    if (configured) {
+                        it.copy(notice = "Access confirmed.", error = null)
+                    } else {
+                        it.copy(
+                            error = "No access yet. Sign in to BOSS with an account that has access.",
+                            notice = null,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Probe the credential by asking the provider for its model list — the cheapest
      * authenticated call that proves the key works, with no completion tokens spent.
      */

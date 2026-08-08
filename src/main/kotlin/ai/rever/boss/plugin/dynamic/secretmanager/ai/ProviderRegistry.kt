@@ -20,6 +20,10 @@ object ProviderRegistry {
     const val MOONSHOT: String = "MOONSHOT"
     const val TOGETHER: String = "TOGETHER"
     const val CUSTOM: String = "CUSTOM"
+    const val RISA_GLM: String = "RISA_GLM"
+
+    /** Broker id the host resolves to RISA's token endpoint. */
+    const val RISA_GLM_BROKER: String = "risa-glm"
 
     /** Header value required on every Anthropic API request. */
     const val ANTHROPIC_VERSION: String = "2023-06-01"
@@ -126,15 +130,64 @@ object ProviderRegistry {
         )
 
     /**
+     * RISA's own Codex GLM deployment, reached through the organisation gateway.
+     *
+     * The only provider here with nothing for the user to fill in: being signed in to
+     * BOSS *is* the credential, and the gateway mints a short-lived model-scoped key
+     * for that identity. So there is no [ProviderDescriptor.envVarNames] (nothing
+     * should write a minted credential anywhere) and no
+     * [ProviderDescriptor.consoleUrl] (there is no key page to send anyone to).
+     *
+     * It speaks [WireFormat.OPENAI_RESPONSES], not `OPENAI_CHAT`. Posting a Chat
+     * Completions body to `/v1/responses` is rejected, so the two are not
+     * interchangeable despite sharing the bearer-token style.
+     *
+     * [modelsEndpoint] is null: the gateway serves one model to one scoped key, so
+     * there is no list to fetch. The model id below is what the gateway itself
+     * advertises.
+     */
+    private val risaGlm =
+        ProviderDescriptor(
+            id = RISA_GLM,
+            displayName = "RISA Codex GLM",
+            wireFormat = WireFormat.OPENAI_RESPONSES,
+            credentialTransport = CredentialTransport.BEARER_HEADER,
+            chatEndpoint = "https://llm.risa.inc/v1/responses",
+            modelsEndpoint = null,
+            envVarNames = emptyList(),
+            consoleUrl = null,
+            keyPlaceholder = "",
+            brokerId = RISA_GLM_BROKER,
+        )
+
+    /**
+     * Models a brokered provider serves, where there is no endpoint to ask.
+     *
+     * Deliberately narrow: this is not a return to the hardcoded catalogue this
+     * feature removed. It exists only for providers whose [ProviderDescriptor.modelsEndpoint]
+     * is null *because the provider serves a fixed set*, which is different from a
+     * custom endpoint where the user knows the model and we do not.
+     */
+    val fixedModels: Map<String, List<AiModel>> =
+        mapOf(
+            RISA_GLM to listOf(AiModel(id = "coreweave-glm-5-2", displayName = "GLM 5.2 (CoreWeave)")),
+        )
+
+    /**
      * All providers in display order: the ones serving open-weight models first, then
      * the closed-weight hosts.
      *
      * `custom` sits with the open group on purpose — it is how you point BOSS at a local
      * or self-hosted OpenAI-compatible runtime (Ollama, vLLM, llama.cpp), which is the
      * most open option available here.
+     *
+     * `risaGlm` is second, not first, and that placement is load-bearing: [default] is
+     * `all.first()`, so leading with it would make an organisation-only provider the
+     * default selection for every user who has never chosen one - including everyone
+     * outside RISA, for whom it can never resolve a credential.
      */
     val all: List<ProviderDescriptor> =
-        listOf(together, moonshot, custom, xai, anthropic, openai, google)
+        listOf(together, risaGlm, moonshot, custom, xai, anthropic, openai, google)
 
     private val byId: Map<String, ProviderDescriptor> = all.associateBy { it.id }
 

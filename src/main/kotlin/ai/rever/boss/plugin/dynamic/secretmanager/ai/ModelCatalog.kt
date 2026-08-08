@@ -119,6 +119,20 @@ class ModelCatalog(
             markNotConfigured(descriptor.id)
             return
         }
+
+        // A provider that serves a fixed set has nothing to ask. This is not a return
+        // to the hardcoded catalogue this class replaced: it covers only the case where
+        // the provider itself offers one model to one scoped key, so there is no
+        // endpoint and no drift for a fetch to correct. Marked fresh at `nowEpochMs` so
+        // the TTL does not make it look stale and retry forever.
+        val fixed = ProviderRegistry.fixedModels[descriptor.id]
+        if (fixed != null) {
+            _states.update {
+                it + (descriptor.id to CatalogState.Loaded(models = fixed, fetchedAtEpochMs = nowEpochMs))
+            }
+            return
+        }
+
         if (!force && !isStale(descriptor.id, nowEpochMs)) return
 
         // Carry the previous good list through a *chain* of failures, not just the first.

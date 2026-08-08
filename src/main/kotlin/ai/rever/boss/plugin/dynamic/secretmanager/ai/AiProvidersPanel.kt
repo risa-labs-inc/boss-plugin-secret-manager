@@ -166,6 +166,7 @@ private fun StatusDot(source: CredentialSource) {
     val color =
         when (source) {
             CredentialSource.STORED -> BossThemeColors.SuccessColor
+            CredentialSource.BROKERED -> BossThemeColors.SuccessColor
             CredentialSource.ENVIRONMENT -> BossThemeColors.SecondaryColor
             CredentialSource.NONE -> BossThemeColors.TextMuted
         }
@@ -176,6 +177,7 @@ private fun statusLabel(connection: ProviderConnection): String =
     when (connection.source) {
         CredentialSource.STORED -> "Stored"
         CredentialSource.ENVIRONMENT -> connection.label?.let { "From $it" } ?: "From environment"
+        CredentialSource.BROKERED -> "Signed in"
         CredentialSource.NONE -> "Not configured"
     }
 
@@ -188,6 +190,7 @@ private fun ProviderDetail(
     val connection = state.connectionOf(descriptor.id)
     val busy = descriptor.id in state.busyProviderIds
     val fromEnvironment = connection.source == CredentialSource.ENVIRONMENT
+    val brokered = descriptor.brokerId != null
 
     BossSection(title = descriptor.displayName) {
         BossCard {
@@ -195,7 +198,28 @@ private fun ProviderDetail(
                 modifier = Modifier.padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (fromEnvironment) {
+                if (brokered) {
+                    // No key field at all: there is nothing for the user to paste, and
+                    // offering one would invite them to store a credential that this
+                    // provider mints for itself and that expires within hours.
+                    Text(
+                        text =
+                            if (connection.source == CredentialSource.BROKERED) {
+                                "Authorised by your BOSS sign-in. A short-lived key is fetched " +
+                                    "when needed and never stored."
+                            } else {
+                                "Sign in to BOSS with an account that has access. This provider " +
+                                    "has no API key to enter."
+                            },
+                        fontSize = 12.sp,
+                        color = BossThemeColors.TextSecondary,
+                    )
+                    BossSecondaryButton(
+                        text = "Check access",
+                        onClick = { viewModel.refreshBrokeredCredential(descriptor.id) },
+                        enabled = !busy,
+                    )
+                } else if (fromEnvironment) {
                     Text(
                         text =
                             "This key comes from the environment" +
@@ -246,7 +270,7 @@ private fun ProviderDetail(
                     }
                 }
 
-                if (descriptor.envVarNames.isNotEmpty() && !fromEnvironment) {
+                if (descriptor.envVarNames.isNotEmpty() && !fromEnvironment && !brokered) {
                     Text(
                         text = "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
                         fontSize = 11.sp,

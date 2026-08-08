@@ -216,13 +216,67 @@ because `AiProvidersPanel` is reachable only from `LlmProviderSettingsApiImpl`, 
 symbols never load on a pre-1.0.71 host - but that stops being true the moment the panel is
 rendered from `SecretManagerContent`, which is exactly why it is written down here.
 
-`LlmProviderSettingsApiImpl` is the **only** file referencing api symbols added in
-1.0.71 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE`). Everything else
-uses the plugin-local `WireFormat` enum. That is why `registerAiProviderSettings`
-can wrap registration in a `LinkageError` guard and why `plugin.json` keeps its lower
-`apiVersion`: on an older host the AI panel is simply not served, and secret
-management still works. Adding a new-api reference outside that file would take the
-whole plugin down on such a host.
+`LlmProviderSettingsApiImpl` and `BrokeredCredentialBridge` are the **only** files
+referencing api symbols added after this plugin's declared floor
+(`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE` from 1.0.71;
+`BrokeredCredentialProvider` and `PluginContext.brokeredCredentialProvider` from 1.0.74).
+Everything else uses the plugin-local `WireFormat` enum and the plugin-local
+`BrokeredKeySource` seam. That is why `registerAiProviderSettings` can wrap registration
+in a `LinkageError` guard and why `plugin.json` keeps its lower `apiVersion`: on an older
+host the AI panel is simply not served, and secret management still works. Adding a
+new-api reference outside those two files would take the whole plugin down on such a host.
+
+`ProviderCredentialStore` is constructed **outside** the guard, which is why it cannot
+hold an api type and gets `brokeredKeys` assigned after the fact. Left null, brokered
+providers report unconfigured - the same answer a host with no broker should give.
+
+### `LlmApiFormat.OPENAI_RESPONSES` is resolved reflectively, and has to be
+
+The GOOGLE_GENERATIVE argument ("it shipped in the same release as the interface, so any
+host that can link this class has both") does **not** extend to `OPENAI_RESPONSES`: it
+landed in 1.0.74, three releases later. A host on 1.0.71 links
+`LlmProviderSettingsApiImpl` fine and then throws `NoSuchFieldError` on the constant,
+because the enum is host-compiled and served parent-first. So it goes through
+`LlmApiFormat.valueOf` inside a `LinkageError`/`IllegalArgumentException` guard, and
+`configFor` returns null when it is missing - the provider reports unconfigured instead of
+crashing the section. Only `RISA_GLM` speaks that format and it needs the broker relay
+anyway, so on such a host it could never have worked.
+
+### Brokered providers (RISA Codex GLM)
+
+`ProviderDescriptor.brokerId` marks a provider whose credential nobody types in: the user
+is signed in to BOSS and an organisation gateway mints a short-lived model-scoped key for
+that identity. Such a provider has **no** `envVarNames`, **no** `consoleUrl` and **no**
+`keyPlaceholder`, and the panel renders no key field. `ProviderRegistryTest` pins all
+three, because each is a path by which a minted credential would end up somewhere durable
+(`envVarNames` in particular also names the secret entry).
+
+Two rules the tests hold, both mutation-verified:
+
+- a brokered credential is **never** written to the secret store, and lives only in
+  `ProviderCredentialStore`'s in-memory `brokeredCache`. It expires within hours and is
+  cheap to re-obtain, so persisting it trades a credential that self-heals for one that
+  leaks. Same rule as `CredentialSource.ENVIRONMENT`, different reason;
+- `invalidate()` clears that cache. Sign-out invalidates, and a credential minted for the
+  previous session must not be served to the next one.
+
+A failed mint is **not** cached, so a user who signs in can retry without anything else
+having to clear the cache. And a `BROKERED` source with a blank key collapses to `NONE`:
+`isConfigured` reads the key, so a blank one would offer the provider as usable and fail
+on the first request rather than where the user can act on it.
+
+`RISA_GLM` is second in `all`, not first, and that is load-bearing - `default` is
+`all.first()`, so leading with an organisation-only provider would make it the default
+selection for every user outside RISA, for whom it can never resolve a credential.
+`ProviderRegistryTest` pins that too.
+
+### `ProviderRegistry.fixedModels` is not a return to hardcoded catalogues
+
+The gateway serves one model to one scoped key, so there is no models endpoint and nothing
+for a live fetch to correct. `fixedModels` covers exactly that case, and two tests fence
+it: every endpoint-less provider must be either `CUSTOM` (the user types the id) or have a
+fixed list, and nothing with an endpoint may have a fixed list. Without the second, this
+becomes the drifting hardcoded list `ModelCatalogClient` replaced.
 
 ### Out-of-process caveat
 

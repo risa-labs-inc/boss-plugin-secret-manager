@@ -64,6 +64,32 @@ class ProviderCredentialStore(
     private val mutex = Mutex()
 
     /**
+     * Supplies credentials for providers that have a broker instead of a key.
+     *
+     * Set after construction because the broker is an api type reachable only inside
+     * the plugin's `LinkageError` guard, while this store is built outside it. Null
+     * means brokered providers resolve as unconfigured, which is also the right answer
+     * on a host with no broker.
+     */
+    @Volatile
+    var brokeredKeys: BrokeredKeySource? = null
+
+    /**
+     * Live brokered credentials, in memory only.
+     *
+     * Never written to the secret store. A minted credential expires within hours and
+     * is cheap to re-obtain, so persisting it would trade a credential that self-heals
+     * for one that leaks - the same reasoning that keeps environment-supplied keys off
+     * disk, and the defect this feature's predecessor shipped.
+     */
+    private val brokeredCache = java.util.concurrent.ConcurrentHashMap<String, CachedBrokeredKey>()
+
+    private class CachedBrokeredKey(
+        val token: String,
+        val reuseUntilMs: Long,
+    )
+
+    /**
      * Last known provider secrets, so a save doesn't re-page the whole store three
      * times. Cleared by every mutation and by [invalidate].
      */
@@ -96,6 +122,9 @@ class ProviderCredentialStore(
         // provider for the rest of the session — the exact thing invalidate() prevents.
         generation.incrementAndGet()
         cached = null
+        // Brokered credentials go too. Sign-out is one of the things that invalidates,
+        // and a credential minted for the previous session must not outlive it.
+        brokeredCache.clear()
         _invalidations.value = _invalidations.value + 1
     }
 
@@ -127,9 +156,13 @@ class ProviderCredentialStore(
     ): ProviderConnection {
         val settings = stored?.settings ?: ProviderSettings()
         val envKey = envResolver.resolve(descriptor.envVarNames)
+        val brokerId = descriptor.brokerId
 
         val (key, source) =
             when {
+                // A broker takes precedence over everything for a provider that has
+                // one: there is no key to store or export, so nothing can shadow it.
+                brokerId != null -> resolveBrokered(brokerId) to CredentialSource.BROKERED
                 !envKey.isNullOrBlank() -> envKey to CredentialSource.ENVIRONMENT
                 !stored?.apiKey.isNullOrBlank() -> stored.apiKey to CredentialSource.STORED
                 else -> "" to CredentialSource.NONE
@@ -137,9 +170,17 @@ class ProviderCredentialStore(
 
         return ProviderConnection(
             providerId = descriptor.id,
+            // A broker that could not mint is unconfigured, not brokered-with-no-key:
+            // `isConfigured` reads the key, and a BROKERED source with a blank one
+            // would offer the provider as usable and fail on the first request.
             apiKey = key,
-            source = source,
-            selectedModelId = settings.selectedModelId,
+            source = if (source == CredentialSource.BROKERED && key.isBlank()) CredentialSource.NONE else source,
+            // A brokered provider serves a fixed model, so it is selected rather than
+            // picked: there is no models endpoint to populate a picker from, and
+            // leaving it null makes activeConfig() return null forever.
+            selectedModelId =
+                settings.selectedModelId
+                    ?: ProviderRegistry.fixedModels[descriptor.id]?.firstOrNull()?.id,
             customEndpoint = settings.customEndpoint,
             temperature = settings.temperature,
             maxTokens = settings.maxTokens,
@@ -147,9 +188,50 @@ class ProviderCredentialStore(
                 when (source) {
                     CredentialSource.ENVIRONMENT -> envResolver.resolveSourceName(descriptor.envVarNames)
                     CredentialSource.STORED -> stored?.label
+                    CredentialSource.BROKERED -> if (key.isBlank()) null else "Signed in to BOSS"
                     CredentialSource.NONE -> null
                 },
         )
+    }
+
+    /**
+     * A live brokered credential, minted only when the cached one has aged out.
+     *
+     * Returns blank rather than failing when there is no broker on this host or the
+     * exchange fails: the caller's contract is "unconfigured provider", which the panel
+     * already knows how to present. The reason is logged, because "RISA Codex GLM says
+     * not configured" is otherwise unexplainable.
+     */
+    private suspend fun resolveBrokered(brokerId: String): String {
+        val source = brokeredKeys ?: return ""
+        val cached = brokeredCache[brokerId]
+        if (cached != null && cached.reuseUntilMs > System.currentTimeMillis()) {
+            return cached.token
+        }
+
+        return source
+            .fetch(brokerId)
+            .fold(
+                onSuccess = { credential ->
+                    brokeredCache[brokerId] =
+                        CachedBrokeredKey(
+                            token = credential.token,
+                            reuseUntilMs =
+                                System.currentTimeMillis() +
+                                    credential.refreshAfterSeconds.coerceAtLeast(0) * MILLIS_PER_SECOND,
+                        )
+                    credential.token
+                },
+                onFailure = { error ->
+                    brokeredCache.remove(brokerId)
+                    logger.info(
+                        LogCategory.SYSTEM,
+                        "Brokered credential unavailable",
+                        mapOf("broker" to brokerId, "reason" to (error.message ?: "unknown")),
+                    )
+                    ""
+                },
+            )
     }
 
     /**
@@ -406,6 +488,7 @@ class ProviderCredentialStore(
 
         private const val PAGE_SIZE = 100
         private const val MAX_SCANNED = 2000
+        private const val MILLIS_PER_SECOND = 1000L
     }
 }
 
