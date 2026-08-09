@@ -3,6 +3,8 @@ package ai.rever.boss.plugin.dynamic.secretmanager
 import ai.rever.boss.plugin.api.AuthDataProvider
 import ai.rever.boss.plugin.api.QueryFilter
 import ai.rever.boss.plugin.api.QueryRange
+import ai.rever.boss.plugin.api.PaginatedSecretsData
+import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.api.UserData
@@ -13,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -186,6 +189,56 @@ class RoleShareGateTest {
         assertEquals(emptyList(), vm.state.secrets, "a disposed ViewModel must not reload")
     }
 
+    /**
+     * The case the entry guard alone does NOT cover, and the one that actually happens.
+     *
+     * `loadSecrets()` launches without assigning `loadJob`, so `dispose()`'s cancel cannot
+     * reach it. Panel opens, `initialize()` starts the load, the user closes before it
+     * returns - and the response would write the decrypted list onto a disposed ViewModel.
+     * `a load that lands after dispose does not refill the list` misses this: it disposes
+     * first and calls `loadSecrets()` after, exercising only the entry check.
+     */
+    @Test
+    fun `a load already in flight at dispose does not refill the list`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val secrets = GatedSecrets(SECRET, gate)
+        val (vm, _) = viewModel(this, permissions = emptySet(), secrets = secrets)
+        advanceUntilIdle()
+        assertEquals(emptyList(), vm.state.secrets, "precondition: the load has not returned")
+
+        vm.dispose()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(emptyList(), vm.state.secrets, "an in-flight load must not land after dispose")
+    }
+
+    /** The same fake must genuinely deliver when nothing disposes - else the test above is vacuous. */
+    @Test
+    fun `the gated load does populate when not disposed`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val (vm, _) = viewModel(this, permissions = emptySet(), secrets = GatedSecrets(SECRET, gate))
+        advanceUntilIdle()
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, vm.state.secrets.size)
+    }
+
+    /** A typed-but-unsaved provider key must not survive the panel either. */
+    @Test
+    fun `dispose clears a typed AI provider key`() = runTest {
+        val (vm, _) = viewModel(this, permissions = emptySet())
+        advanceUntilIdle()
+        vm.setAiProviderKeyDraft("sk-typed-but-never-saved")
+        assertEquals("sk-typed-but-never-saved", vm.state.aiProviderKeyDraft)
+
+        vm.dispose()
+
+        assertEquals("", vm.state.aiProviderKeyDraft)
+    }
+
     /** A host too old to supply the provider must fail closed, not open. */
     @Test
     fun `a null auth provider fails closed`() = runTest {
@@ -214,7 +267,7 @@ class RoleShareGateTest {
         test: TestScope,
         permissions: Set<String>,
         isAdmin: Boolean = false,
-        secrets: FakeSecretDataProvider? = null,
+        secrets: SecretDataProvider? = null,
         supabase: SupabaseDataProvider? = null,
     ): Pair<SecretManagerViewModel, FakeAuth> {
         val auth = FakeAuth(permissions, isAdmin)
@@ -226,6 +279,17 @@ class RoleShareGateTest {
             authDataProvider = auth,
         ).also { it.initialize() }
         return vm to auth
+    }
+
+    /** Holds the first read until [gate] completes, so a dispose can land mid-flight. */
+    private class GatedSecrets(
+        private val secret: SecretEntryData,
+        private val gate: CompletableDeferred<Unit>,
+    ) : SecretDataProvider by FakeSecretDataProvider(emptyList()) {
+        override suspend fun getUserSecrets(limit: Int, offset: Int): Result<PaginatedSecretsData> {
+            gate.await()
+            return Result.success(PaginatedSecretsData(listOf(secret), hasMore = false))
+        }
     }
 
     /** Counts only the `roles` select; the share dialog also loads users. */

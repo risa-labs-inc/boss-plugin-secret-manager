@@ -57,10 +57,10 @@ repositories {
 dependencies {
     if (useLocalDependencies) {
         // Local development: use boss-plugin-api JAR from sibling repo.
-        // NOTE: plugin.json still declares apiVersion 1.0.20 — the
-        // ai.rever.boss.plugin.logging and .scrollbar packages used by this plugin
-        // were introduced in exactly that release (api tag v1.0.20), and that is
-        // still the true floor for the plugin to function.
+        // NOTE: plugin.json declares apiVersion AND minApiVersion 1.0.73, which is the
+        // true floor. This comment said 1.0.20 long after the manifest moved; read the
+        // manifest rather than this comment, because a stale floor here makes safe symbols
+        // look dangerous and sends people down pointless LinkageError-guard detours.
         //
         // The AI-provider feature needs symbols added in api 1.0.71
         // (LlmProviderSettingsAPI, LlmApiFormat.GOOGLE_GENERATIVE) but does not raise the

@@ -39,15 +39,17 @@ class SecretManagerComponent(
     // refetching. Same pattern as the Role Creation plugin; the Refresh
     // button refetches on demand.
     private val viewModel = SecretManagerViewModel(
-        secretDataProvider,
-        supabaseDataProvider,
-        pluginStoreApiKeyProvider,
-        scope,
-        aiProviderStore,
-        settingsProvider,
-        windowId,
-        splitViewOperations,
-        authDataProvider
+        // Named: nine positional arguments, five of them adjacent nullables, is the call site
+        // a reorder mis-binds silently while still compiling.
+        secretDataProvider = secretDataProvider,
+        supabaseDataProvider = supabaseDataProvider,
+        pluginStoreApiKeyProvider = pluginStoreApiKeyProvider,
+        scope = scope,
+        aiProviderStore = aiProviderStore,
+        settingsProvider = settingsProvider,
+        windowId = windowId,
+        splitViewOperations = splitViewOperations,
+        authDataProvider = authDataProvider,
     ).also { it.initialize() }
 
     init {

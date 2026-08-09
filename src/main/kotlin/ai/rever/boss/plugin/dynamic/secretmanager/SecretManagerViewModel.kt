@@ -85,11 +85,16 @@ class SecretManagerViewModel(
      * Set by [dispose]; guards the paths that would refill [SecretManagerState.secrets]
      * afterwards.
      *
-     * Cancelling `permissionJob` is not enough on its own: `createSecret`, `updateSecret` and
-     * `deleteSecret` each call `loadSecrets()` on success, which assigns a *fresh* `loadJob`.
-     * Save a secret, close the panel before the round-trip returns, and the plaintext list
-     * comes back on a ViewModel nobody can see - the exact state [dispose] documents itself as
-     * preventing.
+     * Cancelling `permissionJob` is not enough on its own. `createSecret` and `updateSecret`
+     * call `loadSecrets()` on success, and `loadSecrets`' own launch is not even assigned to
+     * `loadJob`, so `dispose`'s cancel cannot reach an in-flight initial load either. Save a
+     * secret - or just open the panel - close it before the round-trip returns, and the
+     * plaintext list comes back on a ViewModel nobody can see: the exact state [dispose]
+     * documents itself as preventing. Hence the flag is checked both on entry to
+     * [loadSecrets] and again before its state write.
+     *
+     * `deleteSecret` needs no guard: it filters the existing list, which [dispose] has already
+     * emptied, so it cannot repopulate.
      *
      * Deliberately a flag rather than a child scope this class could cancel wholesale:
      * [copySecret]'s clipboard wipe is *meant* to outlive the panel by
@@ -170,7 +175,14 @@ class SecretManagerViewModel(
         permissionJob = null
         loadJob?.cancel()
         searchJob?.cancel()
-        state = state.copy(secrets = emptyList(), selectedSecret = null, secretShares = emptyList())
+        state = state.copy(
+            secrets = emptyList(),
+            selectedSecret = null,
+            secretShares = emptyList(),
+            // Closing the panel with the AI-provider dialog open would otherwise leave the
+            // raw key in state; hideAiProviderKeyDialog() clears it for the same reason.
+            aiProviderKeyDraft = "",
+        )
     }
 
     /**
@@ -222,6 +234,11 @@ class SecretManagerViewModel(
             result?.onSuccess { paginatedResult ->
                 val secrets = paginatedResult.data
                 logTiming("getUserSecrets", elapsedMs, "${secrets.size} secrets")
+                // Re-checked AFTER the round-trip, not only on entry: this launch is not
+                // assigned to loadJob, so dispose()'s cancel never reaches it. The ordinary
+                // timeline - panel opens, initialize() loads, user closes before it returns -
+                // would otherwise put the decrypted list back on a disposed ViewModel.
+                if (disposed) return@onSuccess
                 state = state.copy(
                     secrets = secrets,
                     isLoading = false,
@@ -534,10 +551,11 @@ class SecretManagerViewModel(
         if ((!usersLoaded || usersListFiltered) && !state.isLoadingUsers) {
             loadAvailableUsers()
         }
-        // Not fetched for a user who will never see the Roles tab. Unlike the
-        // permission itself, this needs no late-arrival handling: the flag settles long
-        // before any dialog can be opened, and a user who gains the permission mid-session
-        // opens the dialog again afterwards.
+        // Not fetched for a user who will never see the Roles tab. This is only the
+        // steady-state check: a flag that flips while the dialog is already open is handled
+        // by observeRoleSharePermission, which kicks the fetch itself. (An earlier version of
+        // this comment claimed the flag always settles before a dialog can open, which is
+        // exactly what the collector exists to deny.)
         if (state.canShareWithRoles && !rolesLoaded && !state.isLoadingRoles) {
             loadAvailableRoles()
         }
@@ -702,6 +720,18 @@ class SecretManagerViewModel(
     }
 
     fun shareSecret(request: ShareSecretRequestData) {
+        // Defence in depth. `share_secret` refuses an ungranted role target server-side and
+        // the dialog is the only caller, but that makes the invariant rest on the UI being
+        // the sole entry point. Checked here so it holds for any future caller too.
+        if (request.targetRoleId != null && !state.canShareWithRoles) {
+            logger.warn(LogCategory.SYSTEM, "Refusing a role share without $PERMISSION_SHARE_WITH_ROLE")
+            state = state.copy(
+                isOperationInProgress = false,
+                errorMessage = "You do not have permission to share with a role.",
+            )
+            return
+        }
+
         state = state.copy(isOperationInProgress = true)
 
         scope.launch {

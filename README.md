@@ -73,7 +73,11 @@ ungated, and sharing with an organisation already requires membership of it.
 
 ## Requirements
 
-- BOSS >= 9.2.20, boss-plugin-api >= 1.0.20
+- BOSS >= 9.4.2, boss-plugin-api >= 1.0.73 (both from `plugin.json`; the older 9.2.20 /
+  1.0.20 pair stated here was stale)
+- The panel is visible to every authenticated user only on a host carrying migration
+  `20260809000000`, which grants `secret.read` to the baseline `user` role. On an older
+  host only admins and `boss_admin` can open it, and nothing else changes.
 - `secretDataProvider` is required. Without it only a no-provider stub panel registers and no
   MCP tools are contributed.
 - Optional: `supabaseDataProvider` (user and role search for sharing),
@@ -88,7 +92,7 @@ ungated, and sharing with an organisation already requires membership of it.
 ```bash
 ./gradlew buildPluginJar
 cp build/libs/boss-plugin-secret-manager-*.jar ~/.boss/plugins/
-./gradlew test    # 96 host-independent cases, no live credential needed
+./gradlew test    # 149 host-independent cases, no live credential needed
 ```
 
 Do not delete `compose-stability.conf`. It stops the Compose compiler emitting a `$stable` read
