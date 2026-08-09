@@ -81,6 +81,24 @@ class SecretManagerViewModel(
      */
     private var permissionJob: Job? = null
 
+    /**
+     * Set by [dispose]; guards the paths that would refill [SecretManagerState.secrets]
+     * afterwards.
+     *
+     * Cancelling `permissionJob` is not enough on its own: `createSecret`, `updateSecret` and
+     * `deleteSecret` each call `loadSecrets()` on success, which assigns a *fresh* `loadJob`.
+     * Save a secret, close the panel before the round-trip returns, and the plaintext list
+     * comes back on a ViewModel nobody can see - the exact state [dispose] documents itself as
+     * preventing.
+     *
+     * Deliberately a flag rather than a child scope this class could cancel wholesale:
+     * [copySecret]'s clipboard wipe is *meant* to outlive the panel by
+     * [CLIPBOARD_CLEAR_DELAY_MS], and cancelling it would leave a copied credential on the
+     * system clipboard indefinitely - trading a bounded in-memory reference for an unbounded
+     * OS-level one.
+     */
+    private var disposed = false
+
     // Lazy-load guards for share-dialog data and the API-key permission check
     private var usersLoaded = false
     private var rolesLoaded = false
@@ -125,6 +143,15 @@ class SecretManagerViewModel(
             }.collect { canShare ->
                 if (canShare != state.canShareWithRoles) {
                     state = state.copy(canShareWithRoles = canShare)
+                    // The Tab appears the instant the flag flips, so a claim landing while
+                    // the dialog is open would otherwise present a pane backed by an empty
+                    // availableRoles, with no spinner and no empty state to explain it -
+                    // recoverable only by reopening the dialog, with nothing to say so.
+                    // Gating the fetch on "the flag settles before any dialog opens" would
+                    // assume exactly what the collector exists to deny.
+                    if (canShare && state.showShareDialog && !rolesLoaded && !state.isLoadingRoles) {
+                        loadAvailableRoles()
+                    }
                 }
             }
         }
@@ -138,6 +165,7 @@ class SecretManagerViewModel(
      * it, and holding plaintext credentials past that point buys nothing.
      */
     fun dispose() {
+        disposed = true
         permissionJob?.cancel()
         permissionJob = null
         loadJob?.cancel()
@@ -176,6 +204,7 @@ class SecretManagerViewModel(
      * Load all secrets for the current user
      */
     fun loadSecrets() {
+        if (disposed) return
         state = state.copy(
             isLoading = true,
             errorMessage = null,

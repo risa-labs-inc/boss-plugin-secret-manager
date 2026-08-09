@@ -1,7 +1,12 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.AuthDataProvider
+import ai.rever.boss.plugin.api.QueryFilter
+import ai.rever.boss.plugin.api.QueryRange
+import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.api.UserData
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.FakeSecretDataProvider
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,6 +17,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -114,6 +120,72 @@ class RoleShareGateTest {
         assertFalse(vm.state.canShareWithRoles)
     }
 
+    /**
+     * The Tab appears the moment the flag flips, so a claim landing while the dialog is
+     * already open must also fetch the roles behind it. Otherwise the user clicks into a
+     * pane with no data, no spinner and no empty state, recoverable only by reopening.
+     */
+    @Test
+    fun `a permission arriving with the dialog open fetches the roles`() = runTest {
+        val supabase = RecordingSupabase()
+        val (vm, auth) = viewModel(this, permissions = emptySet(), supabase = supabase)
+        advanceUntilIdle()
+
+        vm.showShareDialog(SECRET)
+        advanceUntilIdle()
+        assertEquals(0, supabase.roleSelects, "precondition: no role fetch without the permission")
+
+        auth.grant("secret.share.role")
+        advanceUntilIdle()
+
+        assertEquals(1, supabase.roleSelects, "the newly visible Roles tab must have its data")
+    }
+
+    /** Without the permission the fetch must not happen at all - that is the other half. */
+    @Test
+    fun `opening the dialog without the permission does not fetch roles`() = runTest {
+        val supabase = RecordingSupabase()
+        val (vm, _) = viewModel(this, permissions = emptySet(), supabase = supabase)
+        advanceUntilIdle()
+
+        vm.showShareDialog(SECRET)
+        advanceUntilIdle()
+
+        assertEquals(0, supabase.roleSelects)
+    }
+
+    /**
+     * The security-relevant half of dispose: SecretEntryData carries the decrypted
+     * password, so a closed panel must not still be holding the list.
+     */
+    @Test
+    fun `dispose clears the decrypted secrets`() = runTest {
+        val (vm, _) = viewModel(this, permissions = emptySet(), secrets = FakeSecretDataProvider(listOf(SECRET)))
+        advanceUntilIdle()
+        assertEquals(1, vm.state.secrets.size, "precondition: the list is loaded")
+
+        vm.dispose()
+
+        assertEquals(emptyList(), vm.state.secrets)
+        assertNull(vm.state.selectedSecret)
+    }
+
+    /**
+     * Cancelling the collector is not enough: createSecret/updateSecret call loadSecrets()
+     * on success, which would refill the plaintext list on a ViewModel nobody can see.
+     */
+    @Test
+    fun `a load that lands after dispose does not refill the list`() = runTest {
+        val (vm, _) = viewModel(this, permissions = emptySet(), secrets = FakeSecretDataProvider(listOf(SECRET)))
+        advanceUntilIdle()
+
+        vm.dispose()
+        vm.loadSecrets()
+        advanceUntilIdle()
+
+        assertEquals(emptyList(), vm.state.secrets, "a disposed ViewModel must not reload")
+    }
+
     /** A host too old to supply the provider must fail closed, not open. */
     @Test
     fun `a null auth provider fails closed`() = runTest {
@@ -142,16 +214,48 @@ class RoleShareGateTest {
         test: TestScope,
         permissions: Set<String>,
         isAdmin: Boolean = false,
+        secrets: FakeSecretDataProvider? = null,
+        supabase: SupabaseDataProvider? = null,
     ): Pair<SecretManagerViewModel, FakeAuth> {
         val auth = FakeAuth(permissions, isAdmin)
         val vm = SecretManagerViewModel(
-            secretDataProvider = null,
-            supabaseDataProvider = null,
+            secretDataProvider = secrets,
+            supabaseDataProvider = supabase,
             pluginStoreApiKeyProvider = null,
             scope = TestScope(StandardTestDispatcher(test.testScheduler)),
             authDataProvider = auth,
         ).also { it.initialize() }
         return vm to auth
+    }
+
+    /** Counts only the `roles` select; the share dialog also loads users. */
+    private class RecordingSupabase : SupabaseDataProvider {
+        var roleSelects = 0
+            private set
+
+        override suspend fun select(
+            table: String,
+            columns: String,
+            filters: List<QueryFilter>,
+            range: QueryRange?,
+        ): Result<String> {
+            if (table == "roles") roleSelects++
+            return Result.success("[]")
+        }
+
+        override suspend fun rpc(function: String, parameters: String): Result<String> =
+            Result.success("[]")
+    }
+
+    private companion object {
+        val SECRET = SecretEntryData(
+            id = "s1",
+            website = "github.com",
+            username = "someone",
+            password = "hunter2",
+            createdAt = "2026-08-09T00:00:00Z",
+            updatedAt = "2026-08-09T00:00:00Z",
+        )
     }
 
     private class FakeAuth(permissions: Set<String>, admin: Boolean) : AuthDataProvider {

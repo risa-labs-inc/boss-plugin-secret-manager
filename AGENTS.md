@@ -8,7 +8,7 @@ Manage encrypted credentials and secrets, including Plugin Store API keys
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.secretmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin`
-- **API Version**: 1.0.20
+- **API Version**: 1.0.73 (`plugin.json` `apiVersion` and `minApiVersion`)
 
 ## Essential Commands
 
@@ -213,13 +213,32 @@ not pay a round-trip for its contents on every share-dialog open. The `roles` ta
 by any authenticated user ("Anyone can view roles" RLS plus a table grant), so this is a cost
 question, not an error-banner one - checked rather than assumed.
 
+**But the gate cannot be a plain "fetch on dialog open" check**, because the Tab appears the
+instant the flag flips. A claim landing while the dialog is already open would otherwise present
+a Roles pane backed by an empty list, with no spinner and no empty state to explain it,
+recoverable only by reopening the dialog with nothing to say so. The collector therefore kicks
+the fetch itself when the flag turns true and the dialog is open. Reasoning that "the flag
+settles before any dialog can open" assumes exactly what the collector exists to deny - that was
+the first version of this and it was wrong.
+
+**`dispose()` needs the `disposed` flag, not just the job cancels.** `createSecret` and
+`updateSecret` call `loadSecrets()` on success, which assigns a *fresh* `loadJob` - so saving a
+secret and closing the panel before the round-trip returned put the plaintext list back on a
+ViewModel nobody could see. (`deleteSecret` is safe: it filters the existing list, which dispose
+has already emptied.) Do **not** "simplify" this into cancelling a child scope: `copySecret`'s
+clipboard wipe is *meant* to outlive the panel by `CLIPBOARD_CLEAR_DELAY_MS`, and cancelling it
+would leave a copied credential on the system clipboard indefinitely - an unbounded OS-level
+exposure traded for a bounded in-memory one.
+
 Plugin Store API keys were already gated, on `api_key.create` via
 `PluginStoreApiKeyProvider.canManageApiKeys()`. Nothing changed there.
 
-`context.authDataProvider` is read on the always-taken registration path, so it has to
-predate the manifest floor: `getAuthDataProvider` is present in the released
-`boss-plugin-api-1.0.73.jar`, which is exactly `minApiVersion`. Verified with `javap`, not
-assumed.
+`context.authDataProvider` is read on the always-taken registration path, and so are the four
+`AuthDataProvider` members the ViewModel touches - a member newer than the floor is a
+`NoSuchMethodError` there that takes the whole plugin down, not just the AI section. All five
+were checked with `javap` against the released `boss-plugin-api-1.0.73.jar` (exactly
+`minApiVersion`), not assumed: `PluginContext.getAuthDataProvider`, plus `getCurrentUser`,
+`isAdmin`, `hasPermission(String)` and `getUserPermissions`.
 
 ### Provider keys are withheld from `secret_get`
 
@@ -259,7 +278,11 @@ Providers instead get an assisted flow: a "Get API key" button opening
 ### Linkage containment
 
 The guard covers the `Llm*` symbols only, so anything else this plugin touches must
-genuinely predate the declared `apiVersion` floor of 1.0.20. Verified against the api tags:
+genuinely predate the declared `apiVersion` floor, which is **1.0.73** (`plugin.json`, both
+`apiVersion` and `minApiVersion`). This paragraph said 1.0.20 long after the manifest moved -
+understating the floor by 53 releases makes safe symbols look dangerous and sends people down
+pointless `LinkageError`-guard detours, so check it against `plugin.json` rather than trusting
+the prose. Verified against the api tags:
 `PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
 `openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. That matters
 because they are read on the always-taken registration path (`registerPanel`), outside any
