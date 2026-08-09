@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /** Everything the AI providers panel renders. */
 data class AiProvidersUiState(
@@ -86,7 +88,7 @@ class AiProvidersViewModel(
      * successful mint, so a polling consumer would drive a continuous back-to-back loop, each
      * iteration a full `loadAll()` with its paginated secret scan, to renew one token.
      */
-    private val lastBrokeredRefreshMs = java.util.concurrent.atomic.AtomicLong(0)
+    private val lastBrokeredRefreshMs = AtomicLong(0)
 
     private val _connectionsLoaded = MutableStateFlow(false)
 
@@ -572,13 +574,16 @@ class AiProvidersViewModel(
         if (now - lastBrokeredRefreshMs.get() < minBrokeredRefreshIntervalMs) return
         if (!brokeredRefreshInFlight.compareAndSet(false, true)) return
         lastBrokeredRefreshMs.set(now)
-        scope.launch {
-            try {
-                reloadConnections()
-            } finally {
-                brokeredRefreshInFlight.set(false)
-            }
-        }
+        // IO because this can now fire from any consumer read, and `pluginScope` falls back to
+        // Dispatchers.Main. runCatching because a host `exchange`/`listSecrets` that throws rather
+        // than returning a failed Result would escape and cancel the scope - and a plain
+        // CoroutineScope(Main) is not a supervisor, so that would silently kill every later launch
+        // in the plugin. invokeOnCompletion rather than finally: if the scope is already cancelled
+        // the body never runs, and the flag would latch true forever - the same shape of latch as
+        // the bug this PR fixes.
+        scope
+            .launch(Dispatchers.IO) { runCatching { reloadConnections() } }
+            .invokeOnCompletion { brokeredRefreshInFlight.set(false) }
     }
 
     private suspend fun reloadConnections() {
@@ -609,6 +614,7 @@ class AiProvidersViewModel(
             _state.update { it.copy(busyProviderIds = it.busyProviderIds - providerId) }
         }
     }
+
     private companion object {
         /**
          * Floor on how often a brokered refresh may run.

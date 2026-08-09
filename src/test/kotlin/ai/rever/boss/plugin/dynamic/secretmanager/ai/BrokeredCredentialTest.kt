@@ -175,6 +175,7 @@ class BrokeredCredentialTest {
             // space-separated and offset-less. A parser that only took the documented form
             // would return null for the real value and silently disable the cap.
             val instant = java.time.Instant.now().plusSeconds(3)
+            val local = java.time.LocalDateTime.ofInstant(instant, java.time.ZoneOffset.UTC)
             val shapes =
                 listOf(
                     java.time.OffsetDateTime.ofInstant(instant, java.time.ZoneOffset.UTC).toString(),
@@ -187,6 +188,15 @@ class BrokeredCredentialTest {
                         .ofInstant(instant, java.time.ZoneOffset.UTC)
                         .toString()
                         .replace('T', ' ') + "+00:00",
+                    // A trailing zone word, which fails both parsers untouched.
+                    local.toString().replace('T', ' ') + " UTC",
+                    // A compact offset. Its regex is `$`-anchored and the real value carries
+                    // fractional seconds ahead of the offset, so this is the shape most worth
+                    // pinning - deleting either line left all tests passing.
+                    local.toString().replace('T', ' ') + "+0000",
+                    // Already `T`-separated with space before the offset: substituting the
+                    // separator unconditionally inserted a second `T` here and disabled the cap.
+                    local.toString() + " +00:00",
                 )
 
             shapes.forEach { shape ->

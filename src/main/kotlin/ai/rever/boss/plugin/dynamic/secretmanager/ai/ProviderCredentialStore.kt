@@ -348,7 +348,11 @@ class ProviderCredentialStore(
                 .trim()
                 .removeSuffix(" UTC")
                 .trim()
-                .replaceFirst(' ', 'T')
+                // Only when there is no separator already: `replaceFirst` on
+                // `2026-08-09T17:27:08 +00:00` would insert a *second* `T` before the offset and
+                // fail both parsers - silently disabling the cap, which is the exact failure this
+                // parser exists to avoid. The producer is not ours to assume.
+                .let { if (it.contains('T')) it else it.replaceFirst(' ', 'T') }
                 .replace(" ", "")
                 // `+0000` parses as neither an offset nor a local time, so without this the cap
                 // silently switches off - the failure this parser exists to avoid. Deliberately

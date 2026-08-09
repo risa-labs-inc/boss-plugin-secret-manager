@@ -313,6 +313,10 @@ Three things worth keeping right:
 - **The api calls `expiresAt` "informational" and `refreshAfterSeconds` the thing to act
   on.** This acts on both, deliberately: the window is still what bounds reuse, the expiry
   only ever shortens it. A broker that wants renewal well before expiry keeps that.
+- **Every branch of the expiry parser has a test.** Four shapes were covered and two branches
+  were not: `removeSuffix(" UTC")` and the compact-offset (`+0000`) regex could each be deleted
+  with the suite still green. Both are pinned now, along with the already-`T`-separated-with-space
+  case that an unconditional `replaceFirst(' ', 'T')` corrupted into a second `T`.
 - **The expiry parser is tolerant on purpose.** The api documents RFC 3339, but the value
   originates in LiteLLM and has been seen space-separated instead of `T`-separated, and
   offset-less. A parser accepting only the documented shape returns null for the real value
@@ -365,9 +369,18 @@ machine behind the broker under-caps (harmless) and one ahead over-caps into exa
 refresh loop the floor now bounds. The log line names the reported and effective windows so that
 case is greppable rather than mysterious.
 
+The refresh runs on `Dispatchers.IO` and wraps `reloadConnections` in `runCatching`. Both matter
+now that it can fire from any consumer read rather than only panel entry: `pluginScope` falls back
+to `Dispatchers.Main`, and a host `exchange`/`listSecrets` that throws instead of returning a
+failed `Result` would escape and cancel a scope that is not a supervisor - silently killing every
+later launch in the plugin. The in-flight flag is cleared from `invokeOnCompletion`, not a
+`finally`, so a body that never runs on an already-cancelled scope cannot latch it true.
+
 `BrokeredReadPathTest` covers this by driving the api rather than `loadAll`, and uses
-`runBlocking` with a real scope rather than `runTest`: the load parks on `Dispatchers.IO`, so
-`advanceUntilIdle()` returns without waiting and every assertion reads an empty snapshot. It waits
+`runBlocking` with a real scope rather than `runTest`: the load ends up off the test dispatcher
+(the store has no `withContext` of its own - it relies on the host's suspend functions
+dispatching), so `advanceUntilIdle()` returns without waiting and every assertion reads an empty
+snapshot. It waits
 on `connectionsLoaded` and on the mint count instead of sleeping.
 
 Two traps that suite has already fallen into, both caught by mutation:

@@ -264,8 +264,8 @@ class BrokeredReadPathTest {
             withTimeout(TIMEOUT_MS) { harness.viewModel.connectionsLoaded.first { it } }
             val afterFailure = failFirst.settled()
 
-            // Backoff is 15s in the store, so drive the retry by reading until it lands rather
-            // than asserting on one call.
+            // The harness injects a short backoff, but the retry still only becomes due after it
+            // elapses, so this reads until it lands rather than asserting on a single call.
             withTimeout(TIMEOUT_MS) {
                 while (failFirst.calls <= afterFailure) {
                     harness.api.activeConfig()
