@@ -70,6 +70,38 @@ class RoleShareGateTest {
         assertTrue(vm.state.canShareWithRoles)
     }
 
+    /**
+     * The `isAdmin` half of the combine. `an admin can without holding it explicitly`
+     * does NOT cover this: it sets isAdmin before initialize(), so `userPermissions`'
+     * first emission already carries the answer and collecting that flow alone passes.
+     * This is the scenario the combine exists for, and it is the mutation that survives
+     * without it.
+     */
+    @Test
+    fun `an admin claim arriving after initialize is picked up`() = runTest {
+        val (vm, auth) = viewModel(this, permissions = emptySet())
+        advanceUntilIdle()
+        assertFalse(vm.state.canShareWithRoles, "precondition: starts closed")
+
+        auth.promote()
+        advanceUntilIdle()
+
+        assertTrue(vm.state.canShareWithRoles)
+    }
+
+    /** Closing the panel must stop the collector; nothing else in the VM outlives it. */
+    @Test
+    fun `dispose stops tracking the permission`() = runTest {
+        val (vm, auth) = viewModel(this, permissions = emptySet())
+        advanceUntilIdle()
+
+        vm.dispose()
+        auth.grant("secret.share.role")
+        advanceUntilIdle()
+
+        assertFalse(vm.state.canShareWithRoles, "a disposed ViewModel must not still be collecting")
+    }
+
     @Test
     fun `a revoked permission closes the gate again`() = runTest {
         val (vm, auth) = viewModel(this, permissions = setOf("secret.share.role"))
@@ -143,6 +175,11 @@ class RoleShareGateTest {
 
         fun revoke(permission: String) {
             _permissions.value = _permissions.value - permission
+        }
+
+        /** An admin claim landing with no accompanying change to the permission set. */
+        fun promote() {
+            _isAdmin.value = true
         }
     }
 }

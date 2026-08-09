@@ -193,8 +193,25 @@ Three things about that flag:
 - **It fails closed on a null `authDataProvider`**, and `selectedTab` is clamped back to
   Users if the permission disappears while the dialog is open (remembered state does not
   re-derive itself).
-- **It is not the enforcement.** The RPC is. `RoleShareGateTest` is mutation-verified:
-  hardcoding the flag true fails three cases (no permission, late arrival, revocation).
+- **It is not the enforcement.** The RPC is. `RoleShareGateTest` is mutation-verified three
+  ways: hardcoding the flag true fails the no-permission, late-arrival and revocation cases;
+  collecting `userPermissions` alone (dropping the `isAdmin` half of the combine) fails
+  *an admin claim arriving after initialize*; and a `dispose()` that does not cancel fails
+  *dispose stops tracking the permission*.
+
+**The collector is the only launch in this ViewModel that never completes, and it needs a
+destroy hook.** `scope` is the *plugin* scope while the ViewModel is per panel instance, so an
+uncancelled `collect` on a StateFlow roots the ViewModel for the plugin's whole lifetime - and
+`state.secrets` holds `SecretEntryData` with the decrypted `password`, so each panel open would
+strand a full plaintext credential list. `SecretManagerComponent` calls `viewModel.dispose()`
+from `lifecycle.doOnDestroy`, which cancels the collector and clears the secrets. Nothing needed
+this before because every other launch here terminates - so if you add a second collector,
+cancel it in `dispose()` too.
+
+`loadAvailableRoles()` is gated on the same flag: a user who will never see the Roles tab should
+not pay a round-trip for its contents on every share-dialog open. The `roles` table is readable
+by any authenticated user ("Anyone can view roles" RLS plus a table grant), so this is a cost
+question, not an error-banner one - checked rather than assumed.
 
 Plugin Store API keys were already gated, on `api_key.create` via
 `PluginStoreApiKeyProvider.canManageApiKeys()`. Nothing changed there.

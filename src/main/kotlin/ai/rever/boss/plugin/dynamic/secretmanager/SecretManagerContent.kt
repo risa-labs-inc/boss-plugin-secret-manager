@@ -1345,14 +1345,13 @@ private fun ShareSecretDialog(
     isLoadingUsers: Boolean
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableStateOf(0) } // 0 = Users, 1 = Roles
-    // A permission can be revoked while the dialog is open (the claim refreshes on a
-    // timer), and the Roles tab would otherwise stay rendered because selectedTab is
-    // remembered state, not derived from the permission.
-    val roleTabVisible = canShareWithRoles
-    if (!roleTabVisible && selectedTab == 1) {
-        selectedTab = 0
-    }
+    // Clicks write `tabSelection`; every read goes through the clamped `selectedTab`.
+    // Derived rather than written back, because a permission can be revoked while the
+    // dialog is open (the claim refreshes on a timer) and writing snapshot state during
+    // composition costs an extra recomposition and leaves the invariant depending on
+    // statement order inside this composable.
+    var tabSelection by remember { mutableStateOf(0) } // 0 = Users, 1 = Roles
+    val selectedTab = if (canShareWithRoles) tabSelection else 0
 
     BossDialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1446,7 +1445,7 @@ private fun ShareSecretDialog(
                 ) {
                     Tab(
                         selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
+                        onClick = { tabSelection = 0 },
                         text = { Text("Users", fontSize = 12.sp) }
                     )
                     // Hidden without `secret.share.role`. A role share reaches every
@@ -1454,10 +1453,10 @@ private fun ShareSecretDialog(
                     // this tab is the one control in the panel that can publish a
                     // credential deployment-wide. share_secret refuses it server-side
                     // either way; this keeps a button that cannot work off the screen.
-                    if (roleTabVisible) {
+                    if (canShareWithRoles) {
                         Tab(
                             selected = selectedTab == 1,
-                            onClick = { selectedTab = 1 },
+                            onClick = { tabSelection = 1 },
                             text = { Text("Roles", fontSize = 12.sp) }
                         )
                     }

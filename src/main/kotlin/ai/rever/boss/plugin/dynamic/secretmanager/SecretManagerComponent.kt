@@ -11,6 +11,7 @@ import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import androidx.compose.runtime.Composable
 import com.arkivanov.decompose.ComponentContext
+import com.arkivanov.essenty.lifecycle.doOnDestroy
 import kotlinx.coroutines.CoroutineScope
 
 /**
@@ -48,6 +49,15 @@ class SecretManagerComponent(
         splitViewOperations,
         authDataProvider
     ).also { it.initialize() }
+
+    init {
+        // The ViewModel is per panel instance but its coroutines run on the *plugin*
+        // scope, so the permission collector - which never completes - would keep this
+        // instance, and the decrypted secrets in its state, alive for the plugin's whole
+        // lifetime. Every other launch in the ViewModel terminates, which is why this
+        // hook only became necessary once something collected.
+        lifecycle.doOnDestroy { viewModel.dispose() }
+    }
 
     @Composable
     override fun Content() {

@@ -69,6 +69,18 @@ class SecretManagerViewModel(
     private var loadJob: Job? = null
     private var searchJob: Job? = null
 
+    /**
+     * The permission collector, which is the only launch here that never completes.
+     *
+     * `scope` is the *plugin* scope while this ViewModel is per panel instance, so an
+     * uncancelled `collect` on a StateFlow roots this object for as long as the plugin is
+     * loaded. What that retains is the problem: `state.secrets` holds `SecretEntryData`
+     * with the decrypted `password` in it, so every panel open would strand a full
+     * plaintext credential list. Every other launch in this class terminates, which is
+     * why nothing needed a destroy hook before.
+     */
+    private var permissionJob: Job? = null
+
     // Lazy-load guards for share-dialog data and the API-key permission check
     private var usersLoaded = false
     private var rolesLoaded = false
@@ -107,7 +119,7 @@ class SecretManagerViewModel(
      */
     private fun observeRoleSharePermission() {
         val auth = authDataProvider ?: return
-        scope.launch {
+        permissionJob = scope.launch {
             combine(auth.userPermissions, auth.isAdmin) { _, _ ->
                 auth.hasPermission(PERMISSION_SHARE_WITH_ROLE)
             }.collect { canShare ->
@@ -116,6 +128,21 @@ class SecretManagerViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * Release panel-scoped resources. Called from the component's `doOnDestroy`.
+     *
+     * Cancels the permission collector and drops the decrypted secret list rather than
+     * waiting for the ViewModel to be collected: the panel is closed, nothing can render
+     * it, and holding plaintext credentials past that point buys nothing.
+     */
+    fun dispose() {
+        permissionJob?.cancel()
+        permissionJob = null
+        loadJob?.cancel()
+        searchJob?.cancel()
+        state = state.copy(secrets = emptyList(), selectedSecret = null, secretShares = emptyList())
     }
 
     /**
@@ -478,7 +505,11 @@ class SecretManagerViewModel(
         if ((!usersLoaded || usersListFiltered) && !state.isLoadingUsers) {
             loadAvailableUsers()
         }
-        if (!rolesLoaded && !state.isLoadingRoles) {
+        // Not fetched for a user who will never see the Roles tab. Unlike the
+        // permission itself, this needs no late-arrival handling: the flag settles long
+        // before any dialog can be opened, and a user who gains the permission mid-session
+        // opens the dialog again afterwards.
+        if (state.canShareWithRoles && !rolesLoaded && !state.isLoadingRoles) {
             loadAvailableRoles()
         }
     }
