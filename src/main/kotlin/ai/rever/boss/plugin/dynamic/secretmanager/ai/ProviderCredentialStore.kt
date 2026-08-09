@@ -57,6 +57,13 @@ data class ConnectionsSnapshot(
 class ProviderCredentialStore(
     private val secrets: SecretDataProvider,
     private val envResolver: EnvResolver = EnvResolver(),
+    /**
+     * How long after a failed mint the read path may try again.
+     *
+     * A parameter rather than a constant so the retry is testable: hard-coded, any test of it had
+     * to outwait it, which is how an untested guard ends up wrong.
+     */
+    private val mintRetryBackoffMs: Long = DEFAULT_MINT_RETRY_BACKOFF_MS,
 ) {
     private val logger = BossLogger.forComponent("AiCredentialStore")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -88,6 +95,29 @@ class ProviderCredentialStore(
         val token: String,
         val reuseUntilMs: Long,
     )
+
+    /**
+     * When a mint last failed, per broker.
+     *
+     * A failed mint is deliberately **not** cached as a credential - a user who signs in must be
+     * able to retry without anything clearing the cache first - but removing the entry and
+     * calling that "not lapsed" made failure terminal on the read path: nothing calls `loadAll`
+     * again there, so a single network blip left the provider unconfigured until the panel was
+     * opened. A recorded failure time gives bounded retry instead.
+     *
+     * Note this cannot be expressed as a blank-token cache entry: `resolveBrokered` would serve
+     * it while the deadline was in the future.
+     */
+    private val lastMintFailureNanos = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * Brokers whose reuse window is currently being shortened by the expiry, so the log line
+     * fires on the transition rather than on every mint.
+     *
+     * In the case that motivated this cap the condition is *constant* and the read path can mint
+     * every few seconds, which would be hundreds of identical INFO lines an hour.
+     */
+    private val cappedBrokers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** Per-broker mint lock, created on first use. */
     private val brokeredMintLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
@@ -144,6 +174,8 @@ class ProviderCredentialStore(
         // Brokered credentials go too. Sign-out is one of the things that invalidates,
         // and a credential minted for the previous session must not outlive it.
         brokeredCache.clear()
+        lastMintFailureNanos.clear()
+        cappedBrokers.clear()
         _invalidations.value = _invalidations.value + 1
     }
 
@@ -241,6 +273,129 @@ class ProviderCredentialStore(
         }
     }
 
+    /**
+     * Whether a brokered credential is cached but no longer reusable.
+     *
+     * The cap in [reuseUntil] only bites when something calls [loadAll], and on the path that
+     * matters nothing does: `LlmProviderSettingsApiImpl.activeConfig` reads a snapshot the
+     * view model loaded once, so between a panel visit and a secret edit a consumer keeps
+     * being handed whatever token that snapshot captured. This lets the read path notice.
+     *
+     * False when nothing is cached: there is no stale credential to replace, and the load
+     * path already mints on demand. Answering true there would turn every read before the
+     * first successful mint into another reload.
+     */
+    fun brokeredCredentialLapsed(brokerId: String): Boolean {
+        val now = System.currentTimeMillis()
+        brokeredCache[brokerId]?.let { return it.reuseUntilMs <= now }
+        // Nothing cached. True only when a mint failed long enough ago to be worth retrying:
+        // answering true unconditionally would hammer the broker before the first success, and
+        // answering false always made a failure terminal on this path.
+        // nanoTime, not the wall clock: this measures an elapsed duration, and a clock that
+        // steps backwards (VM resume, first NTP sync, a manual change) would make the difference
+        // negative and hold the retry off for the length of the step - re-creating this exact
+        // wedge from a different cause. The expiry comparison above genuinely needs wall time,
+        // because it is checked against an absolute timestamp from the broker.
+        val failedAt = lastMintFailureNanos[brokerId] ?: return false
+        return System.nanoTime() - failedAt >= mintRetryBackoffMs * NANOS_PER_MILLI
+    }
+
+    /**
+     * When a freshly minted credential stops being reusable.
+     *
+     * The broker's own reuse window, **capped by the credential's expiry**. Trusting the
+     * window alone wedges every request for its duration when a broker reports a window
+     * that outlives its key: that is not hypothetical - RISA's gateway did exactly that,
+     * and LLM RPA failed with `401 Expired Key` on a cached token for eleven minutes,
+     * re-sending the same dead key every time because nothing re-minted until the window
+     * lapsed.
+     *
+     * A margin comes off the expiry because a credential that dies mid-flight is a failed
+     * request either way, and re-minting is cheap next to that - the per-broker mint lock
+     * already stops a stampede. A window that computes to zero or less simply means "mint
+     * every time", which is correct rather than degraded.
+     *
+     * An unparseable or absent expiry falls back to the window as reported, which is the
+     * behaviour before this cap existed.
+     */
+    private fun reuseUntil(
+        brokerId: String,
+        credential: BrokeredKey,
+    ): Long {
+        val now = System.currentTimeMillis()
+        // coerceIn, not coerceAtLeast: an absurd reported window overflows the multiply and
+        // wraps the sum negative, which would read as "already lapsed" forever.
+        val window =
+            now + credential.refreshAfterSeconds.coerceIn(0, MAX_REUSE_SECONDS) * MILLIS_PER_SECOND
+        val expiry = credential.expiresAt?.let(::expiryMillis) ?: return window
+        val capped = minOf(window, expiry - EXPIRY_SAFETY_MARGIN_MS).coerceAtLeast(now)
+        if (capped < window) {
+            if (cappedBrokers.add(brokerId)) {
+            // Without this, a gateway minting keys shorter than the safety margin - or a local
+            // clock running ahead of the broker's - silently turns every read into a network
+            // mint, with nothing in the log connecting the slowness to expiry handling. That
+            // is the same un-diagnosable shape as the bug this cap fixes.
+                logger.info(
+                    LogCategory.SYSTEM,
+                    "Brokered credential expiry shortened its reuse window",
+                    mapOf(
+                        "broker" to brokerId,
+                        // Not a secret, and the first thing wanted when the question is which
+                        // gateway is misreporting and what it actually sent.
+                        "expiresAt" to (credential.expiresAt ?: "absent"),
+                        "reportedWindowSeconds" to credential.refreshAfterSeconds,
+                        // Floors to 0 for a sub-second window, which reads as "mint every time".
+                        "effectiveWindowSeconds" to (capped - now) / MILLIS_PER_SECOND,
+                    ),
+                )
+            }
+        } else {
+            cappedBrokers.remove(brokerId)
+        }
+        return capped
+    }
+
+    /**
+     * An RFC 3339 instant in epoch millis, or null when it cannot be read.
+     *
+     * More than one shape is accepted on purpose. The api documents RFC 3339, but the value
+     * originates in LiteLLM and has been seen space-separated rather than `T`-separated, and
+     * offset-less. A parser that only accepted the documented form would silently return null
+     * for the real value and disable the cap it exists to enforce - so the tolerant reader is
+     * the point, not laziness. An offset-less timestamp is read as UTC, which is what LiteLLM
+     * stores.
+     */
+    private fun expiryMillis(raw: String): Long? {
+        // replaceFirst, and a trailing zone word dropped: `2026-08-09 17:27:08 +00:00` and
+        // `... UTC` are both shapes these values carry, and a transform too eager or too
+        // narrow silently disables the cap - the same failure the tolerant parser exists to
+        // avoid, one layer up.
+        val text =
+            raw
+                .trim()
+                .removeSuffix(" UTC")
+                .trim()
+                // Only when there is no separator already: `replaceFirst` on
+                // `2026-08-09T17:27:08 +00:00` would insert a *second* `T` before the offset and
+                // fail both parsers - silently disabling the cap, which is the exact failure this
+                // parser exists to avoid. The producer is not ours to assume.
+                .let { if (it.contains('T')) it else it.replaceFirst(' ', 'T') }
+                .replace(" ", "")
+                // `+0000` parses as neither an offset nor a local time, so without this the cap
+                // silently switches off - the failure this parser exists to avoid. Deliberately
+                // no "parse the leading local part and call it UTC" fallback: for a value that
+                // really carries an offset that reads the instant as later than truth, which
+                // lengthens the cap instead of tightening it.
+                .replace(Regex("([+-]\\d{2})(\\d{2})$"), "$1:$2")
+        return runCatching { java.time.OffsetDateTime.parse(text).toInstant().toEpochMilli() }
+            .recoverCatching {
+                java.time.LocalDateTime
+                    .parse(text)
+                    .toInstant(java.time.ZoneOffset.UTC)
+                    .toEpochMilli()
+            }.getOrNull()
+    }
+
     private suspend fun mintBrokered(
         source: BrokeredKeySource,
         brokerId: String,
@@ -255,19 +410,19 @@ class ProviderCredentialStore(
             .fetch(brokerId)
             .fold(
                 onSuccess = { credential ->
+                    lastMintFailureNanos.remove(brokerId)
                     if (generation.get() == startedAt) {
                         brokeredCache[brokerId] =
                             CachedBrokeredKey(
                                 token = credential.token,
-                                reuseUntilMs =
-                                    System.currentTimeMillis() +
-                                        credential.refreshAfterSeconds.coerceAtLeast(0) * MILLIS_PER_SECOND,
+                                reuseUntilMs = reuseUntil(brokerId, credential),
                             )
                     }
                     credential.token
                 },
                 onFailure = { error ->
                     brokeredCache.remove(brokerId)
+                    lastMintFailureNanos[brokerId] = System.nanoTime()
                     logger.info(
                         LogCategory.SYSTEM,
                         "Brokered credential unavailable",
@@ -533,6 +688,21 @@ class ProviderCredentialStore(
         private const val PAGE_SIZE = 100
         private const val MAX_SCANNED = 2000
         private const val MILLIS_PER_SECOND = 1000L
+        private const val NANOS_PER_MILLI = 1_000_000L
+
+        /**
+         * Taken off a credential's expiry before caching it.
+         *
+         * Covers a request already in flight and clock skew between this machine and the
+         * broker. Deliberately generous relative to a mint, which is one fast HTTP call.
+         */
+        private const val EXPIRY_SAFETY_MARGIN_MS = 30_000L
+
+        /** Caps the reported window so the millis multiply cannot overflow. Ten years. */
+        private const val MAX_REUSE_SECONDS = 315_360_000L
+
+        /** How long to wait after a failed mint before the read path tries again. */
+        private const val DEFAULT_MINT_RETRY_BACKOFF_MS = 15_000L
     }
 }
 

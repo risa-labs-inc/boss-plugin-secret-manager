@@ -296,6 +296,122 @@ Mutation-verified: narrowing `hasKnownModels` back to `modelsEndpoint != null` f
   finds the first one's result. The explicit `reloadConnections()` stays because the next
   line reads `_state.value` to report the outcome.
 
+### The reuse window is capped by the credential's own expiry
+
+`ProviderCredentialStore.reuseUntil` caches a brokered credential for
+`min(refreshAfterSeconds, expiresAt - 30s)`, not for the window the broker reported.
+
+Trusting the window alone wedges the provider for its whole duration whenever a broker
+reports a window that outlives its key, and that is not hypothetical. RISA's gateway
+reported an hour-long reuse window on a key that expired in about three minutes; LLM RPA
+then failed `401 Authentication Error - Expired Key` on three consecutive runs spanning
+eleven minutes, re-sending the same dead token each time, because nothing re-minted until
+the window lapsed. Only a plugin reload (which drops the memory-only cache) cleared it.
+
+Three things worth keeping right:
+
+- **The api calls `expiresAt` "informational" and `refreshAfterSeconds` the thing to act
+  on.** This acts on both, deliberately: the window is still what bounds reuse, the expiry
+  only ever shortens it. A broker that wants renewal well before expiry keeps that.
+- **Every branch of the expiry parser has a test.** Four shapes were covered and two branches
+  were not: `removeSuffix(" UTC")` and the compact-offset (`+0000`) regex could each be deleted
+  with the suite still green. Both are pinned now, along with the already-`T`-separated-with-space
+  case that an unconditional `replaceFirst(' ', 'T')` corrupted into a second `T`.
+- **The expiry parser is tolerant on purpose.** The api documents RFC 3339, but the value
+  originates in LiteLLM and has been seen space-separated instead of `T`-separated, and
+  offset-less. A parser accepting only the documented shape returns null for the real value
+  and silently disables the cap - which is worse than no cap, because it looks fixed.
+  Offset-less is read as UTC, which is what LiteLLM stores.
+- **Absent or unparseable falls back to the reported window**, i.e. exactly the old
+  behaviour. Failing closed instead would re-mint on every read for any broker that omits
+  the field.
+
+`BrokeredCredential.expiresAt` shipped in api **1.0.74**, verified in the released jar - the
+same version `BrokeredCredentialBridge` already requires for `BrokeredCredentialProvider`. So it
+is read straight, with no `runCatching`: on any host that can load that class the field exists,
+and a guard there would be dead code implying a risk that cannot occur. Add it to the
+"Linkage containment" list above if that file ever gains a newer symbol.
+
+**The cap alone was not enough, and that is the part worth remembering.**
+`ProviderCredentialStore.brokeredCache` is not what hands a token to a consumer.
+`LlmProviderSettingsApiImpl.activeConfig` reads `state.connections`, which
+`ensureConnectionsLoaded` fills exactly once (`compareAndSet(false, true)`), and nothing else
+calls `loadAll` between a panel visit and a secret edit. So the cap could shorten a window that
+nobody ever re-read: the eleven-minute wedge would have reproduced with the cap in place, and
+the store-level tests would still have passed, because they call `loadAll` directly.
+
+`configFor` therefore calls `refreshLapsedBrokeredCredential`, which asks
+`brokeredCredentialLapsed` and kicks an async `reloadConnections`. Four things to keep:
+
+- **The hook is in `configFor`, not `activeConfig`.** Both api methods funnel through it, and
+  hooking only `activeConfig` left `configuredProviders` handing out the same dead token - the
+  identical wedge one method over.
+- **That call still returns the stale token**; the next one is fresh. `activeConfig` cannot
+  suspend, so the alternative was blocking a non-suspending api on a network mint. One failed
+  request beats a wedge lasting the whole window.
+- **An in-flight flag** collapses a burst of reads into one reload, and a **minimum interval**
+  (`minBrokeredRefreshIntervalMs`, 5s) bounds the rate. Both are needed: the flag alone leaves a
+  collapsed window driving refreshes back-to-back for as long as a consumer polls, each one a
+  full `loadAll()` with its paginated secret scan. The first refresh is never blocked, so a
+  genuinely lapsed credential does not wait out the interval.
+- **A failed mint is retried, not terminal.** A failure is deliberately never cached, and calling
+  "nothing cached" *not lapsed* made one network blip permanent on this path: nothing calls
+  `loadAll` again, so the provider stayed unconfigured until the panel was opened.
+  `lastMintFailureMs` gives bounded retry (`mintRetryBackoffMs`, 15s). It cannot be expressed as
+  a blank-token cache entry - `resolveBrokered` would serve that while the deadline was ahead.
+
+**The interval and the backoff are constructor parameters, not constants.** Hard-coded, every
+test of them had to outwait them or be written around them, which is how an untested guard ends
+up wrong - and both of these *were* wrong first time.
+
+**The duration guards use `nanoTime`, the expiry cap uses wall time.** The interval floor and the
+retry backoff measure *elapsed* time, so a wall clock stepping backwards (VM resume, first NTP
+sync, a manual change) would make the difference negative and disable them for the length of the
+step - the same symptom as the wedge, from a different cause. The cap has to stay on
+`currentTimeMillis`, because it compares against an absolute timestamp the broker sent.
+
+**`reloadConnections` has a generation guard, and it is not covered by a test.** It mirrors the
+store's own: capture `invalidations.value`, skip the `_state.update` if it changed, so a refresh in
+flight when the user signs out cannot seat a pre-invalidate snapshot in front of every consumer.
+The obvious test for it passes either way, because the store's guard already refuses to seat a
+*minted* pre-invalidate token - `mintBrokered` returns blank and the provider reads as
+unconfigured. The remaining window needs a **cache hit** (not a mint) inside a reload slow enough
+to straddle the invalidate, which the current harness cannot arrange. Kept because it is cheap and
+mirrors a documented pattern; recorded here because it is unproven rather than proven.
+
+**Clock skew is asymmetric.** The cap compares `expiry - 30s` against the *local* clock, so a
+machine behind the broker under-caps (harmless) and one ahead over-caps into exactly the
+refresh loop the floor now bounds. The log line names the reported and effective windows so that
+case is greppable rather than mysterious.
+
+The refresh runs on `Dispatchers.IO` and wraps `reloadConnections` in `runCatching`. Both matter
+now that it can fire from any consumer read rather than only panel entry: `pluginScope` falls back
+to `Dispatchers.Main`, and a host `exchange`/`listSecrets` that throws instead of returning a
+failed `Result` would escape and cancel a scope that is not a supervisor - silently killing every
+later launch in the plugin. The in-flight flag is cleared from `invokeOnCompletion`, not a
+`finally`, so a body that never runs on an already-cancelled scope cannot latch it true.
+
+`BrokeredReadPathTest` covers this by driving the api rather than `loadAll`, and uses
+`runBlocking` with a real scope rather than `runTest`: the load ends up off the test dispatcher
+(the store has no `withContext` of its own - it relies on the host's suspend functions
+dispatching), so `advanceUntilIdle()` returns without waiting and every assertion reads an empty
+snapshot. It waits
+on `connectionsLoaded` and on the mint count instead of sleeping.
+
+Two traps that suite has already fallen into, both caught by mutation:
+
+- **Capturing a mint-count baseline while a refresh is in flight.** The helper reads the api
+  twice and the second read can itself trigger a refresh, so the in-flight guard then swallowed
+  the read under test. It settles the count first.
+- **Firing rapid reads to test the interval floor.** The in-flight guard alone collapses those
+  into one mint, so the test passed with the floor removed. The reads have to be *spaced* for the
+  floor to be the thing under test.
+
+Still open, and not this change's job: **nothing invalidates on a 401.** A credential that dies
+earlier than it claimed - revoked, or a gateway that miscomputes - still wedges until the (now
+shorter) window lapses. The durable fix is re-minting once on an auth failure, which needs a way
+for the gateway plugin to signal "this credential is dead".
+
 ### `ProviderRegistry.fixedModels` is not a return to hardcoded catalogues
 
 The gateway serves one model to one scoped key, so there is no models endpoint and nothing
@@ -314,7 +430,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 96 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 133 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

@@ -28,6 +28,11 @@ internal object BrokeredCredentialBridge {
                 BrokeredKey(
                     token = credential.token,
                     refreshAfterSeconds = credential.refreshAfterSeconds,
+                    // Read straight, no guard: `expiresAt` shipped in api 1.0.74 (verified in
+                    // the released jar), which is the same version this whole file already
+                    // requires - so on any host that can load this class the field exists. A
+                    // runCatching here would be dead code implying a risk that cannot occur.
+                    expiresAt = credential.expiresAt,
                 )
             }
         }

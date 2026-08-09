@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /** Everything the AI providers panel renders. */
 data class AiProvidersUiState(
@@ -57,6 +59,14 @@ class AiProvidersViewModel(
     private val splitViewOperations: SplitViewOperations?,
     private val scope: CoroutineScope,
     private val envResolver: EnvResolver,
+    /**
+     * Floor on how often a brokered refresh may run.
+     *
+     * A parameter rather than a constant so the floor itself is testable: with it hard-coded,
+     * every test of the refresh had to either wait it out or be written around it, which is how
+     * an untested guard ends up wrong.
+     */
+    private val minBrokeredRefreshIntervalMs: Long = DEFAULT_MIN_BROKERED_REFRESH_INTERVAL_MS,
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -65,6 +75,28 @@ class AiProvidersViewModel(
 
     /** Guards [ensureConnectionsLoaded] so concurrent callers load credentials once. */
     private val connectionsLoadStarted = AtomicBoolean(false)
+
+    /** Guards [refreshLapsedBrokeredCredential] so a burst of reads triggers one reload. */
+    private val brokeredRefreshInFlight = AtomicBoolean(false)
+
+    /**
+     * When the last brokered refresh *finished*, as a floor on how often one may run.
+     *
+     * The in-flight guard serialises refreshes but does not space them. A window that collapses to
+     * zero - a gateway minting keys shorter than the safety margin, or a local clock running ahead
+     * of the broker's - makes `brokeredCredentialLapsed` true again immediately after every
+     * successful mint, so a polling consumer would otherwise drive a continuous back-to-back loop
+     * of broker round-trips. (Not a re-page of the secret store: `loadStoredSecrets` returns from
+     * `cached` unless `invalidate()` has run.)
+     *
+     * `nanoTime`, because this measures an elapsed duration and a wall clock that steps backwards
+     * would make the difference negative and disable the refresh for the length of the step -
+     * which is the same symptom as the wedge this whole change fixes.
+     *
+     * Stamped on completion rather than at the start, so a reload slower than the interval does
+     * not leave the next read immediately eligible.
+     */
+    private val lastBrokeredRefreshNanos = AtomicLong(Long.MIN_VALUE / 2)
 
     private val _connectionsLoaded = MutableStateFlow(false)
 
@@ -526,8 +558,59 @@ class AiProvidersViewModel(
         )
     }
 
+    /**
+     * Re-mint [providerId]'s brokered credential if the cached one is past its reuse deadline.
+     *
+     * [ensureConnectionsLoaded] loads once and never again, so `state.connections` keeps
+     * serving whatever token that load captured. The expiry cap in `ProviderCredentialStore`
+     * cannot help on its own, because nothing calls `loadAll` between a panel visit and a
+     * secret edit - which is exactly the path a consumer like LLM RPA takes, and exactly how a
+     * dead key got re-sent for eleven minutes.
+     *
+     * Asynchronous because `activeConfig()` cannot suspend, so **this call still returns the
+     * stale token** and the next one is fresh. That trades one failed request for a wedge
+     * lasting the whole window, which is the right way round; making it synchronous would mean
+     * blocking a non-suspending api on a network mint.
+     *
+     * A no-op for providers that are not brokered, and while a refresh is already running.
+     */
+    fun refreshLapsedBrokeredCredential(providerId: String) {
+        val brokerId = ProviderRegistry.find(providerId)?.brokerId ?: return
+        val credentials = store ?: return
+        if (!credentials.brokeredCredentialLapsed(brokerId)) return
+        if (System.nanoTime() - lastBrokeredRefreshNanos.get() < minBrokeredRefreshIntervalMs * NANOS_PER_MILLI) {
+            return
+        }
+        if (!brokeredRefreshInFlight.compareAndSet(false, true)) return
+        // A refresh costs a broker round-trip, not a secret-store re-page: `loadStoredSecrets`
+        // returns from `cached` unless `invalidate()` has run. The floor is about the mint rate.
+        //
+        // IO because this can now fire from any consumer read, and `pluginScope` falls back to
+        // Dispatchers.Main. runCatching because a host `exchange`/`listSecrets` that throws rather
+        // than returning a failed Result would escape and cancel the scope - and a plain
+        // CoroutineScope(Main) is not a supervisor, so that would silently kill every later launch
+        // in the plugin. invokeOnCompletion rather than finally: if the scope is already cancelled
+        // the body never runs, and the flag would latch true forever - the same shape of latch as
+        // the bug this PR fixes.
+        scope
+            .launch(Dispatchers.IO) { runCatching { reloadConnections() } }
+            .invokeOnCompletion {
+                lastBrokeredRefreshNanos.set(System.nanoTime())
+                brokeredRefreshInFlight.set(false)
+            }
+    }
+
     private suspend fun reloadConnections() {
-        val reloaded = store?.loadAll() ?: return
+        val credentials = store ?: return
+        // Mirrors the store's own generation guard, one layer up. The store refuses to seat a
+        // `cached`/`brokeredCache` value from before an `invalidate()`, but the value consumers
+        // actually read is `_state.connections`, and that write was unguarded: a refresh already
+        // in flight when the user signs out or hits "Check access" could land last and re-seat the
+        // previous session's brokered token. Pre-existing, and far more likely now that any
+        // consumer read can start a reload.
+        val startedAt = credentials.invalidations.value
+        val reloaded = credentials.loadAll()
+        if (credentials.invalidations.value != startedAt) return
         _state.update { it.copy(connections = withPreferredModels(reloaded.connections)) }
     }
 
@@ -553,5 +636,17 @@ class AiProvidersViewModel(
         } finally {
             _state.update { it.copy(busyProviderIds = it.busyProviderIds - providerId) }
         }
+    }
+
+    private companion object {
+        /**
+         * Floor on how often a brokered refresh may run.
+         *
+         * Bounds the worst case when a credential is always immediately lapsed, which is what a
+         * collapsed reuse window means. Short enough that a genuine renewal is not delayed in any
+         * way a user would notice.
+         */
+        const val DEFAULT_MIN_BROKERED_REFRESH_INTERVAL_MS = 5_000L
+        const val NANOS_PER_MILLI = 1_000_000L
     }
 }

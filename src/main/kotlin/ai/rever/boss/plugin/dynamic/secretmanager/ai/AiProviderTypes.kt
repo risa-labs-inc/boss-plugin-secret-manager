@@ -192,6 +192,14 @@ data class BrokeredKey(
     val token: String,
     /** Seconds this credential may be reused before asking the broker again. */
     val refreshAfterSeconds: Long,
+    /**
+     * When the credential stops working, RFC 3339, or null when the broker did not say.
+     *
+     * Carried because [refreshAfterSeconds] alone cannot be trusted to end before the
+     * credential does: a broker that reports a reuse window outliving its own key wedges
+     * every request for the rest of that window. See `ProviderCredentialStore.reuseUntil`.
+     */
+    val expiresAt: String? = null,
 )
 
 /**
