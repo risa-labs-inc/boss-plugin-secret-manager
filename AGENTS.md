@@ -163,6 +163,47 @@ hit once already:
 the Gradle version. Comparing the reported version to the bundled `plugin.json` would be circular -
 both read the same file, so any value in it passes, and `1.0.9` is valid semver.
 
+### The panel is for everyone; two controls inside it are not
+
+`secret.read` reached the baseline `user` role in migration `20260809000000`, so every
+authenticated user gets this panel. Read that migration's header before assuming it widened
+anything: the vault has always been per-user server-side (grants to `authenticated`,
+`auth.uid()` self-scoping, RLS on `auth.uid() = user_id`), and `secret.read` was a
+client-side visibility gate translated forward verbatim from the pre-RBAC `requiresAdmin`
+flag. The practical consequence of leaving it admin-only was not that secrets were safer, it
+was that `DynamicPluginManager` skips `register()` for an inaccessible plugin - so no
+non-admin got `Settings > AI Providers`, and `PluginContext.llmProvider` was null in every
+other plugin. All AI in BOSS was admin-only by accident.
+
+What did NOT become everyone's is sharing with a **role**. `share_secret` gated role targets
+on `can_manage_secret` alone, i.e. any owner could share with any global role - including
+`user`, which is a descendant of every role and therefore means "everyone" (see
+`20260802010000`'s own header). That was survivable only while non-admins could not open this
+panel. It now requires `secret.share.role`, enforced in the RPC and mirrored here by
+`SecretManagerState.canShareWithRoles`, which hides the share dialog's Roles tab.
+
+Three things about that flag:
+
+- **It is collected, not read once.** The panel is constructed as soon as the plugin
+  registers, which can precede the permission claim landing, so a one-shot read in
+  `initialize()` leaves an admin looking at a hidden tab until they reopen the panel.
+  `observeRoleSharePermission` combines `userPermissions` and `isAdmin` - both, because
+  `hasPermission` answers true for an admin regardless of the permission set, so an admin
+  whose claim arrives without a permissions change still needs a recompute.
+- **It fails closed on a null `authDataProvider`**, and `selectedTab` is clamped back to
+  Users if the permission disappears while the dialog is open (remembered state does not
+  re-derive itself).
+- **It is not the enforcement.** The RPC is. `RoleShareGateTest` is mutation-verified:
+  hardcoding the flag true fails three cases (no permission, late arrival, revocation).
+
+Plugin Store API keys were already gated, on `api_key.create` via
+`PluginStoreApiKeyProvider.canManageApiKeys()`. Nothing changed there.
+
+`context.authDataProvider` is read on the always-taken registration path, so it has to
+predate the manifest floor: `getAuthDataProvider` is present in the released
+`boss-plugin-api-1.0.73.jar`, which is exactly `minApiVersion`. Verified with `javap`, not
+assumed.
+
 ### Provider keys are withheld from `secret_get`
 
 Storing provider keys as ordinary secrets buys encryption, RLS and an audit trail for free.

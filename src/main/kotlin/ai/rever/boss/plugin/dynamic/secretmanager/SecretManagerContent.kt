@@ -403,6 +403,7 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
             shares = state.secretShares,
             availableUsers = state.availableUsers,
             availableRoles = state.availableRoles,
+            canShareWithRoles = state.canShareWithRoles,
             onShare = { viewModel.shareSecret(it) },
             onRevoke = { userId, roleId ->
                 viewModel.unshareSecret(state.selectedSecret.id, userId, roleId)
@@ -1334,6 +1335,7 @@ private fun ShareSecretDialog(
     shares: List<SecretShareData>,
     availableUsers: List<ShareUserRow>,
     availableRoles: List<ShareRoleRow>,
+    canShareWithRoles: Boolean,
     onShare: (ShareSecretRequestData) -> Unit,
     onRevoke: (userId: String?, roleId: String?) -> Unit,
     onDismiss: () -> Unit,
@@ -1344,6 +1346,13 @@ private fun ShareSecretDialog(
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedTab by remember { mutableStateOf(0) } // 0 = Users, 1 = Roles
+    // A permission can be revoked while the dialog is open (the claim refreshes on a
+    // timer), and the Roles tab would otherwise stay rendered because selectedTab is
+    // remembered state, not derived from the permission.
+    val roleTabVisible = canShareWithRoles
+    if (!roleTabVisible && selectedTab == 1) {
+        selectedTab = 0
+    }
 
     BossDialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1440,11 +1449,18 @@ private fun ShareSecretDialog(
                         onClick = { selectedTab = 0 },
                         text = { Text("Users", fontSize = 12.sp) }
                     )
-                    Tab(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        text = { Text("Roles", fontSize = 12.sp) }
-                    )
+                    // Hidden without `secret.share.role`. A role share reaches every
+                    // holder of that role, and `user` is a descendant of every role, so
+                    // this tab is the one control in the panel that can publish a
+                    // credential deployment-wide. share_secret refuses it server-side
+                    // either way; this keeps a button that cannot work off the screen.
+                    if (roleTabVisible) {
+                        Tab(
+                            selected = selectedTab == 1,
+                            onClick = { selectedTab = 1 },
+                            text = { Text("Roles", fontSize = 12.sp) }
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))

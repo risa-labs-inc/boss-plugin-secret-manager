@@ -15,6 +15,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -24,6 +26,10 @@ private val json = Json { ignoreUnknownKeys = true }
 // Long enough to paste into an external tool, short enough that a copied
 // secret doesn't linger on the system clipboard indefinitely
 private const val CLIPBOARD_CLEAR_DELAY_MS = 45_000L
+
+// Server-side counterpart: share_secret refuses a role target without this
+// (migration 20260809000000). Held by admin and boss_admin, not by `user`.
+internal const val PERMISSION_SHARE_WITH_ROLE = "secret.share.role"
 
 // The host's SettingsSection enum entry for AI provider settings. Matched
 // case-insensitively by the host, and still named LLM_PROVIDERS for compatibility
@@ -53,7 +59,9 @@ class SecretManagerViewModel(
     private val settingsProvider: SettingsProvider? = null,
     private val windowId: String? = null,
     /** Opens a provider's key console, same affordance as the AI Providers panel. */
-    private val splitViewOperations: SplitViewOperations? = null
+    private val splitViewOperations: SplitViewOperations? = null,
+    /** Read-only: decides whether the share dialog offers role targets at all. */
+    private val authDataProvider: AuthDataProvider? = null
 ) {
     private val logger = BossLogger.forComponent("SecretManager")
 
@@ -81,8 +89,32 @@ class SecretManagerViewModel(
      */
     fun initialize() {
         state = state.copy(canAddAiProviderKey = aiProviderStore != null)
+        observeRoleSharePermission()
         if (secretDataProvider != null) {
             loadSecrets()
+        }
+    }
+
+    /**
+     * Keep [SecretManagerState.canShareWithRoles] in step with the signed-in user.
+     *
+     * Collected rather than read once in [initialize]: the panel is constructed as soon
+     * as the plugin registers, which can precede the permission claim landing, and a
+     * one-shot read would leave the Roles tab hidden for an admin until they reopened
+     * the panel. Both flows are combined because `hasPermission` answers true for an
+     * admin regardless of the permission set, so an admin whose claim arrives without
+     * a permissions change still needs a recompute.
+     */
+    private fun observeRoleSharePermission() {
+        val auth = authDataProvider ?: return
+        scope.launch {
+            combine(auth.userPermissions, auth.isAdmin) { _, _ ->
+                auth.hasPermission(PERMISSION_SHARE_WITH_ROLE)
+            }.collect { canShare ->
+                if (canShare != state.canShareWithRoles) {
+                    state = state.copy(canShareWithRoles = canShare)
+                }
+            }
         }
     }
 
@@ -946,6 +978,16 @@ data class SecretManagerState(
     val availableRoles: List<ShareRoleRow> = emptyList(),
     val isLoadingUsers: Boolean = false,
     val isLoadingRoles: Boolean = false,
+    /**
+     * Whether to offer role targets in the share dialog.
+     *
+     * A role share fans out to every holder, and `user` is a descendant of every role,
+     * so sharing with it publishes the credential to the whole deployment. Until
+     * 20260809000000 the only thing preventing that was that non-admins could not open
+     * this panel; now that everyone can, the server refuses an ungranted role share and
+     * this hides the tab that would produce one. UI convenience, not the enforcement.
+     */
+    val canShareWithRoles: Boolean = false,
     // Plugin Store API Key management
     val canManageApiKeys: Boolean = false,
     val showCreateApiKeyDialog: Boolean = false,

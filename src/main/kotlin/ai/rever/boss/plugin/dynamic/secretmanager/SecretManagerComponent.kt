@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
+import ai.rever.boss.plugin.api.AuthDataProvider
 import ai.rever.boss.plugin.api.PanelComponentWithUI
 import ai.rever.boss.plugin.api.PanelInfo
 import ai.rever.boss.plugin.api.PluginStoreApiKeyProvider
@@ -28,7 +29,8 @@ class SecretManagerComponent(
     private val aiProviderStore: ProviderCredentialStore? = null,
     private val settingsProvider: SettingsProvider? = null,
     private val windowId: String? = null,
-    private val splitViewOperations: SplitViewOperations? = null
+    private val splitViewOperations: SplitViewOperations? = null,
+    private val authDataProvider: AuthDataProvider? = null
 ) : PanelComponentWithUI, ComponentContext by ctx {
 
     // Created once per panel instance (not per composition), so secrets stay
@@ -43,7 +45,8 @@ class SecretManagerComponent(
         aiProviderStore,
         settingsProvider,
         windowId,
-        splitViewOperations
+        splitViewOperations,
+        authDataProvider
     ).also { it.initialize() }
 
     @Composable

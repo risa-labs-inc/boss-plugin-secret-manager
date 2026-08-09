@@ -88,7 +88,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 aiProviderStore = credentialStore,
                 settingsProvider = context.settingsProvider,
                 windowId = context.windowId,
-                splitViewOperations = context.splitViewOperations
+                splitViewOperations = context.splitViewOperations,
+                authDataProvider = context.authDataProvider
             )
         }
 
