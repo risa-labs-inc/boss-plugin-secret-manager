@@ -92,7 +92,7 @@ ungated, and sharing with an organisation already requires membership of it.
 ```bash
 ./gradlew buildPluginJar
 cp build/libs/boss-plugin-secret-manager-*.jar ~/.boss/plugins/
-./gradlew test    # 149 host-independent cases, no live credential needed
+./gradlew test    # 152 host-independent cases, no live credential needed
 ```
 
 Do not delete `compose-stability.conf`. It stops the Compose compiler emitting a `$stable` read

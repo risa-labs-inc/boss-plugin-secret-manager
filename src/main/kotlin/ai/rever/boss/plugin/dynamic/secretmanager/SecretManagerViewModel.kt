@@ -90,8 +90,10 @@ class SecretManagerViewModel(
      * `loadJob`, so `dispose`'s cancel cannot reach an in-flight initial load either. Save a
      * secret - or just open the panel - close it before the round-trip returns, and the
      * plaintext list comes back on a ViewModel nobody can see: the exact state [dispose]
-     * documents itself as preventing. Hence the flag is checked both on entry to
-     * [loadSecrets] and again before its state write.
+     * documents itself as preventing. Hence the flag is checked on entry to [loadSecrets]
+     * and again before **every** state write that sets `secrets` ([loadSecrets],
+     * [searchSecrets], [loadMoreSecrets]) - local to each write, rather than depending on the
+     * host provider returning cancellation by throwing.
      *
      * `deleteSecret` needs no guard: it filters the existing list, which [dispose] has already
      * emptied, so it cannot repopulate.
@@ -285,6 +287,7 @@ class SecretManagerViewModel(
             result?.onSuccess { paginatedResult ->
                 val newSecrets = paginatedResult.data
                 logTiming("getUserSecrets(offset=${state.currentOffset})", elapsedMs, "${newSecrets.size} secrets")
+                if (disposed) return@onSuccess
                 state = state.copy(
                     secrets = state.secrets + newSecrets,
                     isLoadingMore = false,
@@ -335,6 +338,13 @@ class SecretManagerViewModel(
 
             result?.onSuccess { paginatedResult ->
                 logTiming("searchSecrets", elapsedMs, "${paginatedResult.data.size} secrets")
+                // Same reason as loadSecrets: `?.onFailure { if (exception is
+                // CancellationException) ... }` below is this code conceding the provider can
+                // hand cancellation back as a returned Result rather than throwing at the
+                // suspension point. Where it does, the resumption is not cancelled and there
+                // is no suspension point before this write, so searchJob?.cancel() alone does
+                // not stop the decrypted list landing after dispose.
+                if (disposed) return@onSuccess
                 state = state.copy(
                     secrets = paginatedResult.data,
                     isLoading = false,
@@ -724,11 +734,12 @@ class SecretManagerViewModel(
         // the dialog is the only caller, but that makes the invariant rest on the UI being
         // the sole entry point. Checked here so it holds for any future caller too.
         if (request.targetRoleId != null && !state.canShareWithRoles) {
+            // Log and return without touching state. `errorMessage` renders in the panel
+            // body *behind* the modal, so the user would see nothing now and an error page
+            // after closing; and clearing isOperationInProgress here would stomp a flag this
+            // call never set, killing the spinner of a genuinely in-flight operation.
+            // Unreachable from the UI (the tab is hidden) - this exists for a future caller.
             logger.warn(LogCategory.SYSTEM, "Refusing a role share without $PERMISSION_SHARE_WITH_ROLE")
-            state = state.copy(
-                isOperationInProgress = false,
-                errorMessage = "You do not have permission to share with a role.",
-            )
             return
         }
 
@@ -837,12 +848,20 @@ class SecretManagerViewModel(
             val startedAt = System.nanoTime()
             val result = supabaseDataProvider?.select(table = "roles", columns = "id,name,description")
 
-            result?.onSuccess { jsonStr ->
+            // Without this, a null supabaseDataProvider (documented optional) runs neither
+            // callback: the Roles tab spins forever, AND observeRoleSharePermission's kick is
+            // gated on !isLoadingRoles, so a later permission grant can never retry it.
+            if (result == null) {
+                state = state.copy(isLoadingRoles = false)
+                return@launch
+            }
+
+            result.onSuccess { jsonStr ->
                 val roles = json.decodeFromString<List<ShareRoleRow>>(jsonStr)
                 logTiming("select(roles)", elapsedMsSince(startedAt), "${roles.size} roles")
                 rolesLoaded = true
                 state = state.copy(availableRoles = roles, isLoadingRoles = false)
-            }?.onFailure { exception ->
+            }.onFailure { exception ->
                 val error = exception.message ?: "Unknown error"
                 logTiming("select(roles)", elapsedMsSince(startedAt), error, failed = true)
                 state = state.copy(

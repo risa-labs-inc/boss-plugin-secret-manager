@@ -233,6 +233,13 @@ exposure traded for a bounded in-memory one.
 Plugin Store API keys were already gated, on `api_key.create` via
 `PluginStoreApiKeyProvider.canManageApiKeys()`. Nothing changed there.
 
+`lifecycle.doOnDestroy` is this plugin's first **Essenty extension** symbol (previously only
+`ComponentContext` / `lifecycle`), and it sits on the always-taken component-construction path.
+`buildPluginJar` packages only `sourceSets.main.output`, so `LifecycleExtKt` comes from the host
+at runtime. Checked with `javap` rather than assumed: `doOnDestroy` is present in
+`lifecycle-jvm-2.4.0` and `2.5.0` (the plugin compiles against 2.5.0), so a host on either is
+fine.
+
 `context.authDataProvider` is read on the always-taken registration path, and so are the four
 `AuthDataProvider` members the ViewModel touches - a member newer than the floor is a
 `NoSuchMethodError` there that takes the whole plugin down, not just the AI section. All five
@@ -513,7 +520,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 149 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 152 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

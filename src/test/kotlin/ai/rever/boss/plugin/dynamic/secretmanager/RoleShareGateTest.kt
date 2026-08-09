@@ -6,6 +6,7 @@ import ai.rever.boss.plugin.api.QueryRange
 import ai.rever.boss.plugin.api.PaginatedSecretsData
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.api.ShareSecretRequestData
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.api.UserData
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.FakeSecretDataProvider
@@ -239,6 +240,52 @@ class RoleShareGateTest {
         assertEquals("", vm.state.aiProviderKeyDraft)
     }
 
+    /**
+     * The ViewModel-level refusal, which the dialog cannot currently reach (the tab is
+     * hidden) - so without these two cases the guard could be deleted and nothing would
+     * notice, which is the whole reason it exists.
+     */
+    @Test
+    fun `shareSecret refuses a role target without the permission`() = runTest {
+        val secrets = RecordingShares()
+        val (vm, _) = viewModel(this, permissions = emptySet(), secrets = secrets)
+        advanceUntilIdle()
+
+        vm.shareSecret(ShareSecretRequestData(secretId = "s1", targetRoleId = "r1"))
+        advanceUntilIdle()
+
+        assertEquals(0, secrets.shares.size, "the request must not reach the provider")
+    }
+
+    /**
+     * The half that matters more: a guard that also blocked the legitimate path would only
+     * show up on a host, because the dialog is the only caller today.
+     */
+    @Test
+    fun `shareSecret allows a role target with the permission`() = runTest {
+        val secrets = RecordingShares()
+        val (vm, _) = viewModel(this, permissions = setOf("secret.share.role"), secrets = secrets)
+        advanceUntilIdle()
+
+        vm.shareSecret(ShareSecretRequestData(secretId = "s1", targetRoleId = "r1"))
+        advanceUntilIdle()
+
+        assertEquals(1, secrets.shares.size, "a permitted role share must go through")
+    }
+
+    /** A user target is never gated - one named recipient, not a fan-out. */
+    @Test
+    fun `shareSecret allows a user target without the permission`() = runTest {
+        val secrets = RecordingShares()
+        val (vm, _) = viewModel(this, permissions = emptySet(), secrets = secrets)
+        advanceUntilIdle()
+
+        vm.shareSecret(ShareSecretRequestData(secretId = "s1", targetUserId = "u1"))
+        advanceUntilIdle()
+
+        assertEquals(1, secrets.shares.size, "user shares must stay ungated")
+    }
+
     /** A host too old to supply the provider must fail closed, not open. */
     @Test
     fun `a null auth provider fails closed`() = runTest {
@@ -279,6 +326,16 @@ class RoleShareGateTest {
             authDataProvider = auth,
         ).also { it.initialize() }
         return vm to auth
+    }
+
+    /** Records what actually reached the provider, so a refusal can be told from a no-op. */
+    private class RecordingShares : SecretDataProvider by FakeSecretDataProvider(emptyList()) {
+        val shares = mutableListOf<ShareSecretRequestData>()
+
+        override suspend fun shareSecret(request: ShareSecretRequestData): Result<Unit> {
+            shares += request
+            return Result.success(Unit)
+        }
     }
 
     /** Holds the first read until [gate] completes, so a dispose can land mid-flight. */
