@@ -108,7 +108,16 @@ class ProviderCredentialStore(
      * Note this cannot be expressed as a blank-token cache entry: `resolveBrokered` would serve
      * it while the deadline was in the future.
      */
-    private val lastMintFailureMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val lastMintFailureNanos = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * Brokers whose reuse window is currently being shortened by the expiry, so the log line
+     * fires on the transition rather than on every mint.
+     *
+     * In the case that motivated this cap the condition is *constant* and the read path can mint
+     * every few seconds, which would be hundreds of identical INFO lines an hour.
+     */
+    private val cappedBrokers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** Per-broker mint lock, created on first use. */
     private val brokeredMintLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
@@ -165,7 +174,8 @@ class ProviderCredentialStore(
         // Brokered credentials go too. Sign-out is one of the things that invalidates,
         // and a credential minted for the previous session must not outlive it.
         brokeredCache.clear()
-        lastMintFailureMs.clear()
+        lastMintFailureNanos.clear()
+        cappedBrokers.clear()
         _invalidations.value = _invalidations.value + 1
     }
 
@@ -281,8 +291,13 @@ class ProviderCredentialStore(
         // Nothing cached. True only when a mint failed long enough ago to be worth retrying:
         // answering true unconditionally would hammer the broker before the first success, and
         // answering false always made a failure terminal on this path.
-        val failedAt = lastMintFailureMs[brokerId] ?: return false
-        return now - failedAt >= mintRetryBackoffMs
+        // nanoTime, not the wall clock: this measures an elapsed duration, and a clock that
+        // steps backwards (VM resume, first NTP sync, a manual change) would make the difference
+        // negative and hold the retry off for the length of the step - re-creating this exact
+        // wedge from a different cause. The expiry comparison above genuinely needs wall time,
+        // because it is checked against an absolute timestamp from the broker.
+        val failedAt = lastMintFailureNanos[brokerId] ?: return false
+        return System.nanoTime() - failedAt >= mintRetryBackoffMs * NANOS_PER_MILLI
     }
 
     /**
@@ -303,7 +318,10 @@ class ProviderCredentialStore(
      * An unparseable or absent expiry falls back to the window as reported, which is the
      * behaviour before this cap existed.
      */
-    private fun reuseUntil(credential: BrokeredKey): Long {
+    private fun reuseUntil(
+        brokerId: String,
+        credential: BrokeredKey,
+    ): Long {
         val now = System.currentTimeMillis()
         // coerceIn, not coerceAtLeast: an absurd reported window overflows the multiply and
         // wraps the sum negative, which would read as "already lapsed" forever.
@@ -312,18 +330,27 @@ class ProviderCredentialStore(
         val expiry = credential.expiresAt?.let(::expiryMillis) ?: return window
         val capped = minOf(window, expiry - EXPIRY_SAFETY_MARGIN_MS).coerceAtLeast(now)
         if (capped < window) {
+            if (cappedBrokers.add(brokerId)) {
             // Without this, a gateway minting keys shorter than the safety margin - or a local
             // clock running ahead of the broker's - silently turns every read into a network
             // mint, with nothing in the log connecting the slowness to expiry handling. That
             // is the same un-diagnosable shape as the bug this cap fixes.
-            logger.info(
-                LogCategory.SYSTEM,
-                "Brokered credential expiry shortened its reuse window",
-                mapOf(
-                    "reportedWindowSeconds" to credential.refreshAfterSeconds,
-                    "effectiveWindowSeconds" to (capped - now) / MILLIS_PER_SECOND,
-                ),
-            )
+                logger.info(
+                    LogCategory.SYSTEM,
+                    "Brokered credential expiry shortened its reuse window",
+                    mapOf(
+                        "broker" to brokerId,
+                        // Not a secret, and the first thing wanted when the question is which
+                        // gateway is misreporting and what it actually sent.
+                        "expiresAt" to (credential.expiresAt ?: "absent"),
+                        "reportedWindowSeconds" to credential.refreshAfterSeconds,
+                        // Floors to 0 for a sub-second window, which reads as "mint every time".
+                        "effectiveWindowSeconds" to (capped - now) / MILLIS_PER_SECOND,
+                    ),
+                )
+            }
+        } else {
+            cappedBrokers.remove(brokerId)
         }
         return capped
     }
@@ -383,19 +410,19 @@ class ProviderCredentialStore(
             .fetch(brokerId)
             .fold(
                 onSuccess = { credential ->
-                    lastMintFailureMs.remove(brokerId)
+                    lastMintFailureNanos.remove(brokerId)
                     if (generation.get() == startedAt) {
                         brokeredCache[brokerId] =
                             CachedBrokeredKey(
                                 token = credential.token,
-                                reuseUntilMs = reuseUntil(credential),
+                                reuseUntilMs = reuseUntil(brokerId, credential),
                             )
                     }
                     credential.token
                 },
                 onFailure = { error ->
                     brokeredCache.remove(brokerId)
-                    lastMintFailureMs[brokerId] = System.currentTimeMillis()
+                    lastMintFailureNanos[brokerId] = System.nanoTime()
                     logger.info(
                         LogCategory.SYSTEM,
                         "Brokered credential unavailable",
@@ -661,6 +688,7 @@ class ProviderCredentialStore(
         private const val PAGE_SIZE = 100
         private const val MAX_SCANNED = 2000
         private const val MILLIS_PER_SECOND = 1000L
+        private const val NANOS_PER_MILLI = 1_000_000L
 
         /**
          * Taken off a credential's expiry before caching it.

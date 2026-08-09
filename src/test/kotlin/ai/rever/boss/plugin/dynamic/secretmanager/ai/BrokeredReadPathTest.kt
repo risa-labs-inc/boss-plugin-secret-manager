@@ -56,6 +56,7 @@ class BrokeredReadPathTest {
     private class Harness(
         val api: LlmProviderSettingsApiImpl,
         val viewModel: AiProvidersViewModel,
+        val store: ProviderCredentialStore,
     )
 
     private fun tempDir(prefix: String): File = Files.createTempDirectory(prefix).toFile()
@@ -94,7 +95,7 @@ class BrokeredReadPathTest {
                 envResolver = env,
                 minBrokeredRefreshIntervalMs = minRefreshIntervalMs,
             )
-        return Harness(LlmProviderSettingsApiImpl(viewModel), viewModel)
+        return Harness(LlmProviderSettingsApiImpl(viewModel), viewModel, store)
     }
 
     /** The first read only kicks the async load; this waits for the snapshot to exist. */
@@ -203,7 +204,11 @@ class BrokeredReadPathTest {
                 }
             val harness = harnessWith(source)
 
-            assertEquals("sk-1", harness.loadedConfig()?.apiKey)
+            // Deliberately not asserting the snapshot still holds sk-1 first: `loadedConfig`'s
+            // second read itself triggers the refresh, and with an in-memory source the launched
+            // reload can land before the calling thread's next field read. That race is one field
+            // read wide and would almost always win, which is the worst kind of flake.
+            assertNotNull(harness.loadedConfig(), "activeConfig stayed null after the load")
 
             harness.api.activeConfig()
             source.awaitCalls(2)
@@ -280,8 +285,8 @@ class BrokeredReadPathTest {
     fun `the refresh interval floor bounds a permanently lapsed credential`() =
         runBlocking {
             // A window that collapses to zero makes the credential lapsed again immediately after
-            // every mint, so without a floor a polling consumer drives a continuous loop of
-            // full loadAll() scans.
+            // every mint, so without a floor a polling consumer drives a continuous loop of broker
+            // round-trips. (Not secret-store re-pages: `loadStoredSecrets` returns from `cached`.)
             val source =
                 CountingSource { issued ->
                     Result.success(

@@ -364,6 +364,21 @@ the store-level tests would still have passed, because they call `loadAll` direc
 test of them had to outwait them or be written around them, which is how an untested guard ends
 up wrong - and both of these *were* wrong first time.
 
+**The duration guards use `nanoTime`, the expiry cap uses wall time.** The interval floor and the
+retry backoff measure *elapsed* time, so a wall clock stepping backwards (VM resume, first NTP
+sync, a manual change) would make the difference negative and disable them for the length of the
+step - the same symptom as the wedge, from a different cause. The cap has to stay on
+`currentTimeMillis`, because it compares against an absolute timestamp the broker sent.
+
+**`reloadConnections` has a generation guard, and it is not covered by a test.** It mirrors the
+store's own: capture `invalidations.value`, skip the `_state.update` if it changed, so a refresh in
+flight when the user signs out cannot seat a pre-invalidate snapshot in front of every consumer.
+The obvious test for it passes either way, because the store's guard already refuses to seat a
+*minted* pre-invalidate token - `mintBrokered` returns blank and the provider reads as
+unconfigured. The remaining window needs a **cache hit** (not a mint) inside a reload slow enough
+to straddle the invalidate, which the current harness cannot arrange. Kept because it is cheap and
+mirrors a documented pattern; recorded here because it is unproven rather than proven.
+
 **Clock skew is asymmetric.** The cap compares `expiry - 30s` against the *local* clock, so a
 machine behind the broker under-caps (harmless) and one ahead over-caps into exactly the
 refresh loop the floor now bounds. The log line names the reported and effective windows so that
@@ -415,7 +430,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 96 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 133 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
