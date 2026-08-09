@@ -296,6 +296,41 @@ Mutation-verified: narrowing `hasKnownModels` back to `modelsEndpoint != null` f
   finds the first one's result. The explicit `reloadConnections()` stays because the next
   line reads `_state.value` to report the outcome.
 
+### The reuse window is capped by the credential's own expiry
+
+`ProviderCredentialStore.reuseUntil` caches a brokered credential for
+`min(refreshAfterSeconds, expiresAt - 30s)`, not for the window the broker reported.
+
+Trusting the window alone wedges the provider for its whole duration whenever a broker
+reports a window that outlives its key, and that is not hypothetical. RISA's gateway
+reported an hour-long reuse window on a key that expired in about three minutes; LLM RPA
+then failed `401 Authentication Error - Expired Key` on three consecutive runs spanning
+eleven minutes, re-sending the same dead token each time, because nothing re-minted until
+the window lapsed. Only a plugin reload (which drops the memory-only cache) cleared it.
+
+Three things worth keeping right:
+
+- **The api calls `expiresAt` "informational" and `refreshAfterSeconds` the thing to act
+  on.** This acts on both, deliberately: the window is still what bounds reuse, the expiry
+  only ever shortens it. A broker that wants renewal well before expiry keeps that.
+- **The expiry parser is tolerant on purpose.** The api documents RFC 3339, but the value
+  originates in LiteLLM and has been seen space-separated instead of `T`-separated, and
+  offset-less. A parser accepting only the documented shape returns null for the real value
+  and silently disables the cap - which is worse than no cap, because it looks fixed.
+  Offset-less is read as UTC, which is what LiteLLM stores.
+- **Absent or unparseable falls back to the reported window**, i.e. exactly the old
+  behaviour. Failing closed instead would re-mint on every read for any broker that omits
+  the field.
+
+`BrokeredCredentialBridge` reads `credential.expiresAt` through `runCatching`, because that
+field is newer than this plugin's api floor (1.0.73) and losing the cross-check on an older
+host is far better than losing the AI section.
+
+Still open, and not this cap's job: **nothing invalidates on a 401.** A credential that dies
+earlier than its stated expiry - revoked, or a gateway that miscomputes - still wedges until
+the (now shorter) window lapses. The durable fix is re-minting once on an auth failure,
+which needs a way for the gateway plugin to signal "this credential is dead".
+
 ### `ProviderRegistry.fixedModels` is not a return to hardcoded catalogues
 
 The gateway serves one model to one scoped key, so there is no models endpoint and nothing

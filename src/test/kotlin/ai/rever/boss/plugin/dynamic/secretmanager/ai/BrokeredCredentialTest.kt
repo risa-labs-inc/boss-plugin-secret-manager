@@ -42,6 +42,13 @@ class BrokeredCredentialTest {
         }
     }
 
+    /** An expiry [secondsFromNow] ahead, in the shape the api documents. */
+    private fun rfc3339(secondsFromNow: Long): String =
+        java.time.OffsetDateTime
+            .now(java.time.ZoneOffset.UTC)
+            .plusSeconds(secondsFromNow)
+            .toString()
+
     private fun storeWith(source: BrokeredKeySource?): Pair<ProviderCredentialStore, FakeSecretDataProvider> {
         val secrets = FakeSecretDataProvider(emptyList())
         val store = ProviderCredentialStore(secrets, envWith())
@@ -88,6 +95,114 @@ class BrokeredCredentialTest {
             store.loadAll()
 
             assertEquals(1, source.calls, "the broker is a real resource; three reads must not mint three keys")
+        }
+
+    @Test
+    fun `a credential is not reused past its own expiry`() =
+        runTest {
+            // The incident this exists for: RISA's gateway reported an hour-long reuse window
+            // on a key that expired in three minutes. LLM RPA then re-sent the same dead key
+            // for eleven minutes, failing `401 Expired Key` every time, because nothing
+            // re-minted until the *window* lapsed.
+            val source =
+                CountingSource(
+                    Result.success(
+                        BrokeredKey(
+                            "sk-brokered",
+                            refreshAfterSeconds = 3600,
+                            expiresAt = rfc3339(secondsFromNow = 3),
+                        ),
+                    ),
+                )
+            val (store, _) = storeWith(source)
+
+            store.loadAll()
+            store.loadAll()
+
+            // The expiry is inside the safety margin, so the window collapses to "mint every
+            // time" rather than handing out a credential that dies mid-request.
+            assertEquals(2, source.calls, "reused a credential that had already expired")
+        }
+
+    @Test
+    fun `a credential with plenty of life left is still reused`() =
+        runTest {
+            // The cap must not defeat reuse: an expiry comfortably beyond the window leaves the
+            // broker's own window in charge, which is what keeps mints bounded.
+            val source =
+                CountingSource(
+                    Result.success(
+                        BrokeredKey(
+                            "sk-brokered",
+                            refreshAfterSeconds = 60,
+                            expiresAt = rfc3339(secondsFromNow = 3600),
+                        ),
+                    ),
+                )
+            val (store, _) = storeWith(source)
+
+            store.loadAll()
+            store.loadAll()
+
+            assertEquals(1, source.calls, "re-minted a credential that was still good")
+        }
+
+    @Test
+    fun `an unreadable expiry falls back to the broker's window`() =
+        runTest {
+            // Absent or unparseable must behave exactly as before the cap existed, or a broker
+            // that omits the field would be re-minted on every single read.
+            listOf(null, "not a timestamp", "").forEach { expiry ->
+                val source =
+                    CountingSource(
+                        Result.success(
+                            BrokeredKey("sk-brokered", refreshAfterSeconds = 3600, expiresAt = expiry),
+                        ),
+                    )
+                val (store, _) = storeWith(source)
+
+                store.loadAll()
+                store.loadAll()
+
+                assertEquals(1, source.calls, "expiry $expiry should not have disabled reuse")
+            }
+        }
+
+    @Test
+    fun `the expiry is read in the shapes the broker actually sends`() =
+        runTest {
+            // The api documents RFC 3339, but this value comes from LiteLLM and has been seen
+            // space-separated and offset-less. A parser that only took the documented form
+            // would return null for the real value and silently disable the cap.
+            val instant = java.time.Instant.now().plusSeconds(3)
+            val shapes =
+                listOf(
+                    java.time.OffsetDateTime.ofInstant(instant, java.time.ZoneOffset.UTC).toString(),
+                    java.time.LocalDateTime.ofInstant(instant, java.time.ZoneOffset.UTC).toString(),
+                    java.time.LocalDateTime
+                        .ofInstant(instant, java.time.ZoneOffset.UTC)
+                        .toString()
+                        .replace('T', ' '),
+                    java.time.LocalDateTime
+                        .ofInstant(instant, java.time.ZoneOffset.UTC)
+                        .toString()
+                        .replace('T', ' ') + "+00:00",
+                )
+
+            shapes.forEach { shape ->
+                val source =
+                    CountingSource(
+                        Result.success(
+                            BrokeredKey("sk-brokered", refreshAfterSeconds = 3600, expiresAt = shape),
+                        ),
+                    )
+                val (store, _) = storeWith(source)
+
+                store.loadAll()
+                store.loadAll()
+
+                assertEquals(2, source.calls, "expiry shape $shape was not understood")
+            }
         }
 
     @Test

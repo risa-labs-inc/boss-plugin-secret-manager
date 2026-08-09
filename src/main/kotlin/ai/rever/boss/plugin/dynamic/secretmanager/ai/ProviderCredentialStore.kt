@@ -241,6 +241,52 @@ class ProviderCredentialStore(
         }
     }
 
+    /**
+     * When a freshly minted credential stops being reusable.
+     *
+     * The broker's own reuse window, **capped by the credential's expiry**. Trusting the
+     * window alone wedges every request for its duration when a broker reports a window
+     * that outlives its key: that is not hypothetical - RISA's gateway did exactly that,
+     * and LLM RPA failed with `401 Expired Key` on a cached token for eleven minutes,
+     * re-sending the same dead key every time because nothing re-minted until the window
+     * lapsed.
+     *
+     * A margin comes off the expiry because a credential that dies mid-flight is a failed
+     * request either way, and re-minting is cheap next to that - the per-broker mint lock
+     * already stops a stampede. A window that computes to zero or less simply means "mint
+     * every time", which is correct rather than degraded.
+     *
+     * An unparseable or absent expiry falls back to the window as reported, which is the
+     * behaviour before this cap existed.
+     */
+    private fun reuseUntil(credential: BrokeredKey): Long {
+        val now = System.currentTimeMillis()
+        val window = now + credential.refreshAfterSeconds.coerceAtLeast(0) * MILLIS_PER_SECOND
+        val expiry = credential.expiresAt?.let(::expiryMillis) ?: return window
+        return minOf(window, expiry - EXPIRY_SAFETY_MARGIN_MS).coerceAtLeast(now)
+    }
+
+    /**
+     * An RFC 3339 instant in epoch millis, or null when it cannot be read.
+     *
+     * More than one shape is accepted on purpose. The api documents RFC 3339, but the value
+     * originates in LiteLLM and has been seen space-separated rather than `T`-separated, and
+     * offset-less. A parser that only accepted the documented form would silently return null
+     * for the real value and disable the cap it exists to enforce - so the tolerant reader is
+     * the point, not laziness. An offset-less timestamp is read as UTC, which is what LiteLLM
+     * stores.
+     */
+    private fun expiryMillis(raw: String): Long? {
+        val text = raw.trim().replace(' ', 'T')
+        return runCatching { java.time.OffsetDateTime.parse(text).toInstant().toEpochMilli() }
+            .recoverCatching {
+                java.time.LocalDateTime
+                    .parse(text)
+                    .toInstant(java.time.ZoneOffset.UTC)
+                    .toEpochMilli()
+            }.getOrNull()
+    }
+
     private suspend fun mintBrokered(
         source: BrokeredKeySource,
         brokerId: String,
@@ -259,9 +305,7 @@ class ProviderCredentialStore(
                         brokeredCache[brokerId] =
                             CachedBrokeredKey(
                                 token = credential.token,
-                                reuseUntilMs =
-                                    System.currentTimeMillis() +
-                                        credential.refreshAfterSeconds.coerceAtLeast(0) * MILLIS_PER_SECOND,
+                                reuseUntilMs = reuseUntil(credential),
                             )
                     }
                     credential.token
@@ -533,6 +577,14 @@ class ProviderCredentialStore(
         private const val PAGE_SIZE = 100
         private const val MAX_SCANNED = 2000
         private const val MILLIS_PER_SECOND = 1000L
+
+        /**
+         * Taken off a credential's expiry before caching it.
+         *
+         * Covers a request already in flight and clock skew between this machine and the
+         * broker. Deliberately generous relative to a mint, which is one fast HTTP call.
+         */
+        private const val EXPIRY_SAFETY_MARGIN_MS = 30_000L
     }
 }
 
