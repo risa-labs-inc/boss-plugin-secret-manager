@@ -526,6 +526,39 @@ class AiProvidersViewModel(
         )
     }
 
+    /** Guards [refreshLapsedBrokeredCredential] so a burst of reads triggers one reload. */
+    private val brokeredRefreshInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Re-mint [providerId]'s brokered credential if the cached one is past its reuse deadline.
+     *
+     * [ensureConnectionsLoaded] loads once and never again, so `state.connections` keeps
+     * serving whatever token that load captured. The expiry cap in `ProviderCredentialStore`
+     * cannot help on its own, because nothing calls `loadAll` between a panel visit and a
+     * secret edit - which is exactly the path a consumer like LLM RPA takes, and exactly how a
+     * dead key got re-sent for eleven minutes.
+     *
+     * Asynchronous because `activeConfig()` cannot suspend, so **this call still returns the
+     * stale token** and the next one is fresh. That trades one failed request for a wedge
+     * lasting the whole window, which is the right way round; making it synchronous would mean
+     * blocking a non-suspending api on a network mint.
+     *
+     * A no-op for providers that are not brokered, and while a refresh is already running.
+     */
+    fun refreshLapsedBrokeredCredential(providerId: String) {
+        val brokerId = ProviderRegistry.find(providerId)?.brokerId ?: return
+        val credentials = store ?: return
+        if (!credentials.brokeredCredentialLapsed(brokerId)) return
+        if (!brokeredRefreshInFlight.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                reloadConnections()
+            } finally {
+                brokeredRefreshInFlight.set(false)
+            }
+        }
+    }
+
     private suspend fun reloadConnections() {
         val reloaded = store?.loadAll() ?: return
         _state.update { it.copy(connections = withPreferredModels(reloaded.connections)) }

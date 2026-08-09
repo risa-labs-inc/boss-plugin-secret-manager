@@ -28,12 +28,11 @@ internal object BrokeredCredentialBridge {
                 BrokeredKey(
                     token = credential.token,
                     refreshAfterSeconds = credential.refreshAfterSeconds,
-                    // Guarded rather than read straight: `expiresAt` is newer than this
-                    // file's other api symbols, and this plugin's floor is api 1.0.73. On a
-                    // host whose api jar predates the field the read would throw
-                    // NoSuchMethodError, and losing the expiry cross-check is a far better
-                    // outcome than losing the AI section.
-                    expiresAt = runCatching { credential.expiresAt }.getOrNull(),
+                    // Read straight, no guard: `expiresAt` shipped in api 1.0.74 (verified in
+                    // the released jar), which is the same version this whole file already
+                    // requires - so on any host that can load this class the field exists. A
+                    // runCatching here would be dead code implying a risk that cannot occur.
+                    expiresAt = credential.expiresAt,
                 )
             }
         }

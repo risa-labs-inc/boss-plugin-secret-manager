@@ -322,14 +322,38 @@ Three things worth keeping right:
   behaviour. Failing closed instead would re-mint on every read for any broker that omits
   the field.
 
-`BrokeredCredentialBridge` reads `credential.expiresAt` through `runCatching`, because that
-field is newer than this plugin's api floor (1.0.73) and losing the cross-check on an older
-host is far better than losing the AI section.
+`BrokeredCredential.expiresAt` shipped in api **1.0.74**, verified in the released jar - the
+same version `BrokeredCredentialBridge` already requires for `BrokeredCredentialProvider`. So it
+is read straight, with no `runCatching`: on any host that can load that class the field exists,
+and a guard there would be dead code implying a risk that cannot occur. Add it to the
+"Linkage containment" list above if that file ever gains a newer symbol.
 
-Still open, and not this cap's job: **nothing invalidates on a 401.** A credential that dies
-earlier than its stated expiry - revoked, or a gateway that miscomputes - still wedges until
-the (now shorter) window lapses. The durable fix is re-minting once on an auth failure,
-which needs a way for the gateway plugin to signal "this credential is dead".
+**The cap alone was not enough, and that is the part worth remembering.**
+`ProviderCredentialStore.brokeredCache` is not what hands a token to a consumer.
+`LlmProviderSettingsApiImpl.activeConfig` reads `state.connections`, which
+`ensureConnectionsLoaded` fills exactly once (`compareAndSet(false, true)`), and nothing else
+calls `loadAll` between a panel visit and a secret edit. So the cap could shorten a window that
+nobody ever re-read: the eleven-minute wedge would have reproduced with the cap in place, and
+the store-level tests would still have passed, because they call `loadAll` directly.
+
+`activeConfig` therefore calls `refreshLapsedBrokeredCredential`, which asks
+`brokeredCredentialLapsed` and kicks an async `reloadConnections`. Two consequences to keep:
+
+- **That call still returns the stale token**; the next one is fresh. `activeConfig` cannot
+  suspend, so the alternative was blocking a non-suspending api on a network mint. One failed
+  request beats a wedge lasting the whole window.
+- **It is guarded by an in-flight flag**, so a burst of reads triggers one reload rather than
+  one per read.
+
+`BrokeredReadPathTest` covers this by driving `activeConfig()`, and uses `runBlocking` with a
+real scope rather than `runTest`: the load parks on `Dispatchers.IO`, so `advanceUntilIdle()`
+returns without waiting and every assertion reads an empty snapshot. It waits on
+`connectionsLoaded` and on the mint count instead of sleeping.
+
+Still open, and not this change's job: **nothing invalidates on a 401.** A credential that dies
+earlier than it claimed - revoked, or a gateway that miscomputes - still wedges until the (now
+shorter) window lapses. The durable fix is re-minting once on an auth failure, which needs a way
+for the gateway plugin to signal "this credential is dead".
 
 ### `ProviderRegistry.fixedModels` is not a return to hardcoded catalogues
 

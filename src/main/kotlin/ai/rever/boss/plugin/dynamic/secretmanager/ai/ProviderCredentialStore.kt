@@ -242,6 +242,23 @@ class ProviderCredentialStore(
     }
 
     /**
+     * Whether a brokered credential is cached but no longer reusable.
+     *
+     * The cap in [reuseUntil] only bites when something calls [loadAll], and on the path that
+     * matters nothing does: `LlmProviderSettingsApiImpl.activeConfig` reads a snapshot the
+     * view model loaded once, so between a panel visit and a secret edit a consumer keeps
+     * being handed whatever token that snapshot captured. This lets the read path notice.
+     *
+     * False when nothing is cached: there is no stale credential to replace, and the load
+     * path already mints on demand. Answering true there would turn every read before the
+     * first successful mint into another reload.
+     */
+    fun brokeredCredentialLapsed(brokerId: String): Boolean {
+        val cached = brokeredCache[brokerId] ?: return false
+        return cached.reuseUntilMs <= System.currentTimeMillis()
+    }
+
+    /**
      * When a freshly minted credential stops being reusable.
      *
      * The broker's own reuse window, **capped by the credential's expiry**. Trusting the
@@ -261,9 +278,27 @@ class ProviderCredentialStore(
      */
     private fun reuseUntil(credential: BrokeredKey): Long {
         val now = System.currentTimeMillis()
-        val window = now + credential.refreshAfterSeconds.coerceAtLeast(0) * MILLIS_PER_SECOND
+        // coerceIn, not coerceAtLeast: an absurd reported window overflows the multiply and
+        // wraps the sum negative, which would read as "already lapsed" forever.
+        val window =
+            now + credential.refreshAfterSeconds.coerceIn(0, MAX_REUSE_SECONDS) * MILLIS_PER_SECOND
         val expiry = credential.expiresAt?.let(::expiryMillis) ?: return window
-        return minOf(window, expiry - EXPIRY_SAFETY_MARGIN_MS).coerceAtLeast(now)
+        val capped = minOf(window, expiry - EXPIRY_SAFETY_MARGIN_MS).coerceAtLeast(now)
+        if (capped < window) {
+            // Without this, a gateway minting keys shorter than the safety margin - or a local
+            // clock running ahead of the broker's - silently turns every read into a network
+            // mint, with nothing in the log connecting the slowness to expiry handling. That
+            // is the same un-diagnosable shape as the bug this cap fixes.
+            logger.info(
+                LogCategory.SYSTEM,
+                "Brokered credential expiry shortened its reuse window",
+                mapOf(
+                    "reportedWindowSeconds" to credential.refreshAfterSeconds,
+                    "effectiveWindowSeconds" to (capped - now) / MILLIS_PER_SECOND,
+                ),
+            )
+        }
+        return capped
     }
 
     /**
@@ -277,7 +312,17 @@ class ProviderCredentialStore(
      * stores.
      */
     private fun expiryMillis(raw: String): Long? {
-        val text = raw.trim().replace(' ', 'T')
+        // replaceFirst, and a trailing zone word dropped: `2026-08-09 17:27:08 +00:00` and
+        // `... UTC` are both shapes these values carry, and a transform too eager or too
+        // narrow silently disables the cap - the same failure the tolerant parser exists to
+        // avoid, one layer up.
+        val text =
+            raw
+                .trim()
+                .removeSuffix(" UTC")
+                .trim()
+                .replaceFirst(' ', 'T')
+                .replace(" ", "")
         return runCatching { java.time.OffsetDateTime.parse(text).toInstant().toEpochMilli() }
             .recoverCatching {
                 java.time.LocalDateTime
@@ -585,6 +630,9 @@ class ProviderCredentialStore(
          * broker. Deliberately generous relative to a mint, which is one fast HTTP call.
          */
         private const val EXPIRY_SAFETY_MARGIN_MS = 30_000L
+
+        /** Caps the reported window so the millis multiply cannot overflow. Ten years. */
+        private const val MAX_REUSE_SECONDS = 315_360_000L
     }
 }
 
