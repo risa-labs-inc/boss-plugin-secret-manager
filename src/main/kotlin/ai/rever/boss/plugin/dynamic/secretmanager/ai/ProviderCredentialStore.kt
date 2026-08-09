@@ -57,6 +57,13 @@ data class ConnectionsSnapshot(
 class ProviderCredentialStore(
     private val secrets: SecretDataProvider,
     private val envResolver: EnvResolver = EnvResolver(),
+    /**
+     * How long after a failed mint the read path may try again.
+     *
+     * A parameter rather than a constant so the retry is testable: hard-coded, any test of it had
+     * to outwait it, which is how an untested guard ends up wrong.
+     */
+    private val mintRetryBackoffMs: Long = DEFAULT_MINT_RETRY_BACKOFF_MS,
 ) {
     private val logger = BossLogger.forComponent("AiCredentialStore")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -88,6 +95,20 @@ class ProviderCredentialStore(
         val token: String,
         val reuseUntilMs: Long,
     )
+
+    /**
+     * When a mint last failed, per broker.
+     *
+     * A failed mint is deliberately **not** cached as a credential - a user who signs in must be
+     * able to retry without anything clearing the cache first - but removing the entry and
+     * calling that "not lapsed" made failure terminal on the read path: nothing calls `loadAll`
+     * again there, so a single network blip left the provider unconfigured until the panel was
+     * opened. A recorded failure time gives bounded retry instead.
+     *
+     * Note this cannot be expressed as a blank-token cache entry: `resolveBrokered` would serve
+     * it while the deadline was in the future.
+     */
+    private val lastMintFailureMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Per-broker mint lock, created on first use. */
     private val brokeredMintLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
@@ -144,6 +165,7 @@ class ProviderCredentialStore(
         // Brokered credentials go too. Sign-out is one of the things that invalidates,
         // and a credential minted for the previous session must not outlive it.
         brokeredCache.clear()
+        lastMintFailureMs.clear()
         _invalidations.value = _invalidations.value + 1
     }
 
@@ -254,8 +276,13 @@ class ProviderCredentialStore(
      * first successful mint into another reload.
      */
     fun brokeredCredentialLapsed(brokerId: String): Boolean {
-        val cached = brokeredCache[brokerId] ?: return false
-        return cached.reuseUntilMs <= System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        brokeredCache[brokerId]?.let { return it.reuseUntilMs <= now }
+        // Nothing cached. True only when a mint failed long enough ago to be worth retrying:
+        // answering true unconditionally would hammer the broker before the first success, and
+        // answering false always made a failure terminal on this path.
+        val failedAt = lastMintFailureMs[brokerId] ?: return false
+        return now - failedAt >= mintRetryBackoffMs
     }
 
     /**
@@ -323,6 +350,12 @@ class ProviderCredentialStore(
                 .trim()
                 .replaceFirst(' ', 'T')
                 .replace(" ", "")
+                // `+0000` parses as neither an offset nor a local time, so without this the cap
+                // silently switches off - the failure this parser exists to avoid. Deliberately
+                // no "parse the leading local part and call it UTC" fallback: for a value that
+                // really carries an offset that reads the instant as later than truth, which
+                // lengthens the cap instead of tightening it.
+                .replace(Regex("([+-]\\d{2})(\\d{2})$"), "$1:$2")
         return runCatching { java.time.OffsetDateTime.parse(text).toInstant().toEpochMilli() }
             .recoverCatching {
                 java.time.LocalDateTime
@@ -346,6 +379,7 @@ class ProviderCredentialStore(
             .fetch(brokerId)
             .fold(
                 onSuccess = { credential ->
+                    lastMintFailureMs.remove(brokerId)
                     if (generation.get() == startedAt) {
                         brokeredCache[brokerId] =
                             CachedBrokeredKey(
@@ -357,6 +391,7 @@ class ProviderCredentialStore(
                 },
                 onFailure = { error ->
                     brokeredCache.remove(brokerId)
+                    lastMintFailureMs[brokerId] = System.currentTimeMillis()
                     logger.info(
                         LogCategory.SYSTEM,
                         "Brokered credential unavailable",
@@ -633,6 +668,9 @@ class ProviderCredentialStore(
 
         /** Caps the reported window so the millis multiply cannot overflow. Ten years. */
         private const val MAX_REUSE_SECONDS = 315_360_000L
+
+        /** How long to wait after a failed mint before the read path tries again. */
+        private const val DEFAULT_MINT_RETRY_BACKOFF_MS = 15_000L
     }
 }
 

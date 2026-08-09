@@ -57,6 +57,14 @@ class AiProvidersViewModel(
     private val splitViewOperations: SplitViewOperations?,
     private val scope: CoroutineScope,
     private val envResolver: EnvResolver,
+    /**
+     * Floor on how often a brokered refresh may run.
+     *
+     * A parameter rather than a constant so the floor itself is testable: with it hard-coded,
+     * every test of the refresh had to either wait it out or be written around it, which is how
+     * an untested guard ends up wrong.
+     */
+    private val minBrokeredRefreshIntervalMs: Long = DEFAULT_MIN_BROKERED_REFRESH_INTERVAL_MS,
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -65,6 +73,20 @@ class AiProvidersViewModel(
 
     /** Guards [ensureConnectionsLoaded] so concurrent callers load credentials once. */
     private val connectionsLoadStarted = AtomicBoolean(false)
+
+    /** Guards [refreshLapsedBrokeredCredential] so a burst of reads triggers one reload. */
+    private val brokeredRefreshInFlight = AtomicBoolean(false)
+
+    /**
+     * When the last brokered refresh started, as a floor on how often one may run.
+     *
+     * The in-flight guard serialises refreshes but does not space them. A window that collapses
+     * to zero - a gateway minting keys shorter than the safety margin, or a local clock running
+     * ahead of the broker's - makes `brokeredCredentialLapsed` true again immediately after every
+     * successful mint, so a polling consumer would drive a continuous back-to-back loop, each
+     * iteration a full `loadAll()` with its paginated secret scan, to renew one token.
+     */
+    private val lastBrokeredRefreshMs = java.util.concurrent.atomic.AtomicLong(0)
 
     private val _connectionsLoaded = MutableStateFlow(false)
 
@@ -526,9 +548,6 @@ class AiProvidersViewModel(
         )
     }
 
-    /** Guards [refreshLapsedBrokeredCredential] so a burst of reads triggers one reload. */
-    private val brokeredRefreshInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
-
     /**
      * Re-mint [providerId]'s brokered credential if the cached one is past its reuse deadline.
      *
@@ -549,7 +568,10 @@ class AiProvidersViewModel(
         val brokerId = ProviderRegistry.find(providerId)?.brokerId ?: return
         val credentials = store ?: return
         if (!credentials.brokeredCredentialLapsed(brokerId)) return
+        val now = System.currentTimeMillis()
+        if (now - lastBrokeredRefreshMs.get() < minBrokeredRefreshIntervalMs) return
         if (!brokeredRefreshInFlight.compareAndSet(false, true)) return
+        lastBrokeredRefreshMs.set(now)
         scope.launch {
             try {
                 reloadConnections()
@@ -586,5 +608,15 @@ class AiProvidersViewModel(
         } finally {
             _state.update { it.copy(busyProviderIds = it.busyProviderIds - providerId) }
         }
+    }
+    private companion object {
+        /**
+         * Floor on how often a brokered refresh may run.
+         *
+         * Bounds the worst case when a credential is always immediately lapsed, which is what a
+         * collapsed reuse window means. Short enough that a genuine renewal is not delayed in any
+         * way a user would notice.
+         */
+        const val DEFAULT_MIN_BROKERED_REFRESH_INTERVAL_MS = 5_000L
     }
 }

@@ -336,19 +336,48 @@ calls `loadAll` between a panel visit and a secret edit. So the cap could shorte
 nobody ever re-read: the eleven-minute wedge would have reproduced with the cap in place, and
 the store-level tests would still have passed, because they call `loadAll` directly.
 
-`activeConfig` therefore calls `refreshLapsedBrokeredCredential`, which asks
-`brokeredCredentialLapsed` and kicks an async `reloadConnections`. Two consequences to keep:
+`configFor` therefore calls `refreshLapsedBrokeredCredential`, which asks
+`brokeredCredentialLapsed` and kicks an async `reloadConnections`. Four things to keep:
 
+- **The hook is in `configFor`, not `activeConfig`.** Both api methods funnel through it, and
+  hooking only `activeConfig` left `configuredProviders` handing out the same dead token - the
+  identical wedge one method over.
 - **That call still returns the stale token**; the next one is fresh. `activeConfig` cannot
   suspend, so the alternative was blocking a non-suspending api on a network mint. One failed
   request beats a wedge lasting the whole window.
-- **It is guarded by an in-flight flag**, so a burst of reads triggers one reload rather than
-  one per read.
+- **An in-flight flag** collapses a burst of reads into one reload, and a **minimum interval**
+  (`minBrokeredRefreshIntervalMs`, 5s) bounds the rate. Both are needed: the flag alone leaves a
+  collapsed window driving refreshes back-to-back for as long as a consumer polls, each one a
+  full `loadAll()` with its paginated secret scan. The first refresh is never blocked, so a
+  genuinely lapsed credential does not wait out the interval.
+- **A failed mint is retried, not terminal.** A failure is deliberately never cached, and calling
+  "nothing cached" *not lapsed* made one network blip permanent on this path: nothing calls
+  `loadAll` again, so the provider stayed unconfigured until the panel was opened.
+  `lastMintFailureMs` gives bounded retry (`mintRetryBackoffMs`, 15s). It cannot be expressed as
+  a blank-token cache entry - `resolveBrokered` would serve that while the deadline was ahead.
 
-`BrokeredReadPathTest` covers this by driving `activeConfig()`, and uses `runBlocking` with a
-real scope rather than `runTest`: the load parks on `Dispatchers.IO`, so `advanceUntilIdle()`
-returns without waiting and every assertion reads an empty snapshot. It waits on
-`connectionsLoaded` and on the mint count instead of sleeping.
+**The interval and the backoff are constructor parameters, not constants.** Hard-coded, every
+test of them had to outwait them or be written around them, which is how an untested guard ends
+up wrong - and both of these *were* wrong first time.
+
+**Clock skew is asymmetric.** The cap compares `expiry - 30s` against the *local* clock, so a
+machine behind the broker under-caps (harmless) and one ahead over-caps into exactly the
+refresh loop the floor now bounds. The log line names the reported and effective windows so that
+case is greppable rather than mysterious.
+
+`BrokeredReadPathTest` covers this by driving the api rather than `loadAll`, and uses
+`runBlocking` with a real scope rather than `runTest`: the load parks on `Dispatchers.IO`, so
+`advanceUntilIdle()` returns without waiting and every assertion reads an empty snapshot. It waits
+on `connectionsLoaded` and on the mint count instead of sleeping.
+
+Two traps that suite has already fallen into, both caught by mutation:
+
+- **Capturing a mint-count baseline while a refresh is in flight.** The helper reads the api
+  twice and the second read can itself trigger a refresh, so the in-flight guard then swallowed
+  the read under test. It settles the count first.
+- **Firing rapid reads to test the interval floor.** The in-flight guard alone collapses those
+  into one mint, so the test passed with the floor removed. The reads have to be *spaced* for the
+  floor to be the thing under test.
 
 Still open, and not this change's job: **nothing invalidates on a 401.** A credential that dies
 earlier than it claimed - revoked, or a gateway that miscomputes - still wedges until the (now

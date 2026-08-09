@@ -49,10 +49,6 @@ class LlmProviderSettingsApiImpl(
         viewModel.ensureConnectionsLoaded()
         val state = viewModel.state.value
         val providerId = state.activeProviderId ?: return null
-        // A brokered credential in the loaded snapshot can be past its reuse deadline, and
-        // nothing else on this path would ever notice. Kicks an async re-mint; this call still
-        // returns what the snapshot holds.
-        viewModel.refreshLapsedBrokeredCredential(providerId)
         return configFor(providerId)
     }
 
@@ -63,6 +59,12 @@ class LlmProviderSettingsApiImpl(
     }
 
     private fun configFor(providerId: String): LlmConfig? {
+        // Every path that hands out a credential goes through here - `activeConfig` and
+        // `configuredProviders` both - so this is where a lapsed brokered credential has to be
+        // noticed. Hooking only `activeConfig` left `configuredProviders` handing out the same
+        // dead token, which is the identical wedge one method over. A no-op for providers that
+        // are not brokered, so the fan-out is safe.
+        viewModel.refreshLapsedBrokeredCredential(providerId)
         val state = viewModel.state.value
         val descriptor = ProviderRegistry.find(providerId) ?: return null
         val connection = state.connections[providerId] ?: return null
