@@ -284,7 +284,9 @@ understating the floor by 53 releases makes safe symbols look dangerous and send
 pointless `LinkageError`-guard detours, so check it against `plugin.json` rather than trusting
 the prose. Verified against the api tags:
 `PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
-`openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. That matters
+`openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. (That check
+predates the floor moving to 1.0.73 and still holds: the api is additive-only, so presence in
+an earlier tag implies presence in every later one. Do not read it as the floor being 1.0.20.) That matters
 because they are read on the always-taken registration path (`registerPanel`), outside any
 guard - a member newer than the floor would throw `NoSuchMethodError` there and take the
 *whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
