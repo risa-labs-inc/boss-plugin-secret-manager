@@ -64,6 +64,51 @@ class ProviderCredentialStore(
     private val mutex = Mutex()
 
     /**
+     * Supplies credentials for providers that have a broker instead of a key.
+     *
+     * Set after construction because the broker is an api type reachable only inside
+     * the plugin's `LinkageError` guard, while this store is built outside it. Null
+     * means brokered providers resolve as unconfigured, which is also the right answer
+     * on a host with no broker.
+     */
+    @Volatile
+    var brokeredKeys: BrokeredKeySource? = null
+
+    /**
+     * Live brokered credentials, in memory only.
+     *
+     * Never written to the secret store. A minted credential expires within hours and
+     * is cheap to re-obtain, so persisting it would trade a credential that self-heals
+     * for one that leaks - the same reasoning that keeps environment-supplied keys off
+     * disk, and the defect this feature's predecessor shipped.
+     */
+    private val brokeredCache = java.util.concurrent.ConcurrentHashMap<String, CachedBrokeredKey>()
+
+    private class CachedBrokeredKey(
+        val token: String,
+        val reuseUntilMs: Long,
+    )
+
+    /** Per-broker mint lock, created on first use. */
+    private val brokeredMintLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+
+    private fun brokeredMintLock(brokerId: String): Mutex =
+        brokeredMintLocks.computeIfAbsent(brokerId) { Mutex() }
+
+    /**
+     * The model id to report for [descriptor], honouring a fixed list where one exists.
+     *
+     * A provider with no fixed list keeps whatever was stored, including null.
+     */
+    private fun resolveModelId(
+        descriptor: ProviderDescriptor,
+        stored: String?,
+    ): String? {
+        val fixed = ProviderRegistry.fixedModels[descriptor.id] ?: return stored
+        return stored?.takeIf { candidate -> fixed.any { it.id == candidate } } ?: fixed.firstOrNull()?.id
+    }
+
+    /**
      * Last known provider secrets, so a save doesn't re-page the whole store three
      * times. Cleared by every mutation and by [invalidate].
      */
@@ -96,6 +141,9 @@ class ProviderCredentialStore(
         // provider for the rest of the session — the exact thing invalidate() prevents.
         generation.incrementAndGet()
         cached = null
+        // Brokered credentials go too. Sign-out is one of the things that invalidates,
+        // and a credential minted for the previous session must not outlive it.
+        brokeredCache.clear()
         _invalidations.value = _invalidations.value + 1
     }
 
@@ -127,9 +175,13 @@ class ProviderCredentialStore(
     ): ProviderConnection {
         val settings = stored?.settings ?: ProviderSettings()
         val envKey = envResolver.resolve(descriptor.envVarNames)
+        val brokerId = descriptor.brokerId
 
         val (key, source) =
             when {
+                // A broker takes precedence over everything for a provider that has
+                // one: there is no key to store or export, so nothing can shadow it.
+                brokerId != null -> resolveBrokered(brokerId) to CredentialSource.BROKERED
                 !envKey.isNullOrBlank() -> envKey to CredentialSource.ENVIRONMENT
                 !stored?.apiKey.isNullOrBlank() -> stored.apiKey to CredentialSource.STORED
                 else -> "" to CredentialSource.NONE
@@ -137,9 +189,18 @@ class ProviderCredentialStore(
 
         return ProviderConnection(
             providerId = descriptor.id,
+            // A broker that could not mint is unconfigured, not brokered-with-no-key:
+            // `isConfigured` reads the key, and a BROKERED source with a blank one
+            // would offer the provider as usable and fail on the first request.
             apiKey = key,
-            source = source,
-            selectedModelId = settings.selectedModelId,
+            source = if (source == CredentialSource.BROKERED && key.isBlank()) CredentialSource.NONE else source,
+            // A provider serving a fixed set has its selection constrained to that set.
+            // Not just defaulted: a stored id that is not in the list can only have come
+            // from a stale prefs entry or a hand-typed value, and letting it win durably
+            // replaces the one model the provider actually serves with no picker to
+            // correct it from. Leaving it null instead makes activeConfig() return null
+            // forever, so the first fixed model is the fallback.
+            selectedModelId = resolveModelId(descriptor, settings.selectedModelId),
             customEndpoint = settings.customEndpoint,
             temperature = settings.temperature,
             maxTokens = settings.maxTokens,
@@ -147,9 +208,74 @@ class ProviderCredentialStore(
                 when (source) {
                     CredentialSource.ENVIRONMENT -> envResolver.resolveSourceName(descriptor.envVarNames)
                     CredentialSource.STORED -> stored?.label
+                    CredentialSource.BROKERED -> if (key.isBlank()) null else "Signed in to BOSS"
                     CredentialSource.NONE -> null
                 },
         )
+    }
+
+    /**
+     * A live brokered credential, minted only when the cached one has aged out.
+     *
+     * Returns blank rather than failing when there is no broker on this host or the
+     * exchange fails: the caller's contract is "unconfigured provider", which the panel
+     * already knows how to present. The reason is logged, because "RISA Codex GLM says
+     * not configured" is otherwise unexplainable.
+     */
+    private suspend fun resolveBrokered(brokerId: String): String {
+        val source = brokeredKeys ?: return ""
+        brokeredCache[brokerId]?.takeIf { it.reuseUntilMs > System.currentTimeMillis() }?.let {
+            return it.token
+        }
+
+        // One mint per broker at a time. Two concurrent loadAll() calls both miss the
+        // cache and both mint otherwise, which is exactly what "Check access" does: it
+        // invalidates and reloads while the invalidations collector reloads too. The
+        // second caller re-checks the cache inside the lock and finds the first one's
+        // result.
+        return brokeredMintLock(brokerId).withLock {
+            brokeredCache[brokerId]?.takeIf { it.reuseUntilMs > System.currentTimeMillis() }?.let {
+                return@withLock it.token
+            }
+            mintBrokered(source, brokerId)
+        }
+    }
+
+    private suspend fun mintBrokered(
+        source: BrokeredKeySource,
+        brokerId: String,
+    ): String {
+        // Captured before the exchange, mirroring loadStoredSecrets: if invalidate() lands
+        // while this is in flight, the token belongs to the session that has just gone and
+        // must not be seated. It is still returned to this caller, which asked before the
+        // invalidation.
+        val startedAt = generation.get()
+
+        return source
+            .fetch(brokerId)
+            .fold(
+                onSuccess = { credential ->
+                    if (generation.get() == startedAt) {
+                        brokeredCache[brokerId] =
+                            CachedBrokeredKey(
+                                token = credential.token,
+                                reuseUntilMs =
+                                    System.currentTimeMillis() +
+                                        credential.refreshAfterSeconds.coerceAtLeast(0) * MILLIS_PER_SECOND,
+                            )
+                    }
+                    credential.token
+                },
+                onFailure = { error ->
+                    brokeredCache.remove(brokerId)
+                    logger.info(
+                        LogCategory.SYSTEM,
+                        "Brokered credential unavailable",
+                        mapOf("broker" to brokerId, "reason" to (error.message ?: "unknown")),
+                    )
+                    ""
+                },
+            )
     }
 
     /**
@@ -406,6 +532,7 @@ class ProviderCredentialStore(
 
         private const val PAGE_SIZE = 100
         private const val MAX_SCANNED = 2000
+        private const val MILLIS_PER_SECOND = 1000L
     }
 }
 

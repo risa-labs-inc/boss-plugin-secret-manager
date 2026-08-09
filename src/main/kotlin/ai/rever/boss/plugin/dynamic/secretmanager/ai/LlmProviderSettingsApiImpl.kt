@@ -76,10 +76,14 @@ class LlmProviderSettingsApiImpl(
                 else -> descriptor.chatEndpointFor(modelId)
             }
 
+        // A format this host's api copy does not have is not a config a caller could
+        // send a request with, so it reports as unconfigured rather than half-usable.
+        val apiFormat = descriptor.wireFormat.toApiFormat() ?: return null
+
         return LlmConfig(
             providerId = descriptor.id,
             displayName = descriptor.displayName,
-            apiFormat = descriptor.wireFormat.toApiFormat(),
+            apiFormat = apiFormat,
             apiKey = connection.apiKey,
             baseUrl = endpoint,
             modelId = modelId,
@@ -92,11 +96,29 @@ class LlmProviderSettingsApiImpl(
      * Map the plugin-local wire format onto the api enum. Safe to reference
      * [LlmApiFormat.GOOGLE_GENERATIVE] here: it shipped in the same api release as
      * [LlmProviderSettingsAPI], so any host that could link this class has both.
+     *
+     * [LlmApiFormat.OPENAI_RESPONSES] is newer (1.0.74) and so is *not* covered by
+     * that argument: a host on 1.0.71 links this class but has no such constant, and
+     * reading it throws `NoSuchFieldError`. It is therefore resolved reflectively and
+     * the provider is reported as unusable rather than crashing the section. Only
+     * `RISA_GLM` speaks this format, and it needs a host new enough to have the
+     * broker relay anyway, so on an older host it could not have worked regardless.
      */
-    private fun WireFormat.toApiFormat(): LlmApiFormat =
+    private fun WireFormat.toApiFormat(): LlmApiFormat? =
         when (this) {
             WireFormat.ANTHROPIC_MESSAGES -> LlmApiFormat.ANTHROPIC_MESSAGES
             WireFormat.OPENAI_CHAT -> LlmApiFormat.OPENAI_CHAT
             WireFormat.GOOGLE_GENERATIVE -> LlmApiFormat.GOOGLE_GENERATIVE
+            WireFormat.OPENAI_RESPONSES -> openAiResponsesOrNull
         }
+
+    private val openAiResponsesOrNull: LlmApiFormat? by lazy {
+        try {
+            LlmApiFormat.valueOf("OPENAI_RESPONSES")
+        } catch (_: IllegalArgumentException) {
+            null
+        } catch (_: LinkageError) {
+            null
+        }
+    }
 }

@@ -5,6 +5,7 @@ import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ActiveProviderPrefs
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.BrokeredCredentialBridge
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.EnvResolver
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.LegacySettingsImport
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.LlmProviderSettingsApiImpl
@@ -124,6 +125,12 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 context.cacheProvider
                     ?.getPluginCacheDirectory(pluginId)
                     ?.let { File(it) }
+
+            // Inside the guard on purpose: the bridge names an api type added in
+            // 1.0.74, so resolving it is exactly what must not happen on an older
+            // host. Left unset when the host has no broker relay, which makes
+            // brokered providers report unconfigured instead of failing.
+            credentialStore.brokeredKeys = BrokeredCredentialBridge.from(context)
 
             val viewModel =
                 AiProvidersViewModel(

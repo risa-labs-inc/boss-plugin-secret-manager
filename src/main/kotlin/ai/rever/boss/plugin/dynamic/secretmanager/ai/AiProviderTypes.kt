@@ -19,6 +19,13 @@ enum class WireFormat {
 
     /** Google Gemini generative language API. */
     GOOGLE_GENERATIVE,
+
+    /**
+     * OpenAI Responses API. Not interchangeable with [OPENAI_CHAT]: same credential
+     * style, different request and reply shapes, and a Chat Completions body posted
+     * to `/v1/responses` is rejected. This is what Codex speaks.
+     */
+    OPENAI_RESPONSES,
 }
 
 /**
@@ -100,6 +107,16 @@ data class ProviderDescriptor(
     val keyPlaceholder: String = "",
     /** How [modelsEndpoint] pages, so a long list isn't silently clipped. */
     val pagingStyle: PagingStyle = PagingStyle.NONE,
+    /**
+     * Broker that mints this provider's credential from the signed-in BOSS session,
+     * or null for a provider the user supplies a key for.
+     *
+     * A provider with a broker has no key field: there is nothing for the user to
+     * paste, and [envVarNames] stays empty so nothing writes a minted credential to
+     * disk. Reaching the broker needs a host that implements the relay, so such a
+     * provider reports unconfigured on a host that does not.
+     */
+    val brokerId: String? = null,
 ) {
     /**
      * Canonical name for this provider's key, used as the stored secret's name so an
@@ -151,8 +168,43 @@ enum class CredentialSource {
     /** Stored as a secret by this plugin. Editable. */
     STORED,
 
+    /**
+     * Minted by a broker from the signed-in BOSS session. Read-only, and **never
+     * written to storage**: it expires within hours and is cheap to re-obtain, so
+     * persisting it would turn a credential that self-heals into one that leaks.
+     * Same rule as [ENVIRONMENT], for a different reason.
+     */
+    BROKERED,
+
     /** No credential available. */
     NONE,
+}
+
+/**
+ * A short-lived credential a broker minted, as this plugin sees it.
+ *
+ * A plugin-local mirror of the api's `BrokeredCredential`. The api type cannot
+ * appear here: this file is on the always-taken load path, and the whole point of
+ * [LlmProviderSettingsApiImpl] being the only api-touching file is that a host with
+ * an older api jar loses the AI panel rather than the whole plugin. See AGENTS.md.
+ */
+data class BrokeredKey(
+    val token: String,
+    /** Seconds this credential may be reused before asking the broker again. */
+    val refreshAfterSeconds: Long,
+)
+
+/**
+ * Where [ProviderCredentialStore] gets a brokered credential from.
+ *
+ * A seam rather than a direct call, because the store is constructed outside the
+ * `LinkageError` guard while the broker is an api type only reachable inside it.
+ * The store is handed an implementation after the fact, and resolves brokered
+ * providers as unconfigured until then - which is also the correct behaviour on a
+ * host that has no broker at all.
+ */
+fun interface BrokeredKeySource {
+    suspend fun fetch(brokerId: String): Result<BrokeredKey>
 }
 
 /**

@@ -7,6 +7,7 @@ import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -383,11 +384,99 @@ class ProviderRegistryTest {
     }
 
     @Test
-    fun `only the custom provider lacks a models endpoint`() {
-        // The whole feature rests on live lists, so a provider without an endpoint has to
-        // be the hand-configured one — anything else would silently have no models.
-        val withoutEndpoint = ProviderRegistry.all.filter { it.modelsEndpoint == null }.map { it.id }
-        assertEquals(listOf(ProviderRegistry.CUSTOM), withoutEndpoint)
+    fun `a provider without a models endpoint has another way to name a model`() {
+        // The whole feature rests on live lists, so what actually matters is that no
+        // provider ends up with no models at all. Two ways out of needing an endpoint:
+        // CUSTOM, where the user types the model id because nothing authoritative
+        // exists to ask; and a provider serving a fixed set, where there is nothing to
+        // ask because the answer cannot drift. Anything else silently has no models.
+        val unexplained =
+            ProviderRegistry.all
+                .filter { it.modelsEndpoint == null }
+                .filterNot { it.id == ProviderRegistry.CUSTOM }
+                .filterNot { ProviderRegistry.fixedModels[it.id]?.isNotEmpty() == true }
+                .map { it.id }
+
+        assertEquals(emptyList(), unexplained)
+    }
+
+    @Test
+    fun `a fixed model list belongs only to a provider with no endpoint to ask`() {
+        // The reverse guard, and the one that stops this becoming the hardcoded
+        // catalogue the live fetch replaced: pinning models for a provider that has an
+        // endpoint would reintroduce exactly that drift.
+        val withEndpoint =
+            ProviderRegistry.fixedModels.keys
+                .mapNotNull { ProviderRegistry.find(it) }
+                .filter { it.modelsEndpoint != null }
+                .map { it.id }
+
+        assertEquals(emptyList(), withEndpoint)
+    }
+
+    @Test
+    fun `a brokered provider stores no key and advertises no environment variable`() {
+        // Both would put a minted, short-lived credential somewhere durable. envVarNames
+        // also drives the secret entry's name, so a non-empty list here is the path by
+        // which a brokered credential would end up written to the store.
+        val brokered = ProviderRegistry.all.filter { it.brokerId != null }
+        assertTrue(brokered.isNotEmpty(), "the RISA GLM provider should be registered")
+
+        brokered.forEach { descriptor ->
+            assertEquals(emptyList(), descriptor.envVarNames, "${descriptor.id} must not read an env var")
+            assertEquals("", descriptor.keyPlaceholder, "${descriptor.id} must not prompt for a key")
+            assertNull(descriptor.consoleUrl, "${descriptor.id} has no key page to send anyone to")
+        }
+    }
+
+    @Test
+    fun `a fixed-model provider reports known models and needs no manual entry`() {
+        // The bug this pins: the ViewModel and the panel each tested `modelsEndpoint == null`
+        // independently, so a provider serving a fixed set was treated as one nobody can ask.
+        // Its catalogue was never populated and the panel offered an endpoint-and-model-id
+        // form for a provider that has neither.
+        val risa = ProviderRegistry.find(ProviderRegistry.RISA_GLM)!!
+
+        assertTrue(ProviderRegistry.hasKnownModels(risa))
+        assertFalse(ProviderRegistry.needsManualModel(risa))
+
+        // CUSTOM is the one that genuinely needs manual entry.
+        val custom = ProviderRegistry.find(ProviderRegistry.CUSTOM)!!
+        assertTrue(ProviderRegistry.needsManualModel(custom))
+    }
+
+    @Test
+    fun `every provider either has known models or needs manual entry, never neither`() {
+        ProviderRegistry.all.forEach { descriptor ->
+            assertTrue(
+                ProviderRegistry.hasKnownModels(descriptor) || ProviderRegistry.needsManualModel(descriptor),
+                "${descriptor.id} would have no way to name a model",
+            )
+        }
+    }
+
+    @Test
+    fun `a fixed list seats as a loaded catalogue rather than staying not-configured`() =
+        runTest {
+            // The branch added for fixed models was unreachable, because both call sites
+            // returned early first. This asserts the seating itself.
+            val catalog = ModelCatalog(cacheDir = null)
+            val risa = ProviderRegistry.find(ProviderRegistry.RISA_GLM)!!
+
+            catalog.refresh(risa, apiKey = "sk-brokered", force = false)
+
+            val state = catalog.stateOf(risa.id)
+            assertTrue(state is CatalogState.Loaded, "expected Loaded, was $state")
+            assertEquals(listOf("coreweave-glm-5-2"), (state as CatalogState.Loaded).models.map { it.id })
+        }
+
+    @Test
+    fun `the default provider is not an organisation-only one`() {
+        // `default` is all.first(), so ordering decides what a user who has never chosen
+        // sees selected. A brokered provider can never resolve a credential outside the
+        // organisation that runs its broker, so leading with one would ship every other
+        // user a default that cannot work.
+        assertNull(ProviderRegistry.default.brokerId)
     }
 
     @Test
