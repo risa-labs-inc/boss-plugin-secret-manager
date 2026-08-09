@@ -270,6 +270,32 @@ on the first request rather than where the user can act on it.
 selection for every user outside RISA, for whom it can never resolve a credential.
 `ProviderRegistryTest` pins that too.
 
+### One predicate decides "can this provider's models be known"
+
+`ProviderRegistry.hasKnownModels` / `needsManualModel`. Both the ViewModel
+(`refreshStale`, `refreshOne`) and the panel (`ModelSection`) branch on it. They used to
+test `modelsEndpoint == null` independently, and the result was that a provider serving a
+**fixed** set was treated as one nobody can ask: `catalog.refresh` was never called for it,
+so its state stayed `NotConfigured`, and the panel offered an endpoint-and-model-id form
+for a provider that has neither. Worse, that form's model field went through
+`saveSettings`, and a stored `selectedModelId` used to win outright - so a typo durably
+replaced the single model the gateway serves. `resolveModelId` now constrains a
+fixed-model provider's selection to its own list.
+
+Mutation-verified: narrowing `hasKnownModels` back to `modelsEndpoint != null` fails
+*a fixed-model provider reports known models and needs no manual entry*.
+
+### Brokered mints are guarded twice
+
+- **A generation guard**, mirroring `loadStoredSecrets`: a `fetch` that started before
+  `invalidate()` and returns after it is handed to its caller but **not** seated, because
+  it belongs to the session that just ended.
+- **A per-broker mint lock.** "Check access" calls `invalidate()` then
+  `reloadConnections()` while the `invalidations` collector reloads too, so two `loadAll()`s
+  run at once, both miss the cache, and both would call the broker. The second waits and
+  finds the first one's result. The explicit `reloadConnections()` stays because the next
+  line reads `_state.value` to report the outcome.
+
 ### `ProviderRegistry.fixedModels` is not a return to hardcoded catalogues
 
 The gateway serves one model to one scoped key, so there is no models endpoint and nothing

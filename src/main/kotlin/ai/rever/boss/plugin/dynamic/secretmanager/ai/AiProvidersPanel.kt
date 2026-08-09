@@ -356,7 +356,7 @@ private fun ModelSection(
                 // authoritative to ask, so the endpoint and model id are typed in. Without
                 // these two fields a custom provider could be given a key and still never
                 // be usable, because activeConfig() requires both.
-                descriptor.modelsEndpoint == null -> {
+                ProviderRegistry.needsManualModel(descriptor) -> {
                     Text(
                         text =
                             "${descriptor.displayName} has no model list to query — " +

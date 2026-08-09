@@ -430,6 +430,47 @@ class ProviderRegistryTest {
     }
 
     @Test
+    fun `a fixed-model provider reports known models and needs no manual entry`() {
+        // The bug this pins: the ViewModel and the panel each tested `modelsEndpoint == null`
+        // independently, so a provider serving a fixed set was treated as one nobody can ask.
+        // Its catalogue was never populated and the panel offered an endpoint-and-model-id
+        // form for a provider that has neither.
+        val risa = ProviderRegistry.find(ProviderRegistry.RISA_GLM)!!
+
+        assertTrue(ProviderRegistry.hasKnownModels(risa))
+        assertFalse(ProviderRegistry.needsManualModel(risa))
+
+        // CUSTOM is the one that genuinely needs manual entry.
+        val custom = ProviderRegistry.find(ProviderRegistry.CUSTOM)!!
+        assertTrue(ProviderRegistry.needsManualModel(custom))
+    }
+
+    @Test
+    fun `every provider either has known models or needs manual entry, never neither`() {
+        ProviderRegistry.all.forEach { descriptor ->
+            assertTrue(
+                ProviderRegistry.hasKnownModels(descriptor) || ProviderRegistry.needsManualModel(descriptor),
+                "${descriptor.id} would have no way to name a model",
+            )
+        }
+    }
+
+    @Test
+    fun `a fixed list seats as a loaded catalogue rather than staying not-configured`() =
+        runTest {
+            // The branch added for fixed models was unreachable, because both call sites
+            // returned early first. This asserts the seating itself.
+            val catalog = ModelCatalog(cacheDir = null)
+            val risa = ProviderRegistry.find(ProviderRegistry.RISA_GLM)!!
+
+            catalog.refresh(risa, apiKey = "sk-brokered", force = false)
+
+            val state = catalog.stateOf(risa.id)
+            assertTrue(state is CatalogState.Loaded, "expected Loaded, was $state")
+            assertEquals(listOf("coreweave-glm-5-2"), (state as CatalogState.Loaded).models.map { it.id })
+        }
+
+    @Test
     fun `the default provider is not an organisation-only one`() {
         // `default` is all.first(), so ordering decides what a user who has never chosen
         // sees selected. A brokered provider can never resolve a credential outside the

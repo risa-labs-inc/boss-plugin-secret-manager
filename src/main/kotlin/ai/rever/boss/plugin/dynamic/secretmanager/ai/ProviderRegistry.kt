@@ -198,6 +198,20 @@ object ProviderRegistry {
     fun find(id: String?): ProviderDescriptor? = id?.let { byId[it] }
 
     /**
+     * Whether this provider's models can be known at all, from either source.
+     *
+     * The one predicate the ViewModel and the panel both branch on. They used to test
+     * `modelsEndpoint == null` independently, which meant a provider serving a fixed set
+     * was treated as one nobody can ask: the catalogue was never populated and the panel
+     * offered a manual endpoint-and-model-id form for a provider that has neither.
+     */
+    fun hasKnownModels(descriptor: ProviderDescriptor): Boolean =
+        descriptor.modelsEndpoint != null || fixedModels[descriptor.id]?.isNotEmpty() == true
+
+    /** True when the model id is typed in by hand, because nothing authoritative exists to ask. */
+    fun needsManualModel(descriptor: ProviderDescriptor): Boolean = !hasKnownModels(descriptor)
+
+    /**
      * Look up a provider by id, falling back to [default]. Used when reading a persisted
      * selection that names a provider this build doesn't have.
      *

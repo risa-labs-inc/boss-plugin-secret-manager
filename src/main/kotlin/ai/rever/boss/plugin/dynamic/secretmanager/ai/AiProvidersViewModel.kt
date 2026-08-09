@@ -230,7 +230,7 @@ class AiProvidersViewModel(
                         catalog.markNotConfigured(descriptor.id)
                         return@async
                     }
-                    if (descriptor.modelsEndpoint == null) return@async
+                    if (!ProviderRegistry.hasKnownModels(descriptor)) return@async
                     catalog.refresh(descriptor, connection.apiKey, force = false)
                 }
             }.awaitAll()
@@ -540,8 +540,9 @@ class AiProvidersViewModel(
         }
         // Same skip refreshStale does. Without it, saving a Custom key fetched against a
         // nonexistent endpoint, logged a NETWORK warn, and parked a Failed state the panel
-        // then hides — noise with no symptom.
-        if (descriptor.modelsEndpoint == null) return
+        // then hides — noise with no symptom. A provider with a FIXED list is not skipped:
+        // it has models to seat, just no endpoint to ask.
+        if (!ProviderRegistry.hasKnownModels(descriptor)) return
         catalog.refresh(descriptor, connection.apiKey, force = force)
     }
 

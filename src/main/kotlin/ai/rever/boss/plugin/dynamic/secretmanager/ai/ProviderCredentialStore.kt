@@ -89,6 +89,25 @@ class ProviderCredentialStore(
         val reuseUntilMs: Long,
     )
 
+    /** Per-broker mint lock, created on first use. */
+    private val brokeredMintLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+
+    private fun brokeredMintLock(brokerId: String): Mutex =
+        brokeredMintLocks.computeIfAbsent(brokerId) { Mutex() }
+
+    /**
+     * The model id to report for [descriptor], honouring a fixed list where one exists.
+     *
+     * A provider with no fixed list keeps whatever was stored, including null.
+     */
+    private fun resolveModelId(
+        descriptor: ProviderDescriptor,
+        stored: String?,
+    ): String? {
+        val fixed = ProviderRegistry.fixedModels[descriptor.id] ?: return stored
+        return stored?.takeIf { candidate -> fixed.any { it.id == candidate } } ?: fixed.firstOrNull()?.id
+    }
+
     /**
      * Last known provider secrets, so a save doesn't re-page the whole store three
      * times. Cleared by every mutation and by [invalidate].
@@ -175,12 +194,13 @@ class ProviderCredentialStore(
             // would offer the provider as usable and fail on the first request.
             apiKey = key,
             source = if (source == CredentialSource.BROKERED && key.isBlank()) CredentialSource.NONE else source,
-            // A brokered provider serves a fixed model, so it is selected rather than
-            // picked: there is no models endpoint to populate a picker from, and
-            // leaving it null makes activeConfig() return null forever.
-            selectedModelId =
-                settings.selectedModelId
-                    ?: ProviderRegistry.fixedModels[descriptor.id]?.firstOrNull()?.id,
+            // A provider serving a fixed set has its selection constrained to that set.
+            // Not just defaulted: a stored id that is not in the list can only have come
+            // from a stale prefs entry or a hand-typed value, and letting it win durably
+            // replaces the one model the provider actually serves with no picker to
+            // correct it from. Leaving it null instead makes activeConfig() return null
+            // forever, so the first fixed model is the fallback.
+            selectedModelId = resolveModelId(descriptor, settings.selectedModelId),
             customEndpoint = settings.customEndpoint,
             temperature = settings.temperature,
             maxTokens = settings.maxTokens,
@@ -204,22 +224,46 @@ class ProviderCredentialStore(
      */
     private suspend fun resolveBrokered(brokerId: String): String {
         val source = brokeredKeys ?: return ""
-        val cached = brokeredCache[brokerId]
-        if (cached != null && cached.reuseUntilMs > System.currentTimeMillis()) {
-            return cached.token
+        brokeredCache[brokerId]?.takeIf { it.reuseUntilMs > System.currentTimeMillis() }?.let {
+            return it.token
         }
+
+        // One mint per broker at a time. Two concurrent loadAll() calls both miss the
+        // cache and both mint otherwise, which is exactly what "Check access" does: it
+        // invalidates and reloads while the invalidations collector reloads too. The
+        // second caller re-checks the cache inside the lock and finds the first one's
+        // result.
+        return brokeredMintLock(brokerId).withLock {
+            brokeredCache[brokerId]?.takeIf { it.reuseUntilMs > System.currentTimeMillis() }?.let {
+                return@withLock it.token
+            }
+            mintBrokered(source, brokerId)
+        }
+    }
+
+    private suspend fun mintBrokered(
+        source: BrokeredKeySource,
+        brokerId: String,
+    ): String {
+        // Captured before the exchange, mirroring loadStoredSecrets: if invalidate() lands
+        // while this is in flight, the token belongs to the session that has just gone and
+        // must not be seated. It is still returned to this caller, which asked before the
+        // invalidation.
+        val startedAt = generation.get()
 
         return source
             .fetch(brokerId)
             .fold(
                 onSuccess = { credential ->
-                    brokeredCache[brokerId] =
-                        CachedBrokeredKey(
-                            token = credential.token,
-                            reuseUntilMs =
-                                System.currentTimeMillis() +
-                                    credential.refreshAfterSeconds.coerceAtLeast(0) * MILLIS_PER_SECOND,
-                        )
+                    if (generation.get() == startedAt) {
+                        brokeredCache[brokerId] =
+                            CachedBrokeredKey(
+                                token = credential.token,
+                                reuseUntilMs =
+                                    System.currentTimeMillis() +
+                                        credential.refreshAfterSeconds.coerceAtLeast(0) * MILLIS_PER_SECOND,
+                            )
+                    }
                     credential.token
                 },
                 onFailure = { error ->
