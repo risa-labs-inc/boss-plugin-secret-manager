@@ -74,6 +74,9 @@ class BrokeredReadPathTest {
         source: BrokeredKeySource,
         minRefreshIntervalMs: Long = 0,
         mintRetryBackoffMs: Long = 50,
+        renewalLeadMs: Long = 0,
+        // Effectively off by default, so the existing read-path tests are unaffected by a timer.
+        minRenewalDelayMs: Long = 600_000,
     ): Harness {
         val root = tempDir("brokered-readpath")
         val env = envIn(root)
@@ -94,6 +97,8 @@ class BrokeredReadPathTest {
                 scope = scope,
                 envResolver = env,
                 minBrokeredRefreshIntervalMs = minRefreshIntervalMs,
+                brokeredRenewalLeadMs = renewalLeadMs,
+                minBrokeredRenewalDelayMs = minRenewalDelayMs,
             )
         return Harness(LlmProviderSettingsApiImpl(viewModel), viewModel, store)
     }
@@ -334,4 +339,85 @@ class BrokeredReadPathTest {
         /** How often to re-read while waiting for a backed-off retry to become due. */
         const val RETRY_POLL_MS = 200L
     }
+    @Test
+    fun `a brokered credential is renewed before it lapses, with no read at all`() =
+        runBlocking {
+            // The point of the whole change: nobody asks, and the credential is still replaced.
+            // Reactively re-minting on the next read costs one rejected request every time a key
+            // expires while the app is running, and that rejection reads as "go and fix this in
+            // Settings" when there is nothing to fix - access is already granted.
+            // A key with ten minutes left, so the *read* path has no reason to re-mint: with a
+            // short-lived key a load-path read could satisfy this test and it would pass with the
+            // renewal removed entirely. A large lead is what makes the timer fire immediately.
+            val source =
+                CountingSource { issued ->
+                    Result.success(
+                        BrokeredKey(
+                            token = "sk-$issued",
+                            refreshAfterSeconds = 3600,
+                            expiresAt = secondsFromNow(600),
+                        ),
+                    )
+                }
+            val harness = harnessWith(source, renewalLeadMs = 600_000, minRenewalDelayMs = 150)
+
+            assertNotNull(harness.loadedConfig(), "activeConfig stayed null after the load")
+            // Deliberately NOT settled(): a renewal loop never goes quiet, which is the whole
+            // point. The baseline is taken as-is and only an increase is asserted.
+            val baseline = source.calls
+
+            // No activeConfig() call between here and the assertion.
+            source.awaitCalls(baseline + 1)
+
+            assertTrue(source.calls > baseline, "the credential was never renewed on its own")
+        }
+
+    @Test
+    fun `each renewal arms the next one`() =
+        runBlocking {
+            val source =
+                CountingSource { issued ->
+                    Result.success(
+                        BrokeredKey(
+                            token = "sk-$issued",
+                            refreshAfterSeconds = 3600,
+                            expiresAt = secondsFromNow(3),
+                        ),
+                    )
+                }
+            val harness = harnessWith(source, renewalLeadMs = 0, minRenewalDelayMs = 150)
+            assertNotNull(harness.loadedConfig())
+            val baseline = source.calls
+
+            // Two, so this tests the reschedule rather than one armed timer.
+            source.awaitCalls(baseline + 2)
+
+            assertTrue(source.calls >= baseline + 2, "the renewal did not re-arm itself")
+        }
+
+    @Test
+    fun `the armed delay is floored so a renewal loop cannot spin`() =
+        runBlocking {
+            // A deadline already in the past - what a key with seconds of life gives once the
+            // reuse cap collapses its window. Without the floor this re-mints as fast as the
+            // broker answers, which is hundreds of times in the second below.
+            val source =
+                CountingSource { issued ->
+                    Result.success(
+                        BrokeredKey(
+                            token = "sk-$issued",
+                            refreshAfterSeconds = 3600,
+                            expiresAt = secondsFromNow(-60),
+                        ),
+                    )
+                }
+            val harness = harnessWith(source, renewalLeadMs = 0, minRenewalDelayMs = 300)
+            assertNotNull(harness.loadedConfig())
+            val baseline = source.calls
+
+            delay(1_000)
+
+            val renewals = source.calls - baseline
+            assertTrue(renewals <= 5, "the floor did not hold: $renewals renewals in a second")
+        }
 }
