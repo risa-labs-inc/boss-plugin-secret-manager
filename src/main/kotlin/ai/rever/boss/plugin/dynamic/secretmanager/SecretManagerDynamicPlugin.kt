@@ -63,7 +63,17 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
 
         if (secretDataProvider == null) {
             context.panelRegistry.registerPanel(SecretManagerInfo) { ctx, panelInfo ->
-                SecretManagerComponent(ctx, panelInfo, null, null, null, pluginScope)
+                // Named, like the other call site: six positional arguments against an
+                // eleven-parameter list whose neighbours are all nullable and same-typed
+                // would silently mis-bind on a reorder and still compile.
+                SecretManagerComponent(
+                    ctx = ctx,
+                    panelInfo = panelInfo,
+                    secretDataProvider = null,
+                    supabaseDataProvider = null,
+                    pluginStoreApiKeyProvider = null,
+                    scope = pluginScope,
+                )
             }
             return
         }
@@ -88,7 +98,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 aiProviderStore = credentialStore,
                 settingsProvider = context.settingsProvider,
                 windowId = context.windowId,
-                splitViewOperations = context.splitViewOperations
+                splitViewOperations = context.splitViewOperations,
+                authDataProvider = context.authDataProvider
             )
         }
 

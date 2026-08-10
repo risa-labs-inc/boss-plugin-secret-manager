@@ -45,13 +45,39 @@ goes through `PluginContext.llmProvider` and never needs the raw value.
 
 Manifest `requiredPermissions` is `["secret.read"]`, and every MCP tool carries the same gate.
 
+**`secret.read` is part of the baseline `user` role**, so this panel is available to every
+authenticated user. It was admin-only until migration `20260809000000`, which is a correction
+rather than a widening: the vault was always per-user server-side (every RPC is granted to
+`authenticated` and self-scopes with `auth.uid()`, and all four RLS policies on `secrets` are
+`auth.uid() = user_id`). The old gate was inherited from the pre-RBAC `requiresAdmin` flag, and
+since AI provider settings moved into this plugin it also meant no non-admin could add a model
+API key at all. The permission is still revocable, so a locked-down deployment removes it from
+`user`.
+
 Writes are intentionally gated on `secret.read` rather than granular `secrets.create` /
 `secrets.delete`: those are not seeded in the RBAC catalog, so gating on them would silently
 make writes admin-only. Server-side RLS scopes every RPC to `auth.uid()` regardless.
 
+Two surfaces inside the panel carry their own gate, because they reach past the signed-in user:
+
+| Surface | Permission | Held by |
+|---|---|---|
+| Share with a role (the share dialog's Roles tab) | `secret.share.role` | admin, boss_admin |
+| Plugin Store API keys | `api_key.create` | admin, boss_admin |
+
+The role-share gate exists because a role share reaches every holder of that role, and `user`
+is a descendant of every role - so a role target is the one control here that can publish a
+credential deployment-wide, with no undo. `share_secret` refuses it server-side; hiding the tab
+only keeps a control that cannot work off the screen. Sharing with an individual user is
+ungated, and sharing with an organisation already requires membership of it.
+
 ## Requirements
 
-- BOSS >= 9.2.20, boss-plugin-api >= 1.0.20
+- BOSS >= 9.4.2, boss-plugin-api >= 1.0.73 (both from `plugin.json`; the older 9.2.20 /
+  1.0.20 pair stated here was stale)
+- The panel is visible to every authenticated user only on a host carrying migration
+  `20260809000000`, which grants `secret.read` to the baseline `user` role. On an older
+  host only admins and `boss_admin` can open it, and nothing else changes.
 - `secretDataProvider` is required. Without it only a no-provider stub panel registers and no
   MCP tools are contributed.
 - Optional: `supabaseDataProvider` (user and role search for sharing),
@@ -66,7 +92,7 @@ make writes admin-only. Server-side RLS scopes every RPC to `auth.uid()` regardl
 ```bash
 ./gradlew buildPluginJar
 cp build/libs/boss-plugin-secret-manager-*.jar ~/.boss/plugins/
-./gradlew test    # 96 host-independent cases, no live credential needed
+./gradlew test    # 152 host-independent cases, no live credential needed
 ```
 
 Do not delete `compose-stability.conf`. It stops the Compose compiler emitting a `$stable` read

@@ -57,17 +57,20 @@ repositories {
 dependencies {
     if (useLocalDependencies) {
         // Local development: use boss-plugin-api JAR from sibling repo.
-        // NOTE: plugin.json still declares apiVersion 1.0.20 — the
-        // ai.rever.boss.plugin.logging and .scrollbar packages used by this plugin
-        // were introduced in exactly that release (api tag v1.0.20), and that is
-        // still the true floor for the plugin to function.
+        // NOTE: plugin.json declares apiVersion AND minApiVersion 1.0.73, which is the
+        // true floor. This comment said 1.0.20 long after the manifest moved; read the
+        // manifest rather than this comment, because a stale floor here makes safe symbols
+        // look dangerous and sends people down pointless LinkageError-guard detours.
         //
-        // The AI-provider feature needs symbols added in api 1.0.71
-        // (LlmProviderSettingsAPI, LlmApiFormat.GOOGLE_GENERATIVE) but does not raise the
-        // declared minimum: every reference to those symbols is confined to
-        // LlmProviderSettingsApiImpl, which is registered inside a LinkageError guard. On an
-        // older host the AI settings panel simply isn't served and secret management is
-        // unaffected — raising apiVersion instead would stop the plugin loading at all there.
+        // The LinkageError guard around LlmProviderSettingsApiImpl is still load-bearing, but
+        // NOT for the 1.0.71 symbols this comment used to cite (LlmProviderSettingsAPI,
+        // LlmApiFormat.GOOGLE_GENERATIVE) - the floor is 1.0.73, so those are below it now.
+        // What the guard protects today are the 1.0.74 additions: BrokeredCredentialProvider,
+        // PluginContext.brokeredCredentialProvider and LlmApiFormat.OPENAI_RESPONSES, all
+        // confined to LlmProviderSettingsApiImpl and BrokeredCredentialBridge. On a host
+        // between 1.0.73 and 1.0.74 the AI settings panel simply isn't served and secret
+        // management is unaffected; raising minApiVersion instead would stop the plugin
+        // loading at all there. See AGENTS.md "Linkage containment".
         compileOnly(
             files(
                 localBossPluginApiJar

@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
+import ai.rever.boss.plugin.api.AuthDataProvider
 import ai.rever.boss.plugin.api.PanelComponentWithUI
 import ai.rever.boss.plugin.api.PanelInfo
 import ai.rever.boss.plugin.api.PluginStoreApiKeyProvider
@@ -10,6 +11,7 @@ import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import androidx.compose.runtime.Composable
 import com.arkivanov.decompose.ComponentContext
+import com.arkivanov.essenty.lifecycle.doOnDestroy
 import kotlinx.coroutines.CoroutineScope
 
 /**
@@ -28,7 +30,8 @@ class SecretManagerComponent(
     private val aiProviderStore: ProviderCredentialStore? = null,
     private val settingsProvider: SettingsProvider? = null,
     private val windowId: String? = null,
-    private val splitViewOperations: SplitViewOperations? = null
+    private val splitViewOperations: SplitViewOperations? = null,
+    private val authDataProvider: AuthDataProvider? = null
 ) : PanelComponentWithUI, ComponentContext by ctx {
 
     // Created once per panel instance (not per composition), so secrets stay
@@ -36,15 +39,27 @@ class SecretManagerComponent(
     // refetching. Same pattern as the Role Creation plugin; the Refresh
     // button refetches on demand.
     private val viewModel = SecretManagerViewModel(
-        secretDataProvider,
-        supabaseDataProvider,
-        pluginStoreApiKeyProvider,
-        scope,
-        aiProviderStore,
-        settingsProvider,
-        windowId,
-        splitViewOperations
+        // Named: nine positional arguments, five of them adjacent nullables, is the call site
+        // a reorder mis-binds silently while still compiling.
+        secretDataProvider = secretDataProvider,
+        supabaseDataProvider = supabaseDataProvider,
+        pluginStoreApiKeyProvider = pluginStoreApiKeyProvider,
+        scope = scope,
+        aiProviderStore = aiProviderStore,
+        settingsProvider = settingsProvider,
+        windowId = windowId,
+        splitViewOperations = splitViewOperations,
+        authDataProvider = authDataProvider,
     ).also { it.initialize() }
+
+    init {
+        // The ViewModel is per panel instance but its coroutines run on the *plugin*
+        // scope, so the permission collector - which never completes - would keep this
+        // instance, and the decrypted secrets in its state, alive for the plugin's whole
+        // lifetime. Every other launch in the ViewModel terminates, which is why this
+        // hook only became necessary once something collected.
+        lifecycle.doOnDestroy { viewModel.dispose() }
+    }
 
     @Composable
     override fun Content() {

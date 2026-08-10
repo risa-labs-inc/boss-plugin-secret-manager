@@ -8,7 +8,7 @@ Manage encrypted credentials and secrets, including Plugin Store API keys
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.secretmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin`
-- **API Version**: 1.0.20
+- **API Version**: 1.0.73 (`plugin.json` `apiVersion` and `minApiVersion`)
 
 ## Essential Commands
 
@@ -163,6 +163,90 @@ hit once already:
 the Gradle version. Comparing the reported version to the bundled `plugin.json` would be circular -
 both read the same file, so any value in it passes, and `1.0.9` is valid semver.
 
+### The panel is for everyone; two controls inside it are not
+
+`secret.read` reached the baseline `user` role in migration `20260809000000`, so every
+authenticated user gets this panel. Read that migration's header before assuming it widened
+anything: the vault has always been per-user server-side (grants to `authenticated`,
+`auth.uid()` self-scoping, RLS on `auth.uid() = user_id`), and `secret.read` was a
+client-side visibility gate translated forward verbatim from the pre-RBAC `requiresAdmin`
+flag. The practical consequence of leaving it admin-only was not that secrets were safer, it
+was that `DynamicPluginManager` skips `register()` for an inaccessible plugin - so no
+non-admin got `Settings > AI Providers`, and `PluginContext.llmProvider` was null in every
+other plugin. All AI in BOSS was admin-only by accident.
+
+What did NOT become everyone's is sharing with a **role**. `share_secret` gated role targets
+on `can_manage_secret` alone, i.e. any owner could share with any global role - including
+`user`, which is a descendant of every role and therefore means "everyone" (see
+`20260802010000`'s own header). That was survivable only while non-admins could not open this
+panel. It now requires `secret.share.role`, enforced in the RPC and mirrored here by
+`SecretManagerState.canShareWithRoles`, which hides the share dialog's Roles tab.
+
+Three things about that flag:
+
+- **It is collected, not read once.** The panel is constructed as soon as the plugin
+  registers, which can precede the permission claim landing, so a one-shot read in
+  `initialize()` leaves an admin looking at a hidden tab until they reopen the panel.
+  `observeRoleSharePermission` combines `userPermissions` and `isAdmin` - both, because
+  `hasPermission` answers true for an admin regardless of the permission set, so an admin
+  whose claim arrives without a permissions change still needs a recompute.
+- **It fails closed on a null `authDataProvider`**, and `selectedTab` is clamped back to
+  Users if the permission disappears while the dialog is open (remembered state does not
+  re-derive itself).
+- **It is not the enforcement.** The RPC is. `RoleShareGateTest` is mutation-verified three
+  ways: hardcoding the flag true fails the no-permission, late-arrival and revocation cases;
+  collecting `userPermissions` alone (dropping the `isAdmin` half of the combine) fails
+  *an admin claim arriving after initialize*; and a `dispose()` that does not cancel fails
+  *dispose stops tracking the permission*.
+
+**The collector is the only launch in this ViewModel that never completes, and it needs a
+destroy hook.** `scope` is the *plugin* scope while the ViewModel is per panel instance, so an
+uncancelled `collect` on a StateFlow roots the ViewModel for the plugin's whole lifetime - and
+`state.secrets` holds `SecretEntryData` with the decrypted `password`, so each panel open would
+strand a full plaintext credential list. `SecretManagerComponent` calls `viewModel.dispose()`
+from `lifecycle.doOnDestroy`, which cancels the collector and clears the secrets. Nothing needed
+this before because every other launch here terminates - so if you add a second collector,
+cancel it in `dispose()` too.
+
+`loadAvailableRoles()` is gated on the same flag: a user who will never see the Roles tab should
+not pay a round-trip for its contents on every share-dialog open. The `roles` table is readable
+by any authenticated user ("Anyone can view roles" RLS plus a table grant), so this is a cost
+question, not an error-banner one - checked rather than assumed.
+
+**But the gate cannot be a plain "fetch on dialog open" check**, because the Tab appears the
+instant the flag flips. A claim landing while the dialog is already open would otherwise present
+a Roles pane backed by an empty list, with no spinner and no empty state to explain it,
+recoverable only by reopening the dialog with nothing to say so. The collector therefore kicks
+the fetch itself when the flag turns true and the dialog is open. Reasoning that "the flag
+settles before any dialog can open" assumes exactly what the collector exists to deny - that was
+the first version of this and it was wrong.
+
+**`dispose()` needs the `disposed` flag, not just the job cancels.** `createSecret` and
+`updateSecret` call `loadSecrets()` on success, which assigns a *fresh* `loadJob` - so saving a
+secret and closing the panel before the round-trip returned put the plaintext list back on a
+ViewModel nobody could see. (`deleteSecret` is safe: it filters the existing list, which dispose
+has already emptied.) Do **not** "simplify" this into cancelling a child scope: `copySecret`'s
+clipboard wipe is *meant* to outlive the panel by `CLIPBOARD_CLEAR_DELAY_MS`, and cancelling it
+would leave a copied credential on the system clipboard indefinitely - an unbounded OS-level
+exposure traded for a bounded in-memory one.
+
+Plugin Store API keys were already gated, on `api_key.create` via
+`PluginStoreApiKeyProvider.canManageApiKeys()`. Nothing changed there.
+
+`lifecycle.doOnDestroy` is this plugin's first **Essenty extension** symbol (previously only
+`ComponentContext` / `lifecycle`), and it sits on the always-taken component-construction path.
+`buildPluginJar` packages only `sourceSets.main.output`, so `LifecycleExtKt` comes from the host
+at runtime. Checked with `javap` rather than assumed: `doOnDestroy` is present in
+`lifecycle-jvm-2.4.0` and `2.5.0` (the plugin compiles against 2.5.0), so a host on either is
+fine.
+
+`context.authDataProvider` is read on the always-taken registration path, and so are the four
+`AuthDataProvider` members the ViewModel touches - a member newer than the floor is a
+`NoSuchMethodError` there that takes the whole plugin down, not just the AI section. All five
+were checked with `javap` against the released `boss-plugin-api-1.0.73.jar` (exactly
+`minApiVersion`), not assumed: `PluginContext.getAuthDataProvider`, plus `getCurrentUser`,
+`isAdmin`, `hasPermission(String)` and `getUserPermissions`.
+
 ### Provider keys are withheld from `secret_get`
 
 Storing provider keys as ordinary secrets buys encryption, RLS and an audit trail for free.
@@ -201,9 +285,15 @@ Providers instead get an assisted flow: a "Get API key" button opening
 ### Linkage containment
 
 The guard covers the `Llm*` symbols only, so anything else this plugin touches must
-genuinely predate the declared `apiVersion` floor of 1.0.20. Verified against the api tags:
+genuinely predate the declared `apiVersion` floor, which is **1.0.73** (`plugin.json`, both
+`apiVersion` and `minApiVersion`). This paragraph said 1.0.20 long after the manifest moved -
+understating the floor by 53 releases makes safe symbols look dangerous and sends people down
+pointless `LinkageError`-guard detours, so check it against `plugin.json` rather than trusting
+the prose. Verified against the api tags:
 `PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
-`openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. That matters
+`openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. (That check
+predates the floor moving to 1.0.73 and still holds: the api is additive-only, so presence in
+an earlier tag implies presence in every later one. Do not read it as the floor being 1.0.20.) That matters
 because they are read on the always-taken registration path (`registerPanel`), outside any
 guard - a member newer than the floor would throw `NoSuchMethodError` there and take the
 *whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
@@ -430,7 +520,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 133 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 152 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
