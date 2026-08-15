@@ -594,3 +594,30 @@ Pushes to `main` trigger the release workflow which:
 3. Publishes to the BOSS Plugin Store
 
 The workflow is defined in `.github/workflows/build.yml` and delegates to the shared workflow in `risa-labs-inc/BossConsole-Releases`.
+
+## Brokered credentials renew themselves
+
+A brokered key (RISA GLM) is short-lived by design, so it expiring is **routine**, not an error the
+user should be asked to fix. They have access already; minting a replacement is this plugin's job.
+
+The read path noticing a lapsed credential (`refreshLapsedBrokeredCredential`) is a *backstop*, not
+the mechanism: it is asynchronous, so the read that noticed still returns the dead token and the
+user gets one rejected request reading "The provider rejected the credential. Check Settings, AI
+Providers" - which sends them somewhere there is nothing to do. `scheduleBrokeredRenewal` arms a
+timer at `reuseUntil - BROKERED_RENEWAL_LEAD_MS` and each renewal arms the next, so nothing asks for
+a key that has expired.
+
+**A renewal must drop the cache first.** The first version called `reloadConnections()` and renewed
+nothing: `resolveBrokered` serves the cached token while its reuse window is open, so a reload
+*before* the deadline hands back the same credential. That made it a poller for lapse rather than a
+renewal - and the test that caught it only did so because its key had ten minutes of life left. With
+a short-lived key, a load-path re-mint satisfies the assertion and the test passes with the whole
+feature removed. `expireBrokeredCache()` is narrower than `invalidate()` on purpose: it says "this
+key is old", not "the session changed".
+
+The armed delay has a floor (`MIN_BROKERED_RENEWAL_DELAY_MS`). A key whose reuse window has already
+collapsed puts the deadline in the past, and without the floor the loop re-mints as fast as the
+broker answers.
+
+Both timings are constructor parameters for the same reason `minBrokeredRefreshIntervalMs` is: a
+test that waits two minutes is a test nobody runs.

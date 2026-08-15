@@ -274,6 +274,29 @@ class ProviderCredentialStore(
     }
 
     /**
+     * When the soonest-expiring cached brokered credential stops being reusable, or null when
+     * none is cached.
+     *
+     * Exists so a renewal can be *scheduled* rather than waited for. Everything else on this path
+     * is reactive: the credential is replaced only once a read notices it is already dead, which
+     * costs the user a failed request every time one expires while the app is running.
+     */
+    /**
+     * Drop cached brokered credentials so the next resolve mints a fresh one.
+     *
+     * Needed because a renewal that only calls [loadAll] renews nothing: [resolveBrokered] returns
+     * the cached token while its reuse window is open, so a scheduled reload before the deadline
+     * hands back the *same* credential and the whole point - replacing it before anything is
+     * rejected - is lost. Narrower than [invalidate], which bumps the generation to disown a
+     * signed-out session's secrets; this only says "the key is old", not "the session changed".
+     */
+    fun expireBrokeredCache() {
+        brokeredCache.clear()
+    }
+
+    fun nextBrokeredReuseDeadline(): Long? = brokeredCache.values.minOfOrNull { it.reuseUntilMs }
+
+    /**
      * Whether a brokered credential is cached but no longer reusable.
      *
      * The cap in [reuseUntil] only bites when something calls [loadAll], and on the path that

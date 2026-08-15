@@ -5,6 +5,8 @@ import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -67,6 +69,10 @@ class AiProvidersViewModel(
      * an untested guard ends up wrong.
      */
     private val minBrokeredRefreshIntervalMs: Long = DEFAULT_MIN_BROKERED_REFRESH_INTERVAL_MS,
+    // Injectable for the same reason as the interval above: a test that has to wait two minutes to
+    // observe a renewal is a test nobody runs.
+    private val brokeredRenewalLeadMs: Long = BROKERED_RENEWAL_LEAD_MS,
+    private val minBrokeredRenewalDelayMs: Long = MIN_BROKERED_RENEWAL_DELAY_MS,
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -75,6 +81,9 @@ class AiProvidersViewModel(
 
     /** Guards [ensureConnectionsLoaded] so concurrent callers load credentials once. */
     private val connectionsLoadStarted = AtomicBoolean(false)
+
+    /** The armed renewal, replaced on each reload rather than stacked. */
+    private var brokeredRenewalJob: Job? = null
 
     /** Guards [refreshLapsedBrokeredCredential] so a burst of reads triggers one reload. */
     private val brokeredRefreshInFlight = AtomicBoolean(false)
@@ -154,6 +163,10 @@ class AiProvidersViewModel(
             )
         }
         _connectionsLoaded.value = true
+        // Arm the renewal from the *first* load too, not only from later reloads: this is the path
+        // a consumer's very first `activeConfig()` takes, and without this the timer would only
+        // start once something else happened to reload.
+        scheduleBrokeredRenewal()
         return connections
     }
 
@@ -612,6 +625,44 @@ class AiProvidersViewModel(
         val reloaded = credentials.loadAll()
         if (credentials.invalidations.value != startedAt) return
         _state.update { it.copy(connections = withPreferredModels(reloaded.connections)) }
+        scheduleBrokeredRenewal()
+    }
+
+    /**
+     * Renew a brokered credential shortly *before* it stops being reusable.
+     *
+     * Everything else on this path is reactive: the credential is replaced only once a read
+     * notices it is already dead, which costs one failed request every time one expires while the
+     * app is running - and the user sees "The provider rejected the credential. Check Settings",
+     * which reads as something they have to go and fix by hand. They do not: access is already
+     * granted, the key is just short-lived, so renewing it is this plugin's job and it should
+     * happen before anything asks.
+     *
+     * Rescheduled from [reloadConnections], so each successful renewal arms the next one. Cancelled
+     * and replaced rather than stacked, because several reads can reload in quick succession.
+     */
+    private fun scheduleBrokeredRenewal() {
+        val credentials = store ?: return
+        val deadline = credentials.nextBrokeredReuseDeadline() ?: return
+        val delayMs =
+            (deadline - System.currentTimeMillis() - brokeredRenewalLeadMs)
+                // Never zero: a mint that keeps failing, or a deadline already in the past, would
+                // otherwise spin this loop as fast as the broker answers.
+                .coerceAtLeast(minBrokeredRenewalDelayMs)
+        brokeredRenewalJob?.cancel()
+        brokeredRenewalJob =
+            scope.launch(Dispatchers.IO) {
+                delay(delayMs)
+                // Drop the cache first, or this renews nothing: resolveBrokered serves the cached
+                // token while its reuse window is open, so a reload before the deadline would hand
+                // back the same credential. That made the first version of this a poller for
+                // lapse rather than a renewal.
+                credentials.expireBrokeredCache()
+                // runCatching for the same reason as refreshLapsedBrokeredCredential: a host
+                // exchange that throws rather than returning a failed Result would escape and
+                // cancel this scope, which is not a supervisor.
+                runCatching { reloadConnections() }
+            }
     }
 
     private suspend fun refreshOne(providerId: String, force: Boolean) {
@@ -648,5 +699,16 @@ class AiProvidersViewModel(
          */
         const val DEFAULT_MIN_BROKERED_REFRESH_INTERVAL_MS = 5_000L
         const val NANOS_PER_MILLI = 1_000_000L
+
+        /**
+         * How far ahead of a brokered credential's reuse deadline to renew it.
+         *
+         * Long enough to cover a mint round-trip and a slow network, short enough that a laptop
+         * waking from sleep is usually still inside the window.
+         */
+        const val BROKERED_RENEWAL_LEAD_MS = 120_000L
+
+        /** Floor on the armed delay, so a failing mint cannot spin the renewal loop. */
+        const val MIN_BROKERED_RENEWAL_DELAY_MS = 60_000L
     }
 }
