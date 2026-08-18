@@ -93,6 +93,38 @@ fun AiProvidersPanel(
         state.error?.let { MessageBanner(it, BossThemeColors.ErrorColor) }
         state.notice?.let { MessageBanner(it, BossThemeColors.SuccessColor) }
 
+        // Above the providers on purpose: for a user who already has a `claude` or `codex`
+        // login, this is the whole setup, and burying it under a key-entry form would have
+        // them paste a key they never needed. Absent entirely when the gateway serves none,
+        // rather than showing an empty section nobody can act on.
+        if (state.cliEngines.isNotEmpty()) {
+            BossSection(
+                title = "Local CLI sessions",
+                description =
+                    "Use a CLI you have already signed into. No API key, billed to that " +
+                        "subscription. Selecting one replaces the provider below for every plugin.",
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    state.cliEngines.forEach { engine ->
+                        CliEngineRow(
+                            engine = engine,
+                            health = state.cliHealthOf(engine.id),
+                            isActive = engine.id == state.activeCliEngineId,
+                            onClick = {
+                                // Clicking the active row turns it off rather than doing
+                                // nothing: it is the only way back to an HTTP provider without
+                                // having to pick one, and a row that cannot be deselected reads
+                                // as stuck.
+                                viewModel.setActiveCliEngine(
+                                    if (engine.id == state.activeCliEngineId) null else engine.id,
+                                )
+                            },
+                        )
+                    }
+                }
+            }
+        }
+
         BossSection(
             title = "Providers",
             description = "Choose a provider, add its API key, then pick a model from its live list.",
@@ -117,6 +149,82 @@ fun AiProvidersPanel(
         )
     }
 }
+
+/**
+ * One local CLI engine.
+ *
+ * Deliberately not a [ProviderRow]: there is no key field, no model list and no status dot
+ * driven by a credential source, because the credential is a login this panel never sees. What
+ * a user needs here is whether the binary is there and whether it is serving requests.
+ */
+@Composable
+private fun CliEngineRow(
+    engine: CliEngineInfo,
+    health: CliEngineHealth,
+    isActive: Boolean,
+    onClick: () -> Unit,
+) {
+    val borderColor = if (isActive) BossThemeColors.AccentColor else BossThemeColors.BorderColor
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(BossThemeColors.SurfaceColor)
+                .border(1.dp, borderColor, RoundedCornerShape(6.dp))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier =
+                Modifier
+                    .size(8.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(
+                        when (health) {
+                            is CliEngineHealth.Ready -> BossThemeColors.SuccessColor
+                            is CliEngineHealth.Failed -> BossThemeColors.ErrorColor
+                            is CliEngineHealth.NotInstalled -> BossThemeColors.WarningColor
+                            CliEngineHealth.Unknown -> BossThemeColors.BorderColor
+                        },
+                    ),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(engine.displayName, fontSize = 13.sp, color = BossThemeColors.TextPrimary)
+            Text(
+                text = healthLine(engine, health),
+                fontSize = 11.sp,
+                color = BossThemeColors.TextSecondary,
+            )
+        }
+        if (isActive) {
+            Text("Active", fontSize = 11.sp, color = BossThemeColors.AccentColor)
+        }
+    }
+}
+
+/**
+ * What to say under an engine's name.
+ *
+ * Each state names its own fix, which is why they are not collapsed: "install it" is wrong for
+ * a broken install, and **"Ready" deliberately does not claim signed in** - a probe runs the
+ * CLI's `--version`, which succeeds for an install that has never been logged in. Promising
+ * more than that here would send a first-run user looking for a bug in the panel when their
+ * first turn fails.
+ */
+private fun healthLine(
+    engine: CliEngineInfo,
+    health: CliEngineHealth,
+): String =
+    when (health) {
+        is CliEngineHealth.Ready ->
+            "Found ${health.version}. If a turn fails to authenticate, sign in once in a terminal."
+        is CliEngineHealth.NotInstalled -> health.hint.ifBlank { engine.installHint }.ifBlank { "Not installed." }
+        is CliEngineHealth.Failed -> "Installed but would not run: ${health.message}"
+        CliEngineHealth.Unknown -> "Checking…"
+    }
 
 @Composable
 private fun ProviderRow(

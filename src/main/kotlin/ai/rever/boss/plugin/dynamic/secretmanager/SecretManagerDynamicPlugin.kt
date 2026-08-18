@@ -7,6 +7,7 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.ActiveProviderPrefs
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.BrokeredCredentialBridge
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.EnvResolver
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.GatewayCliEngineAccess
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.LegacySettingsImport
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.LlmProviderSettingsApiImpl
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ModelCatalog
@@ -152,6 +153,11 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     envResolver = envResolver,
                     splitViewOperations = context.splitViewOperations,
                     scope = pluginScope,
+                    // Inside the guard for the same reason the broker bridge above is: the
+                    // adapter names api types added in 1.0.78, so resolving it is exactly what
+                    // must not happen on an older host. Null there, which costs the Local CLI
+                    // section and nothing else.
+                    cliEngines = GatewayCliEngineAccess.orNull(context),
                 )
 
             context.registerPluginAPI(LlmProviderSettingsApiImpl(viewModel))
