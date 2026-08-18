@@ -306,12 +306,13 @@ because `AiProvidersPanel` is reachable only from `LlmProviderSettingsApiImpl`, 
 symbols never load on a pre-1.0.71 host - but that stops being true the moment the panel is
 rendered from `SecretManagerContent`, which is exactly why it is written down here.
 
-`LlmProviderSettingsApiImpl` and `BrokeredCredentialBridge` are the **only** files
-referencing api symbols added after this plugin's declared floor
+`LlmProviderSettingsApiImpl`, `BrokeredCredentialBridge` and `GatewayCliEngineAccess` are the
+**only** files referencing api symbols added after this plugin's declared floor
 (`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE` from 1.0.71;
-`BrokeredCredentialProvider` and `PluginContext.brokeredCredentialProvider` from 1.0.74).
-Everything else uses the plugin-local `WireFormat` enum and the plugin-local
-`BrokeredKeySource` seam. That is why `registerAiProviderSettings` can wrap registration
+`BrokeredCredentialProvider` and `PluginContext.brokeredCredentialProvider` from 1.0.74;
+`AiCliSessionAPI` and `AiCliHealth` from 1.0.78).
+Everything else uses the plugin-local `WireFormat` enum, the plugin-local `BrokeredKeySource`
+seam, and the plugin-local `CliEngineAccess` seam. That is why `registerAiProviderSettings` can wrap registration
 in a `LinkageError` guard and why `plugin.json` keeps its lower `apiVersion`: on an older
 host the AI panel is simply not served, and secret management still works. Adding a
 new-api reference outside those two files would take the whole plugin down on such a host.
@@ -331,6 +332,35 @@ because the enum is host-compiled and served parent-first. So it goes through
 `configFor` returns null when it is missing - the provider reports unconfigured instead of
 crashing the section. Only `RISA_GLM` speaks that format and it needs the broker relay
 anyway, so on such a host it could never have worked.
+
+### Local CLI sessions
+
+The panel's other way to have working AI: a `claude` or `codex` login the user already made in
+a terminal. No key, no endpoint, no model list - which is exactly why an engine is **not** a
+`ProviderDescriptor` and gets a section of its own above the providers. Burying it under a
+key-entry form would have a user paste a key they never needed.
+
+The gateway owns the engines; this panel owns the choice. `CliEngineAccess` is a plugin-local
+mirror of `AiCliSessionAPI` for the same reason `WireFormat` mirrors `LlmApiFormat`, and
+`GatewayCliEngineAccess` is the only file naming the api types - constructed inside the same
+`LinkageError` guard as the broker bridge, so an older host loses this section and nothing else.
+That is why `plugin.json` stays at its floor rather than moving to 1.0.78.
+
+**Exactly one thing is active, and both setters enforce it.** `setActiveCliEngine` clears the
+HTTP provider and `setActiveProvider` calls `selectEngine(null)`. The second direction is the
+one that misroutes if it is missing: the gateway prefers a selected engine over any configured
+key, so without the release the panel would show a provider as active while every request still
+went to the CLI. Mutation-verified - removing the release fails two cases.
+
+A refusal is surfaced, not swallowed: `selectEngine` returns false for an engine the gateway
+does not have, and a row that silently springs back is worse than one that says why. A refused
+*release* deliberately leaves the engine shown as active, because it is still serving requests
+and clearing the panel's copy would be the disagreement all of this is guarding against.
+
+`CliEngineHealth.Unknown` has no api counterpart and is this panel's own: a row renders before
+its probe answers, and "not installed" would be a claim rather than a wait. And **`Ready` does
+not mean signed in** - the probe runs `--version`, which succeeds for an install that has never
+been logged in, so the row says so rather than promising a turn will work.
 
 ### Brokered providers (RISA Codex GLM)
 
@@ -520,7 +550,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 152 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 163 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

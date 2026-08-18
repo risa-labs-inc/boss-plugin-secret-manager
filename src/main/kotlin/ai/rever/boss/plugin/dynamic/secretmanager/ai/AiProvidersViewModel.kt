@@ -26,6 +26,26 @@ data class AiProvidersUiState(
     val selectedProviderId: String = ProviderRegistry.default.id,
     /** Provider served to other plugins as the active config. */
     val activeProviderId: String? = null,
+    /**
+     * Local CLI engines the gateway can drive, or empty when it serves none.
+     *
+     * Empty covers three cases the panel treats alike, because none of them gives the user
+     * anything to do here: the gateway is not installed, it predates `AiCliSessionAPI`, or
+     * this host's api jar does not link the symbol.
+     */
+    val cliEngines: List<CliEngineInfo> = emptyList(),
+    /** Per-engine readiness, filled in as the probes answer. */
+    val cliHealth: Map<String, CliEngineHealth> = emptyMap(),
+    /**
+     * The CLI engine serving AI requests, or null when an HTTP provider is.
+     *
+     * **Mutually exclusive with [activeProviderId] in this panel**, which is the whole reason
+     * both setters clear the other: two stores each holding "which provider is active" can
+     * disagree, and one writer is what stops them. The gateway resolves a disagreement in the
+     * engine's favour, so a stale HTTP preference is harmless to a request - but a panel
+     * showing two things as active is not harmless to a user.
+     */
+    val activeCliEngineId: String? = null,
     val connections: Map<String, ProviderConnection> = emptyMap(),
     val catalogs: Map<String, CatalogState> = emptyMap(),
     /** In-progress key edits, keyed by provider id. Never persisted until saved. */
@@ -43,6 +63,8 @@ data class AiProvidersUiState(
             ?: ProviderConnection(providerId = providerId, apiKey = "", source = CredentialSource.NONE)
 
     fun catalogOf(providerId: String): CatalogState = catalogs[providerId] ?: CatalogState.NotConfigured
+
+    fun cliHealthOf(engineId: String): CliEngineHealth = cliHealth[engineId] ?: CliEngineHealth.Unknown
 }
 
 /**
@@ -61,6 +83,13 @@ class AiProvidersViewModel(
     private val splitViewOperations: SplitViewOperations?,
     private val scope: CoroutineScope,
     private val envResolver: EnvResolver,
+    /**
+     * The AI Gateway's local CLI engines, or null when this host serves none.
+     *
+     * Injected rather than resolved here so the panel's behaviour is testable without a host,
+     * and so every new-api reference stays inside the one adapter that implements it.
+     */
+    private val cliEngines: CliEngineAccess? = null,
     /**
      * Floor on how often a brokered refresh may run.
      *
@@ -111,6 +140,10 @@ class AiProvidersViewModel(
 
     init {
         scope.launch { catalog.states.collect { states -> _state.update { it.copy(catalogs = states) } } }
+
+        // The engine list is cheap; the probes it kicks off are not, which is why this runs
+        // once here rather than per composition.
+        refreshCliEngines()
 
         // Re-read credentials whenever the store is invalidated — which is what the secret
         // list's own create/update/delete does. Clearing the store cache alone was not
@@ -286,11 +319,78 @@ class AiProvidersViewModel(
         _state.update { it.copy(selectedProviderId = providerId, notice = null, error = null) }
     }
 
-    /** Make [providerId] the provider other plugins get from `activeConfig()`. */
+    /**
+     * Make [providerId] the provider other plugins get from `activeConfig()`.
+     *
+     * Also hands AI requests back from a local CLI engine, if one had them. This is the single
+     * writer that keeps the two stores from disagreeing: without the `selectEngine(null)` the
+     * gateway would go on serving the engine - it wins any tie by design - and the panel would
+     * show a provider as active while requests went somewhere else.
+     */
     fun setActiveProvider(providerId: String) {
         scope.launch {
             prefs.write(providerId)
-            _state.update { it.copy(activeProviderId = providerId, notice = null) }
+            val released = runCatching { cliEngines?.selectEngine(null) }.getOrNull()
+            _state.update {
+                it.copy(
+                    activeProviderId = providerId,
+                    // Only clear what we actually released. A gateway that refused leaves the
+                    // engine serving requests, and showing it as inactive would be the exact
+                    // disagreement this method exists to prevent.
+                    activeCliEngineId = if (released == false) it.activeCliEngineId else null,
+                    notice = null,
+                )
+            }
+        }
+    }
+
+    /**
+     * Make [engineId] serve AI requests through the user's own CLI login, or null to hand them
+     * back to the selected HTTP provider.
+     *
+     * The mirror of [setActiveProvider], and deliberately explicit: nothing routes to a CLI
+     * engine unless the user picked one here. A gateway that quietly spent someone's Claude
+     * subscription because no API key happened to be configured would be a surprise bill, not
+     * a helpful default.
+     */
+    fun setActiveCliEngine(engineId: String?) {
+        val access = cliEngines
+        if (access == null) {
+            _state.update { it.copy(error = "The AI Gateway plugin is not available on this host.") }
+            return
+        }
+        scope.launch {
+            val applied = runCatching { access.selectEngine(engineId) }.getOrDefault(false)
+            if (!applied) {
+                // Reported rather than swallowed: the api returns false for an engine the
+                // gateway does not have, and a row that springs back with no explanation is
+                // worse than one that says why.
+                _state.update {
+                    it.copy(error = "The AI Gateway could not select that engine.", notice = null)
+                }
+                return@launch
+            }
+            _state.update { it.copy(activeCliEngineId = engineId, error = null, notice = null) }
+        }
+    }
+
+    /**
+     * Load the engine list and probe each one.
+     *
+     * The probes run one at a time and update the state as they answer, so a slow or missing
+     * binary delays its own row rather than the section. Each spawns a process, which is why
+     * this is called on load and from Refresh rather than per composition.
+     */
+    fun refreshCliEngines() {
+        val access = cliEngines ?: return
+        scope.launch {
+            val engines = runCatching { access.engines() }.getOrDefault(emptyList())
+            val selected = runCatching { access.selectedEngineId() }.getOrNull()
+            _state.update { it.copy(cliEngines = engines, activeCliEngineId = selected) }
+            engines.forEach { engine ->
+                val health = runCatching { access.health(engine.id) }.getOrDefault(CliEngineHealth.Unknown)
+                _state.update { it.copy(cliHealth = it.cliHealth + (engine.id to health)) }
+            }
         }
     }
 
