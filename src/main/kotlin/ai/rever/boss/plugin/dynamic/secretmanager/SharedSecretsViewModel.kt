@@ -1,0 +1,290 @@
+package ai.rever.boss.plugin.dynamic.secretmanager
+
+import ai.rever.boss.plugin.api.SecretDataProvider
+import ai.rever.boss.plugin.api.SecretEntryWithSharingData
+import ai.rever.boss.plugin.logging.BossLogger
+import ai.rever.boss.plugin.logging.LogCategory
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+/**
+ * How a secret reached the signed-in caller, as reported by `get_user_secrets_with_shared`.
+ *
+ * The RPC's `access_level` is the ONLY reliable partition key, and `isOwner` is not:
+ * source 4 of that UNION returns organisation-owned secrets with
+ * `is_owner = (s.user_id = auth.uid())`, so a colleague's organisation secret arrives with
+ * `isOwner = false` while being nobody's share. Splitting on `isOwner` would file it under
+ * "Shared with me" and claim someone shared it with you.
+ *
+ * See BossConsole `supabase/migrations/20260802000000_secrets_org_ownership.sql`, which
+ * assigns these literals per source with an explicit dedup priority so the value cannot
+ * flap between calls when a secret is reachable by several routes.
+ */
+internal object SecretAccess {
+    /** Source 1: the caller created it. */
+    const val OWNER = "owner"
+
+    /** Source 4: owned by an organisation the caller belongs to. */
+    const val ORG = "org"
+
+    /**
+     * True when the secret reached the caller through an actual share - by user, by role, or
+     * by organisation (sources 2, 3 and 5, whose level is the share's own `read` / `write`).
+     *
+     * Anything unrecognised counts as a share rather than as ownership: a new UNION source
+     * added server-side should surface in the read-only section, where no management control
+     * can act on it, instead of silently joining the list that offers Edit and Delete.
+     */
+    fun isShare(accessLevel: String): Boolean =
+        !accessLevel.equals(OWNER, ignoreCase = true) && !accessLevel.equals(ORG, ignoreCase = true)
+}
+
+/** True when this entry belongs in the "Shared with me" section. See [SecretAccess.isShare]. */
+internal fun SecretEntryWithSharingData.isSharedWithMe(): Boolean = SecretAccess.isShare(accessLevel)
+
+/**
+ * The read-only "Shared with me" section of the Secret Manager panel: the secrets other
+ * people have shared with the signed-in user, with no management controls at all.
+ *
+ * Ported from the retired `user-secret-list` plugin, whose panel listed everything the caller
+ * could read - including their own secrets, which the other section of this panel already
+ * shows. Keeping only shares is what makes one panel out of two non-overlapping halves.
+ *
+ * Reads `getUserSecretsWithSharingInfo`, which is a strict superset of the `getUserSecrets`
+ * call behind the managed list: same columns plus `isOwner`, `sharedByEmail` and
+ * `accessLevel`.
+ */
+class SharedSecretsViewModel(
+    private val secretDataProvider: SecretDataProvider?,
+    private val scope: CoroutineScope,
+) {
+    private val logger = BossLogger.forComponent("SharedSecrets")
+
+    private val _state = MutableStateFlow(SharedSecretsState())
+    val state: StateFlow<SharedSecretsState> = _state.asStateFlow()
+
+    private var loadJob: Job? = null
+
+    /**
+     * Load on first entry into the section, then never again on its own.
+     *
+     * Deliberately not an `init` load: this ViewModel is constructed with the panel, and
+     * fetching here would fire a second secrets RPC on every panel open for a section the
+     * user may not visit. The panel's Refresh button drives [refresh].
+     */
+    fun ensureLoaded() {
+        val current = _state.value
+        if (current.hasLoadedOnce || current.isLoading || loadJob?.isActive == true) return
+        load(reset = true)
+    }
+
+    /** Discard what is loaded and fetch from the first page again. */
+    fun refresh() = load(reset = true)
+
+    /** Continue scanning past what is loaded, when the server says there is more. */
+    fun loadMore() {
+        val current = _state.value
+        if (!current.hasMore || current.isLoading || current.isLoadingMore) return
+        if (current.searchQuery.isNotBlank()) return
+        load(reset = false)
+    }
+
+    private fun load(reset: Boolean) {
+        val provider =
+            secretDataProvider ?: run {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        isLoadingMore = false,
+                        hasLoadedOnce = true,
+                        errorMessage = "Secret data provider not available",
+                    )
+                }
+                return
+            }
+
+        if (reset) {
+            loadJob?.cancel()
+        } else if (loadJob?.isActive == true) {
+            return
+        }
+
+        _state.update {
+            if (reset) {
+                it.copy(
+                    isLoading = true,
+                    isLoadingMore = false,
+                    errorMessage = null,
+                    searchQuery = "",
+                    lastLoadDurationMs = null,
+                )
+            } else {
+                it.copy(isLoadingMore = true, errorMessage = null)
+            }
+        }
+
+        loadJob =
+            scope.launch {
+                var offset = if (reset) 0 else _state.value.rowsScanned
+                var shares = if (reset) emptyList() else _state.value.allShared
+                var hasMore = true
+                var pages = 0
+                var elapsedMs = 0L
+
+                // Auto-continue while a page yields no shares. A page is 50 entries of
+                // EVERYTHING the caller can read, so someone with 60 of their own secrets and
+                // two shared ones gets a first page filtered down to nothing - and a section
+                // reporting "no shared secrets" while the server still has some is a lie the
+                // user cannot tell from the truth. Capped so a large vault cannot turn one
+                // section switch into an unbounded scan; the Load more control takes over.
+                while (true) {
+                    val startedAt = System.nanoTime()
+                    val result = provider.getUserSecretsWithSharingInfo(limit = PAGE_SIZE, offset = offset)
+                    elapsedMs = elapsedMsSince(startedAt)
+
+                    val page =
+                        result.getOrElse { error ->
+                            if (error is CancellationException) throw error
+                            val message = error.message ?: "Unknown error"
+                            logTiming("getUserSecretsWithSharingInfo(offset=$offset)", elapsedMs, message, failed = true)
+                            _state.update {
+                                it.copy(
+                                    isLoading = false,
+                                    isLoadingMore = false,
+                                    hasLoadedOnce = true,
+                                    errorMessage = message,
+                                )
+                            }
+                            return@launch
+                        }
+
+                    pages++
+                    // Advance by the RAW row count, not the filtered one: the offset addresses
+                    // the server's full accessible set, so counting only shares would re-read
+                    // the same page forever.
+                    offset += page.data.size
+                    shares = shares + page.data.filter { it.isSharedWithMe() }
+                    // An empty page ends the scan whatever `hasMore` says - the host derives
+                    // that flag from `size >= limit`, but trusting it alone would spin here if
+                    // it were ever true for a page with no rows.
+                    hasMore = page.hasMore && page.data.isNotEmpty()
+
+                    logTiming(
+                        "getUserSecretsWithSharingInfo(offset=${offset - page.data.size})",
+                        elapsedMs,
+                        "${page.data.size} accessible, ${shares.size} shared so far",
+                    )
+
+                    if (!hasMore || shares.isNotEmpty() || pages >= MAX_AUTO_PAGES) break
+                }
+
+                val settled = shares
+                _state.update {
+                    it.copy(
+                        allShared = settled,
+                        shared = if (it.searchQuery.isBlank()) settled else settled.filterBy(it.searchQuery),
+                        isLoading = false,
+                        isLoadingMore = false,
+                        hasLoadedOnce = true,
+                        rowsScanned = offset,
+                        hasMore = hasMore,
+                        lastLoadDurationMs = elapsedMs,
+                    )
+                }
+            }
+    }
+
+    /** Filter what is loaded by website or username. Client-side, like the section it replaces. */
+    fun search(query: String) {
+        _state.update {
+            it.copy(
+                searchQuery = query,
+                shared = if (query.isBlank()) it.allShared else it.allShared.filterBy(query),
+            )
+        }
+    }
+
+    fun toggleMetadataExpanded(secretId: String) {
+        _state.update { state ->
+            state.copy(
+                expandedSecretIds =
+                    if (state.expandedSecretIds.contains(secretId)) {
+                        state.expandedSecretIds - secretId
+                    } else {
+                        state.expandedSecretIds + secretId
+                    },
+            )
+        }
+    }
+
+    fun clearError() {
+        _state.update { it.copy(errorMessage = null) }
+    }
+
+    /**
+     * Stop the scan when the panel goes away.
+     *
+     * The load runs on the *plugin* scope, which outlives this instance, so an in-flight
+     * auto-continue would otherwise keep a list of decrypted secrets alive for the plugin's
+     * whole lifetime. Same reason [SecretManagerViewModel.dispose] exists.
+     */
+    fun dispose() {
+        loadJob?.cancel()
+        loadJob = null
+    }
+
+    /** Monotonic, so a wall-clock (NTP) jump cannot produce a negative duration. */
+    private fun elapsedMsSince(startedAtNanos: Long): Long = (System.nanoTime() - startedAtNanos) / 1_000_000
+
+    /** Elapsed time per fetch, so an intermittently slow load is diagnosable from the host console. */
+    private fun logTiming(
+        operation: String,
+        elapsedMs: Long,
+        outcome: String,
+        failed: Boolean = false,
+    ) {
+        val message = "$operation: ${if (failed) "FAILED ($outcome)" else outcome} in $elapsedMs ms"
+        if (failed) {
+            logger.warn(LogCategory.NETWORK, message)
+        } else {
+            logger.info(LogCategory.NETWORK, message)
+        }
+    }
+
+    internal companion object {
+        const val PAGE_SIZE = 50
+
+        /** Pages one section switch may scan before handing back to the Load more control. */
+        const val MAX_AUTO_PAGES = 5
+    }
+}
+
+private fun List<SecretEntryWithSharingData>.filterBy(query: String) =
+    filter { it.website.contains(query, ignoreCase = true) || it.username.contains(query, ignoreCase = true) }
+
+/**
+ * State of the "Shared with me" section.
+ *
+ * [rowsScanned] counts entries read from the server, not shares found: it is the pagination
+ * offset, and it is what tells the empty state "nothing shared in the first 250 secrets"
+ * apart from "you have nothing shared with you".
+ */
+data class SharedSecretsState(
+    val allShared: List<SecretEntryWithSharingData> = emptyList(),
+    val shared: List<SecretEntryWithSharingData> = emptyList(),
+    val isLoading: Boolean = false,
+    val isLoadingMore: Boolean = false,
+    val hasLoadedOnce: Boolean = false,
+    val errorMessage: String? = null,
+    val searchQuery: String = "",
+    val expandedSecretIds: Set<String> = emptySet(),
+    val rowsScanned: Int = 0,
+    val hasMore: Boolean = true,
+    val lastLoadDurationMs: Long? = null,
+)

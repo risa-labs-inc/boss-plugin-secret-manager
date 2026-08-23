@@ -13,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -40,22 +42,46 @@ import androidx.compose.foundation.BorderStroke
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
 
 /**
+ * The two halves of the panel.
+ *
+ * They partition the vault rather than overlap it: [SECRETS] is what the caller can manage
+ * (their own secrets and their organisation's), [SHARED_WITH_ME] is what other people have
+ * shared with them, read-only. Until 1.2.16 these were two separate plugins, and both listed
+ * the caller's own secrets - which is the confusion this split removes.
+ */
+enum class SecretPanelSection {
+    SECRETS,
+    SHARED_WITH_ME,
+}
+
+/**
  * Secret Manager panel content (Dynamic Plugin).
  *
- * Displays and manages user secrets with CRUD and sharing operations.
+ * Displays and manages user secrets with CRUD and sharing operations, plus a read-only
+ * section for secrets shared with the caller.
  * Also supports Plugin Store API key management for admin/plugin_admin users.
  * UI matches the bundled plugin's Card-based design.
  *
- * The ViewModel is owned by [SecretManagerComponent] so state survives the
- * panel leaving and re-entering composition.
+ * Both ViewModels and the selected section are owned by [SecretManagerComponent] so state
+ * survives the panel leaving and re-entering composition.
  */
 @Composable
-fun SecretManagerContent(viewModel: SecretManagerViewModel) {
+fun SecretManagerContent(
+    viewModel: SecretManagerViewModel,
+    sharedSecretsViewModel: SharedSecretsViewModel,
+    selectedSection: SecretPanelSection,
+    onSelectSection: (SecretPanelSection) -> Unit,
+) {
     BossTheme {
         if (!viewModel.isAvailable()) {
             NoProviderMessage()
         } else {
-            SecretManagerView(viewModel)
+            SecretManagerView(
+                viewModel = viewModel,
+                sharedSecretsViewModel = sharedSecretsViewModel,
+                selectedSection = selectedSection,
+                onSelectSection = onSelectSection,
+            )
         }
     }
 }
@@ -103,11 +129,25 @@ private fun NoProviderMessage() {
  * Main view composable for Secret Manager panel
  */
 @Composable
-private fun SecretManagerView(viewModel: SecretManagerViewModel) {
+private fun SecretManagerView(
+    viewModel: SecretManagerViewModel,
+    sharedSecretsViewModel: SharedSecretsViewModel,
+    selectedSection: SecretPanelSection,
+    onSelectSection: (SecretPanelSection) -> Unit,
+) {
     val state = viewModel.state
+    val sharedState by sharedSecretsViewModel.state.collectAsState()
     val listState = rememberLazyListState()
     val clipboardManager = LocalClipboardManager.current
     var showAddDropdown by remember { mutableStateOf(false) }
+
+    // Fetch on first entry into the section, not on panel open: this is a second secrets RPC
+    // and most panel opens never reach the section. Re-runs only when the section changes.
+    LaunchedEffect(selectedSection) {
+        if (selectedSection == SecretPanelSection.SHARED_WITH_ME) {
+            sharedSecretsViewModel.ensureLoaded()
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -131,15 +171,26 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                     modifier = Modifier.weight(1f)
                 )
 
-                // Refresh button
+                // Refresh button. Refetches whichever section is on screen - the two read
+                // different RPCs, so refreshing the hidden one would look like doing nothing.
+                val isRefreshing =
+                    when (selectedSection) {
+                        SecretPanelSection.SECRETS -> state.isLoading
+                        SecretPanelSection.SHARED_WITH_ME -> sharedState.isLoading
+                    }
                 IconButton(
-                    onClick = { viewModel.loadSecrets() },
-                    enabled = !state.isLoading
+                    onClick = {
+                        when (selectedSection) {
+                            SecretPanelSection.SECRETS -> viewModel.loadSecrets()
+                            SecretPanelSection.SHARED_WITH_ME -> sharedSecretsViewModel.refresh()
+                        }
+                    },
+                    enabled = !isRefreshing
                 ) {
                     Icon(
                         Icons.Default.Refresh,
                         contentDescription = "Refresh",
-                        tint = if (state.isLoading) BossThemeColors.TextSecondary else BossThemeColors.TextPrimary
+                        tint = if (isRefreshing) BossThemeColors.TextSecondary else BossThemeColors.TextPrimary
                     )
                 }
 
@@ -262,95 +313,32 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                 }
             }
 
-            // Search bar
-            SearchBar(
-                query = state.searchQuery,
-                onQueryChange = { viewModel.searchSecrets(it) },
-                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+            SectionTabs(
+                selectedSection = selectedSection,
+                sharedCount = sharedState.shared.size,
+                hasLoadedShared = sharedState.hasLoadedOnce,
+                onSelectSection = onSelectSection,
             )
 
-            // Secret count
-            Text(
-                "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}" +
-                    (state.lastLoadDurationMs?.let { " · last fetch ${formatLoadDuration(it)}" } ?: ""),
-                color = BossThemeColors.TextSecondary,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-
-            // Content based on state
-            when {
-                state.isLoading -> {
-                    LoadingView()
-                }
-                state.errorMessage != null -> {
-                    ErrorView(
-                        message = state.errorMessage,
-                        onRetry = { viewModel.loadSecrets() },
-                        onDismiss = { viewModel.clearError() }
+            when (selectedSection) {
+                SecretPanelSection.SECRETS ->
+                    SecretsSection(
+                        viewModel = viewModel,
+                        listState = listState,
+                        clipboardManager = clipboardManager,
+                        modifier = Modifier.weight(1f),
                     )
-                }
-                state.secrets.isEmpty() -> {
-                    EmptyView(
-                        searchQuery = state.searchQuery,
-                        onAddSecret = { viewModel.showCreateDialog() }
+
+                SecretPanelSection.SHARED_WITH_ME ->
+                    SharedSecretsSection(
+                        state = sharedState,
+                        onSearch = { sharedSecretsViewModel.search(it) },
+                        onToggleMetadata = { sharedSecretsViewModel.toggleMetadataExpanded(it) },
+                        onLoadMore = { sharedSecretsViewModel.loadMore() },
+                        onRefresh = { sharedSecretsViewModel.refresh() },
+                        onDismissError = { sharedSecretsViewModel.clearError() },
+                        modifier = Modifier.weight(1f),
                     )
-                }
-                else -> {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier
-                            .weight(1f)
-                            .lazyListScrollbar(
-                                listState = listState,
-                                direction = Orientation.Vertical,
-                                config = getPanelScrollbarConfig()
-                            ),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(state.secrets, key = { it.id }) { secret ->
-                            SecretCard(
-                                secret = secret,
-                                isPasswordVisible = state.visiblePasswordIds.contains(secret.id),
-                                isExpanded = state.expandedSecretIds.contains(secret.id),
-                                onTogglePassword = { viewModel.togglePasswordVisibility(secret.id) },
-                                onToggleExpand = { viewModel.toggleMetadataExpanded(secret.id) },
-                                onEdit = { viewModel.showEditDialog(secret) },
-                                onDelete = { viewModel.showDeleteDialog(secret) },
-                                onShare = { viewModel.showShareDialog(secret) },
-                                onCopyPassword = { viewModel.copyPasswordToClipboard(secret, clipboardManager) },
-                                isAiProvider = viewModel.isAiProviderSecret(secret),
-                                aiProviderLabel = viewModel.aiProviderDisplayName(secret),
-                                onOpenAiProviderSettings = { viewModel.openAiProviderSettings() }
-                            )
-                        }
-
-                        // Load more trigger
-                        if (state.hasMore && !state.isLoadingMore) {
-                            item {
-                                LaunchedEffect(Unit) {
-                                    viewModel.loadMoreSecrets()
-                                }
-                            }
-                        }
-
-                        // Loading more indicator
-                        if (state.isLoadingMore) {
-                            item {
-                                Box(
-                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(24.dp),
-                                        color = BossThemeColors.SuccessColor,
-                                        strokeWidth = 2.dp
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -441,6 +429,156 @@ private fun SecretManagerView(viewModel: SecretManagerViewModel) {
                 viewModel.showCreateApiKeyDialog()
             },
             isLoading = state.isLoadingApiKeys || state.isOperationInProgress
+        )
+    }
+}
+
+/**
+ * The section that manages secrets: the caller's own plus their organisation's, read through
+ * `getUserSecrets` with server-side search.
+ *
+ * Extracted from [SecretManagerView] unchanged when the panel gained sections. [listState] is
+ * hoisted rather than remembered here on purpose: this composable leaves composition when the
+ * other section is on screen, and a local `rememberLazyListState` would drop the scroll
+ * position every time the user looks at their shared secrets and comes back.
+ */
+@Composable
+private fun SecretsSection(
+    viewModel: SecretManagerViewModel,
+    listState: LazyListState,
+    clipboardManager: ClipboardManager,
+    modifier: Modifier = Modifier,
+) {
+    val state = viewModel.state
+
+    Column(modifier = modifier.fillMaxSize()) {
+        // Search bar
+        SearchBar(
+            query = state.searchQuery,
+            onQueryChange = { viewModel.searchSecrets(it) },
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+        )
+
+        // Secret count
+        Text(
+            "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}" +
+                (state.lastLoadDurationMs?.let { " · last fetch ${formatLoadDuration(it)}" } ?: ""),
+            color = BossThemeColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+
+        // Content based on state
+        when {
+            state.isLoading -> {
+                LoadingView()
+            }
+            state.errorMessage != null -> {
+                ErrorView(
+                    message = state.errorMessage,
+                    onRetry = { viewModel.loadSecrets() },
+                    onDismiss = { viewModel.clearError() }
+                )
+            }
+            state.secrets.isEmpty() -> {
+                EmptyView(
+                    searchQuery = state.searchQuery,
+                    onAddSecret = { viewModel.showCreateDialog() }
+                )
+            }
+            else -> {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .lazyListScrollbar(
+                            listState = listState,
+                            direction = Orientation.Vertical,
+                            config = getPanelScrollbarConfig()
+                        ),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(state.secrets, key = { it.id }) { secret ->
+                        SecretCard(
+                            secret = secret,
+                            isPasswordVisible = state.visiblePasswordIds.contains(secret.id),
+                            isExpanded = state.expandedSecretIds.contains(secret.id),
+                            onTogglePassword = { viewModel.togglePasswordVisibility(secret.id) },
+                            onToggleExpand = { viewModel.toggleMetadataExpanded(secret.id) },
+                            onEdit = { viewModel.showEditDialog(secret) },
+                            onDelete = { viewModel.showDeleteDialog(secret) },
+                            onShare = { viewModel.showShareDialog(secret) },
+                            onCopyPassword = { viewModel.copyPasswordToClipboard(secret, clipboardManager) },
+                            isAiProvider = viewModel.isAiProviderSecret(secret),
+                            aiProviderLabel = viewModel.aiProviderDisplayName(secret),
+                            onOpenAiProviderSettings = { viewModel.openAiProviderSettings() }
+                        )
+                    }
+
+                    // Load more trigger
+                    if (state.hasMore && !state.isLoadingMore) {
+                        item {
+                            LaunchedEffect(Unit) {
+                                viewModel.loadMoreSecrets()
+                            }
+                        }
+                    }
+
+                    // Loading more indicator
+                    if (state.isLoadingMore) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    color = BossThemeColors.SuccessColor,
+                                    strokeWidth = 2.dp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The section switcher, in the same [TabRow] idiom the share dialog already uses in this file,
+ * so it reads as part of the panel rather than a bolted-on control.
+ *
+ * The shared count appears only once that section has loaded: it loads lazily, and a "(0)"
+ * printed before anything was fetched states a fact nobody has checked.
+ */
+@Composable
+private fun SectionTabs(
+    selectedSection: SecretPanelSection,
+    sharedCount: Int,
+    hasLoadedShared: Boolean,
+    onSelectSection: (SecretPanelSection) -> Unit,
+) {
+    TabRow(
+        selectedTabIndex = if (selectedSection == SecretPanelSection.SECRETS) 0 else 1,
+        backgroundColor = BossThemeColors.BackgroundColor,
+        contentColor = BossThemeColors.SuccessColor,
+        modifier = Modifier.padding(bottom = 12.dp)
+    ) {
+        Tab(
+            selected = selectedSection == SecretPanelSection.SECRETS,
+            onClick = { onSelectSection(SecretPanelSection.SECRETS) },
+            text = { Text("Secrets", fontSize = 12.sp) }
+        )
+        Tab(
+            selected = selectedSection == SecretPanelSection.SHARED_WITH_ME,
+            onClick = { onSelectSection(SecretPanelSection.SHARED_WITH_ME) },
+            text = {
+                Text(
+                    if (hasLoadedShared) "Shared with me ($sharedCount)" else "Shared with me",
+                    fontSize = 12.sp
+                )
+            }
         )
     }
 }

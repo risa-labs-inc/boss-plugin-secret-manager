@@ -74,20 +74,7 @@ internal class SecretManagerMcpToolProvider(
                 val id = args.string("id")
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
                 findById(id)?.let { s ->
-                    // AI provider keys are withheld here deliberately. secrets_list returns
-                    // ids and this returns the plaintext password, so without the gate it is
-                    // two model-directed tool calls from a prompt-injected agent to every
-                    // configured provider key. An agent that needs to *use* a provider goes
-                    // through PluginContext.llmProvider / activeConfig() and never needs the
-                    // raw value — unlike plugin code, which the operator chose to install.
-                    // Delete this block to restore the old behaviour.
-                    if (s.tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER)) {
-                        return@McpToolHandler McpToolResult(
-                            "Secret $id is an AI provider key and is not readable through this tool. " +
-                                "Use the provider via the host's AI provider settings instead.",
-                            isError = true,
-                        )
-                    }
+                    aiProviderRefusal(id, s.tags)?.let { return@McpToolHandler it }
                     McpToolResult(
                         buildString {
                             appendLine("website: ${s.website}")
@@ -101,6 +88,55 @@ internal class SecretManagerMcpToolProvider(
                         }.trimEnd()
                     )
                 } ?: McpToolResult("No secret with id $id", isError = true)
+            },
+        ),
+        // my_secrets_list / my_secret_get were the retired `user-secret-list` plugin's two
+        // tools, adopted here when its panel became this panel's "Shared with me" section.
+        // Kept under their original names rather than folded into secrets_list: agents,
+        // prompts and skills already call them, and they answer a question secrets_list
+        // cannot - `getUserSecretsWithSharingInfo` is the only call that reports how a secret
+        // reached the caller.
+        McpToolDefinition(
+            name = "my_secrets_list",
+            description = "List your secrets and secrets shared with you (id, website, username, owner, access).",
+            inputSchema = LIMIT_SCHEMA,
+            handler = McpToolHandler { args ->
+                val limit = (args.int("limit") ?: 100).coerceIn(1, 500)
+                secrets.getUserSecretsWithSharingInfo(limit).fold(
+                    onSuccess = { page ->
+                        if (page.data.isEmpty()) McpToolResult("No secrets.")
+                        else McpToolResult(page.data.joinToString("\n") { s ->
+                            val owner = if (s.isOwner) "owner" else "shared(${s.accessLevel})"
+                            "${s.id}\t${s.website}\t${s.username}\t[$owner]"
+                        })
+                    },
+                    onFailure = { McpToolResult("Failed: ${it.message}", isError = true) },
+                )
+            },
+        ),
+        McpToolDefinition(
+            name = "my_secret_get",
+            description = "Reveal one of your secrets' full value (password, notes) by id. Sensitive.",
+            inputSchema = idSchema("Secret id (from my_secrets_list)."),
+            handler = McpToolHandler { args ->
+                val id = args.string("id")
+                    ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
+                val entry = secrets.getUserSecretsWithSharingInfo(limit = 500).getOrNull()
+                    ?.data?.firstOrNull { it.id == id }
+                    ?: return@McpToolHandler McpToolResult("No secret with id $id", isError = true)
+                // The same refusal secret_get carries. This tool shipped without it for three
+                // days and read exactly the keys the other one withholds: same vault, same
+                // secret.read gate, so a gate on one tool and not its sibling is no gate.
+                aiProviderRefusal(id, entry.tags)?.let { return@McpToolHandler it }
+                McpToolResult(
+                    buildString {
+                        appendLine("website: ${entry.website}")
+                        appendLine("username: ${entry.username}")
+                        appendLine("password: ${entry.password}")
+                        entry.notes?.let { appendLine("notes: $it") }
+                        append(if (entry.isOwner) "access: owner" else "access: shared(${entry.accessLevel})")
+                    }
+                )
             },
         ),
         McpToolDefinition(
@@ -161,6 +197,32 @@ internal class SecretManagerMcpToolProvider(
     // secrets.create/secrets.delete strings are NOT seeded in the RBAC catalog,
     // so gating on them would silently make the write tools admin-only and
     // diverge from what the panel allows.
+
+    /**
+     * The refusal every value-revealing tool here shares, or null when the secret is
+     * ordinary. Non-null means "return this instead".
+     *
+     * AI provider keys are withheld deliberately: a `*_list` tool returns ids and a `*_get`
+     * tool returns the plaintext password, so without the gate it is two model-directed tool
+     * calls from a prompt-injected agent to every configured provider key. An agent that
+     * needs to *use* a provider goes through `PluginContext.llmProvider` / `activeConfig()`
+     * and never needs the raw value - unlike plugin code, which the operator chose to
+     * install.
+     *
+     * One function rather than the check inlined per tool, because inlining it is how the
+     * sibling plugin's `my_secret_get` came to read exactly what `secret_get` refused. Any
+     * new tool that returns a password calls this.
+     */
+    private fun aiProviderRefusal(id: String, tags: List<String>): McpToolResult? =
+        if (tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER)) {
+            McpToolResult(
+                "Secret $id is an AI provider key and is not readable through this tool. " +
+                    "Use the provider via the host's AI provider settings instead.",
+                isError = true,
+            )
+        } else {
+            null
+        }
 
     private suspend fun findById(id: String): SecretEntryData? =
         secrets.getUserSecrets(limit = 500).getOrNull()?.data?.firstOrNull { it.id == id }

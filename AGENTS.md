@@ -4,7 +4,7 @@
 
 **Secret Manager (Dynamic)** (`ai.rever.boss.plugin.dynamic.secretmanager`) is a dynamic plugin for the BOSS desktop application.
 
-Manage encrypted credentials and secrets, including Plugin Store API keys
+Your credentials, secrets shared with you, Plugin Store API keys and AI provider settings
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.secretmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin`
@@ -50,6 +50,58 @@ build.gradle.kts   → Build config + version (single source of truth)
 **`build.gradle.kts` is the single source of truth for version.**
 
 The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` - only change it in `build.gradle.kts`.
+
+## Two sections, one plugin
+
+The panel is segmented into **Secrets** (own + organisation, full CRUD, `getUserSecrets`) and
+**Shared with me** (read-only, `getUserSecretsWithSharingInfo`). The second half arrived by
+absorbing the `user-secret-list` plugin, whose "My Secrets" panel sat next to this one in the
+sidebar and listed *everything* the caller could read - including their own secrets, which this
+panel already showed. Two panels, overlapping lists, and the wizard installed the read-only one
+by default and this one not at all.
+
+Three things about it that are easy to get wrong:
+
+**The partition key is `accessLevel`, never `isOwner`.** `get_user_secrets_with_shared` assigns
+the level per UNION source (`supabase/migrations/20260802000000_secrets_org_ownership.sql:536`):
+`owner` for source 1, `org` for source 4, and the share's own level for sources 2, 3 and 5.
+Source 4 is the trap - it returns `is_owner = (s.user_id = auth.uid())`, so a **colleague's**
+organisation secret arrives with `isOwner = false` while nobody shared it with anyone. Splitting
+on `isOwner` files it under "Shared with me" and tells the user someone shared it with them.
+`SecretAccess.isShare` also treats an *unrecognised* level as a share, so a source added
+server-side surfaces in the read-only section rather than in the one offering Edit and Delete.
+Mutation-verified: swapping the predicate for `!isOwner` fails *an organisation secret created
+by a colleague is not a share*.
+
+**The section pages over the unfiltered set, so it auto-continues.** A page is 50 entries of
+everything readable, filtered client-side down to the shares, so a user with 50 of their own
+secrets and one shared with them gets a first page that filters to nothing - and a section
+reporting "nothing shared with you" while the server still has some is a lie the user cannot
+tell from the truth. `load()` therefore keeps fetching while a page yields no shares, capped at
+`MAX_AUTO_PAGES` (5 pages / 250 rows), after which the empty state offers "Keep looking". Two
+details are load-bearing and both are pinned: the offset advances by the **raw** row count (by
+the filtered count it re-reads the same page forever), and an **empty page ends the scan**
+whatever `hasMore` says (the host derives that flag from `size >= limit`, so it should never be
+true for an empty page, but a scan trusting it alone spins if it ever is).
+
+**It loads lazily and needs cancelling.** `ensureLoaded()` fires on first entry into the
+section, not in `init` - a fetch per panel open would be a second secrets RPC for a section most
+opens never reach. And like `SecretManagerViewModel`, it runs on the *plugin* scope while being
+per panel instance, so `SharedSecretsViewModel.dispose()` is called from the same
+`lifecycle.doOnDestroy` hook: an auto-continue can be five round trips deep when the panel goes
+away, and its state holds decrypted passwords.
+
+`SecretsSection` was extracted from `SecretManagerView` unchanged when the sections landed. Its
+`LazyListState` stays **hoisted** in the parent: the composable leaves composition whenever the
+other section is on screen, so a local `rememberLazyListState` would drop the scroll position
+every time the user glances at their shared secrets and comes back. Same reasoning for
+`selectedSection`, which lives on `SecretManagerComponent` rather than being `remember`ed.
+
+The two adopted MCP tools (`my_secrets_list`, `my_secret_get`) keep their original names because
+agents, prompts and skills already call them, and `getUserSecretsWithSharingInfo` is the only
+call that reports how a secret was reached. `my_secret_get` shares `secret_get`'s provider-key
+refusal through one function - see "Provider keys are withheld from `secret_get`" for why
+that matters.
 
 ## AI Providers (`ai/` package)
 
@@ -259,8 +311,16 @@ it: `PluginContext.llmProvider` also exposes `LlmConfig.apiKey`, but that is plu
 operator chose to install, whereas the MCP path is directed by a model. An agent that needs to
 *use* a provider goes through `llmProvider`/`activeConfig()` and never needs the raw value.
 
-Deleting the tag check in the `secret_get` handler restores the old behaviour; two tests cover
-both halves (provider key withheld, ordinary secret still returned).
+Deleting the tag check restores the old behaviour; four tests cover both halves of both tools
+(provider key withheld, ordinary secret still returned).
+
+**`secret_get` and `my_secret_get` both call one `aiProviderRefusal` function, and that is
+deliberate rather than tidiness.** The check was originally inlined in `secret_get` here, and
+`user-secret-list`'s `my_secret_get` - same vault, same `secret.read` gate, a different repo -
+had no equivalent, so for three days the withheld keys were readable through the sibling tool.
+A gate on one tool and not its sibling is no gate. Now that both tools live here, any new one
+that returns a password calls the same function. Mutation-verified: dropping the call from
+`my_secret_get` fails *my_secret_get withholds an AI provider key*.
 
 ### Do not add OAuth without re-checking the docs
 
@@ -550,7 +610,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 163 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 178 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

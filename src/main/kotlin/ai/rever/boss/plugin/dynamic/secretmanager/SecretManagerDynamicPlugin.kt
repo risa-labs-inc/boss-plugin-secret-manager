@@ -29,7 +29,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
     override val displayName: String = "Secret Manager (Dynamic)"
     /** Resolved from the bundled `plugin.json` — see [PluginVersionSource] for why not the manifest. */
     override val version: String = PluginVersionSource.read()
-    override val description: String = "Manage encrypted credentials and secrets, including Plugin Store API keys"
+    override val description: String =
+        "Your credentials, secrets shared with you, Plugin Store API keys and AI provider settings"
     override val author: String = "Risa Labs"
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-secret-manager"
 

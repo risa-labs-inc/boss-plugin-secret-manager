@@ -10,6 +10,9 @@ import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.essenty.lifecycle.doOnDestroy
 import kotlinx.coroutines.CoroutineScope
@@ -52,17 +55,46 @@ class SecretManagerComponent(
         authDataProvider = authDataProvider,
     ).also { it.initialize() }
 
+    /**
+     * The read-only "Shared with me" section's state. A second ViewModel rather than more
+     * fields on the first: it reads a different RPC
+     * (`getUserSecretsWithSharingInfo`), pages independently, and has no write path at all -
+     * folding it into a 1,100-line ViewModel that guards credential writes would put the two
+     * on one load path for no gain.
+     *
+     * It does not fetch on construction. See [SharedSecretsViewModel.ensureLoaded].
+     */
+    private val sharedSecretsViewModel = SharedSecretsViewModel(secretDataProvider, scope)
+
+    /**
+     * Which section is on screen. Held here, not `remember`ed in the panel, for the same
+     * reason the ViewModels are: the panel leaves composition every time the user switches to
+     * another sidebar panel, and a remembered value would drop them back on "Secrets".
+     */
+    private var selectedSection by mutableStateOf(SecretPanelSection.SECRETS)
+
     init {
-        // The ViewModel is per panel instance but its coroutines run on the *plugin*
+        // The ViewModels are per panel instance but their coroutines run on the *plugin*
         // scope, so the permission collector - which never completes - would keep this
         // instance, and the decrypted secrets in its state, alive for the plugin's whole
         // lifetime. Every other launch in the ViewModel terminates, which is why this
         // hook only became necessary once something collected.
-        lifecycle.doOnDestroy { viewModel.dispose() }
+        //
+        // The shared-secrets load is cancelled here for the same reason: its auto-continue
+        // scan can be several round trips deep when the panel goes away.
+        lifecycle.doOnDestroy {
+            viewModel.dispose()
+            sharedSecretsViewModel.dispose()
+        }
     }
 
     @Composable
     override fun Content() {
-        SecretManagerContent(viewModel)
+        SecretManagerContent(
+            viewModel = viewModel,
+            sharedSecretsViewModel = sharedSecretsViewModel,
+            selectedSection = selectedSection,
+            onSelectSection = { selectedSection = it },
+        )
     }
 }
