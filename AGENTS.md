@@ -91,6 +91,24 @@ per panel instance, so `SharedSecretsViewModel.dispose()` is called from the sam
 `lifecycle.doOnDestroy` hook: an auto-continue can be five round trips deep when the panel goes
 away, and its state holds decrypted passwords.
 
+**`dispose()` has to clear, not only cancel** - the same lesson as `SecretManagerViewModel`.
+Cancellation is cooperative and lands only at a suspension point, so a page that has already
+returned runs on to the terminal `_state.update` and seats a list of decrypted passwords onto a
+ViewModel the panel just destroyed; and a load that merely *finished* leaves that list in state
+with nothing to cancel. Hence the `disposed` flag checked before every in-coroutine update, plus
+clearing `allShared` / `shared` in `dispose()`. Mutation-verified both ways.
+
+The one thing `dispose()` must **not** touch is `clipboardCopyGeneration`. Bumping it there
+invalidates the pending wipe's generation check, so the credential stays on the clipboard
+forever - the outcome the wipe exists to prevent. That was written, caught by
+*dispose does not cancel a pending clipboard wipe*, and removed. Same rule as `copySecret`.
+
+**The clipboard wipe is the section's, not the card's.** `copySecretToClipboard` mirrors
+`SecretManagerViewModel.copyPasswordToClipboard` (45s, generation token, value check) because the
+ported panel had no wipe and the read-only half should not carry the weaker rule. The generation
+token is only load-bearing when the *same* value is copied twice - with different values the
+value check already saves the second copy - which is why the test copies one value twice.
+
 `SecretsSection` was extracted from `SecretManagerView` unchanged when the sections landed. Its
 `LazyListState` stays **hoisted** in the parent: the composable leaves composition whenever the
 other section is on screen, so a local `rememberLazyListState` would drop the scroll position
@@ -610,7 +628,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 178 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 186 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

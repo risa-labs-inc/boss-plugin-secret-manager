@@ -56,6 +56,12 @@ with anyone - splitting on `isOwner` files it under "Shared with me" and tells t
 shared it with them. An unrecognised level counts as a share, so a new source added server-side
 surfaces in the read-only section rather than in the one offering Edit and Delete.
 
+**A copied credential is wiped from the clipboard after 45 seconds**, the same policy the
+managed list applies. The panel this section came from had no wipe at all, and one panel holding
+two clipboard policies for the same class of data would be an oversight rather than a decision.
+The wipe deliberately outlives the panel: cancelling it on close would leave the credential
+there indefinitely.
+
 **The section loads lazily and may scan several pages.** A page is 50 entries of everything you
 can read, filtered down to the shares, so someone with 60 of their own secrets and two shared
 ones gets a first page that filters to nothing. An empty page auto-continues (capped at 5 pages
@@ -141,7 +147,7 @@ ungated, and sharing with an organisation already requires membership of it.
 ```bash
 ./gradlew buildPluginJar
 cp build/libs/boss-plugin-secret-manager-*.jar ~/.boss/plugins/
-./gradlew test    # 178 host-independent cases, no live credential needed
+./gradlew test    # 186 host-independent cases, no live credential needed
 ```
 
 Do not delete `compose-stability.conf`. It stops the Compose compiler emitting a `$stable` read

@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.SecretEntryWithSharingData
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
 import ai.rever.boss.plugin.ui.BossThemeColors
@@ -22,8 +23,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Button
@@ -54,9 +55,10 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -82,8 +84,10 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun SharedSecretsSection(
     state: SharedSecretsState,
+    listState: LazyListState,
     onSearch: (String) -> Unit,
     onToggleMetadata: (String) -> Unit,
+    onCopySecret: (String) -> Unit,
     onLoadMore: () -> Unit,
     onRefresh: () -> Unit,
     onDismissError: () -> Unit,
@@ -115,8 +119,10 @@ internal fun SharedSecretsSection(
             else ->
                 SharedSecretList(
                     secrets = state.shared,
+                    listState = listState,
                     expandedSecretIds = state.expandedSecretIds,
                     onToggleMetadata = onToggleMetadata,
+                    onCopySecret = onCopySecret,
                     onLoadMore = onLoadMore,
                     isLoadingMore = state.isLoadingMore,
                     hasMore = state.hasMore,
@@ -185,25 +191,41 @@ private fun SharedSecretSearchBar(
     )
 }
 
+/**
+ * [listState] is hoisted, not remembered here, for the same reason `SecretsSection`'s is: this
+ * composable leaves composition whenever the other section is on screen - and also on every
+ * Refresh, since the loading view replaces it - so a local `rememberLazyListState` would drop
+ * the scroll position each time.
+ */
 @Composable
 private fun SharedSecretList(
     secrets: List<SecretEntryWithSharingData>,
+    listState: LazyListState,
     expandedSecretIds: Set<String>,
     onToggleMetadata: (String) -> Unit,
+    onCopySecret: (String) -> Unit,
     onLoadMore: () -> Unit,
     isLoadingMore: Boolean,
     hasMore: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val listState = rememberLazyListState()
+    // Keyed on `listState` alone, this effect never restarts - so the values it reads would be
+    // frozen at the composition that launched it, and the prefetch threshold below would be
+    // computed against a stale `secrets.size`. rememberUpdatedState makes it read what it says
+    // it reads. (`loadMore()` re-checks live state, so the stale version misfired harmlessly
+    // rather than storming the server - but the threshold still did not mean what it looked
+    // like it meant.)
+    val currentCount by rememberUpdatedState(secrets.size)
+    val currentHasMore by rememberUpdatedState(hasMore)
+    val currentIsLoadingMore by rememberUpdatedState(isLoadingMore)
 
     LaunchedEffect(listState) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
             .collect { lastVisibleIndex ->
                 if (lastVisibleIndex != null &&
-                    lastVisibleIndex >= secrets.size - 3 &&
-                    hasMore &&
-                    !isLoadingMore
+                    lastVisibleIndex >= currentCount - 3 &&
+                    currentHasMore &&
+                    !currentIsLoadingMore
                 ) {
                     onLoadMore()
                 }
@@ -228,6 +250,7 @@ private fun SharedSecretList(
                 secret = secret,
                 isMetadataExpanded = expandedSecretIds.contains(secret.id),
                 onToggleMetadata = { onToggleMetadata(secret.id) },
+                onCopySecret = onCopySecret,
             )
         }
 
@@ -273,10 +296,11 @@ private fun SharedSecretCard(
     secret: SecretEntryWithSharingData,
     isMetadataExpanded: Boolean,
     onToggleMetadata: () -> Unit,
+    onCopySecret: (String) -> Unit,
 ) {
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val isApiKey = secret.tags.contains("api_key")
+    val isApiKey = secret.tags.contains(ProviderCredentialStore.TAG_API_KEY)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -368,7 +392,9 @@ private fun SharedSecretCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Button(
-                        onClick = { scope.launch { clipboardManager.setText(AnnotatedString(secret.password)) } },
+                        // Through the ViewModel, so the value is wiped from the clipboard again
+                        // on the same 45s timer the managed list uses.
+                        onClick = { onCopySecret(secret.password) },
                         colors =
                             ButtonDefaults.buttonColors(
                                 backgroundColor = BossThemeColors.WarningColor,
@@ -580,7 +606,7 @@ private fun SharedSecretDetails(secret: SecretEntryWithSharingData) {
 
 @Composable
 private fun SharedSecretsLoadingView() {
-    var elapsedSeconds by remember { mutableStateOf(0) }
+    var elapsedSeconds by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000)

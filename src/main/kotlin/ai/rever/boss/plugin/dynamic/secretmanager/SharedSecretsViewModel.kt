@@ -4,9 +4,12 @@ import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryWithSharingData
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
+import androidx.compose.ui.platform.ClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,6 +29,12 @@ import kotlinx.coroutines.launch
  * assigns these literals per source with an explicit dedup priority so the value cannot
  * flap between calls when a secret is reachable by several routes.
  */
+/**
+ * How long a copied credential may sit on the system clipboard. Same value the managed list
+ * uses ([SecretManagerViewModel] has its own copy, private to that file).
+ */
+private const val CLIPBOARD_CLEAR_DELAY_MS = 45_000L
+
 internal object SecretAccess {
     /** Source 1: the caller created it. */
     const val OWNER = "owner"
@@ -72,6 +81,20 @@ class SharedSecretsViewModel(
     private var loadJob: Job? = null
 
     /**
+     * Cancelling is not enough on its own, which is why this exists as well as [loadJob].
+     *
+     * Cancellation is cooperative and only lands at a suspension point; the last one in the
+     * scan loop is the provider call itself. A page that has already returned when
+     * `lifecycle.doOnDestroy` fires would otherwise run the terminal `_state.update` and seat
+     * `allShared` - a list of entries each carrying a decrypted `password` - onto a ViewModel
+     * the panel has just destroyed. Same reason [SecretManagerViewModel] has its own flag.
+     */
+    private var disposed = false
+
+    /** Invalidates a pending clipboard wipe so a re-copy gets its own full window. */
+    private var clipboardCopyGeneration = 0L
+
+    /**
      * Load on first entry into the section, then never again on its own.
      *
      * Deliberately not an `init` load: this ViewModel is constructed with the panel, and
@@ -96,6 +119,7 @@ class SharedSecretsViewModel(
     }
 
     private fun load(reset: Boolean) {
+        if (disposed) return
         val provider =
             secretDataProvider ?: run {
                 _state.update {
@@ -153,6 +177,7 @@ class SharedSecretsViewModel(
                             if (error is CancellationException) throw error
                             val message = error.message ?: "Unknown error"
                             logTiming("getUserSecretsWithSharingInfo(offset=$offset)", elapsedMs, message, failed = true)
+                            if (disposed) return@launch
                             _state.update {
                                 it.copy(
                                     isLoading = false,
@@ -181,9 +206,18 @@ class SharedSecretsViewModel(
                         "${page.data.size} accessible, ${shares.size} shared so far",
                     )
 
+                    // Note the asymmetry between the two entry points, which is deliberate:
+                    // `shares` is prefilled from what is already loaded, so once anything has
+                    // been found this breaks on the first iteration and a scroll-triggered
+                    // loadMore fetches exactly one page. That page can add nothing and the list
+                    // just does not change - fine there, because the scroll trigger fires again
+                    // and the user can see it is still paging. The auto-continue is for the
+                    // *first* load, where an empty result is indistinguishable from "you have
+                    // nothing shared with you".
                     if (!hasMore || shares.isNotEmpty() || pages >= MAX_AUTO_PAGES) break
                 }
 
+                if (disposed) return@launch
                 val settled = shares
                 _state.update {
                     it.copy(
@@ -192,12 +226,44 @@ class SharedSecretsViewModel(
                         isLoading = false,
                         isLoadingMore = false,
                         hasLoadedOnce = true,
+                        // A load that succeeded must not leave the previous failure's banner
+                        // standing: both entry points clear it on the way in, which misses a
+                        // cancelled load whose failure update lands after a fresh one started.
+                        errorMessage = null,
                         rowsScanned = offset,
                         hasMore = hasMore,
                         lastLoadDurationMs = elapsedMs,
                     )
                 }
             }
+    }
+
+    /**
+     * Copy a shared secret's value and wipe it from the clipboard again after
+     * [CLIPBOARD_CLEAR_DELAY_MS].
+     *
+     * The same policy [SecretManagerViewModel.copyPasswordToClipboard] applies to the managed
+     * list, and for the same reason: one panel holding two clipboard policies for the same
+     * class of data is not a decision, it is an oversight - and the read-only half is not the
+     * one that should have the weaker rule. The panel this section replaces had no wipe at all.
+     *
+     * The generation token is what makes a re-copy get its own full window and stops a later,
+     * unrelated copy being clobbered; the value check stops the wipe clearing something the
+     * user copied from somewhere else in the meantime.
+     *
+     * The pending wipe deliberately outlives the panel. [dispose] bumps the generation but does
+     * not cancel it: leaving a credential on the system clipboard indefinitely is an unbounded
+     * OS-level exposure, traded for nothing.
+     */
+    fun copySecretToClipboard(value: String, clipboard: ClipboardManager) {
+        val generation = ++clipboardCopyGeneration
+        clipboard.setText(AnnotatedString(value))
+        scope.launch {
+            delay(CLIPBOARD_CLEAR_DELAY_MS)
+            if (generation == clipboardCopyGeneration && clipboard.getText()?.text == value) {
+                clipboard.setText(AnnotatedString(""))
+            }
+        }
     }
 
     /** Filter what is loaded by website or username. Client-side, like the section it replaces. */
@@ -228,15 +294,34 @@ class SharedSecretsViewModel(
     }
 
     /**
-     * Stop the scan when the panel goes away.
+     * Stop the scan when the panel goes away, and drop what it found.
      *
      * The load runs on the *plugin* scope, which outlives this instance, so an in-flight
      * auto-continue would otherwise keep a list of decrypted secrets alive for the plugin's
-     * whole lifetime. Same reason [SecretManagerViewModel.dispose] exists.
+     * whole lifetime. Same reason [SecretManagerViewModel.dispose] exists - and, like it,
+     * cancelling alone is not enough: a completed load leaves the whole list in state, so
+     * this clears it too.
+     *
+     * The pending clipboard wipe is deliberately *not* cancelled - see [copySecretToClipboard].
      */
     fun dispose() {
+        disposed = true
         loadJob?.cancel()
         loadJob = null
+        // Deliberately does NOT touch clipboardCopyGeneration: bumping it here invalidates the
+        // pending wipe's generation check, so the credential stays on the clipboard forever -
+        // the exact outcome the wipe exists to prevent. Caught by
+        // `dispose does not cancel a pending clipboard wipe`.
+        //
+        // Cancelling stops a scan in flight; it does nothing about a scan that already
+        // finished, whose result is sitting in state with every password in it.
+        _state.update {
+            it.copy(
+                allShared = emptyList(),
+                shared = emptyList(),
+                expandedSecretIds = emptySet(),
+            )
+        }
     }
 
     /** Monotonic, so a wall-clock (NTP) jump cannot produce a negative duration. */

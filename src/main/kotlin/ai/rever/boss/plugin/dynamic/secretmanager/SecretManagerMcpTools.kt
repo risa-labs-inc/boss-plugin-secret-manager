@@ -114,6 +114,11 @@ internal class SecretManagerMcpToolProvider(
                 )
             },
         ),
+        // Known limit, shared with findById: this reads the first 500 accessible entries and
+        // answers "no secret with id X" past that - a wrong answer rather than an error. The
+        // with-sharing set is a strict superset of the managed one, so it is the likelier of the
+        // two to overflow, and each call materialises 500 decrypted passwords to find one. A
+        // by-id RPC is the fix; SecretDataProvider does not have one.
         McpToolDefinition(
             name = "my_secret_get",
             description = "Reveal one of your secrets' full value (password, notes) by id. Sensitive.",

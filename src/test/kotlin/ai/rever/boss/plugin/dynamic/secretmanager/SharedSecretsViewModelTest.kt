@@ -9,8 +9,11 @@ import ai.rever.boss.plugin.api.SecretShareData
 import ai.rever.boss.plugin.api.ShareSecretRequestData
 import ai.rever.boss.plugin.api.UnshareSecretRequestData
 import ai.rever.boss.plugin.api.UpdateSecretRequestData
+import androidx.compose.ui.platform.ClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -262,6 +265,166 @@ class SharedSecretsViewModelTest {
             assertTrue(viewModel.state.value.shared.isEmpty(), "a cancelled scan seated its result")
         }
 
+    @Test
+    fun `dispose clears what a completed load left in state`() =
+        runTest {
+            // Cancelling is not the whole job. A load that finished before the panel went away
+            // leaves `allShared` populated, and every entry in it carries a decrypted password.
+            val provider = FakeSharingProvider(listOf(entry("1", "theirs.com", "read", false)))
+            val viewModel = SharedSecretsViewModel(provider, this)
+            viewModel.ensureLoaded()
+            advanceUntilIdle()
+            assertEquals(1, viewModel.state.value.allShared.size, "precondition: the load completed")
+
+            viewModel.dispose()
+
+            assertTrue(viewModel.state.value.allShared.isEmpty(), "dispose left the decrypted list in state")
+            assertTrue(viewModel.state.value.shared.isEmpty())
+        }
+
+    @Test
+    fun `a page that returns after dispose does not seat its result`() =
+        runTest {
+            // The window cancellation cannot close: it is cooperative and only lands at a
+            // suspension point, so a provider call that has already returned runs on to the
+            // terminal state update. Staged by disposing from inside the provider, just before
+            // it returns - there is no suspension point between there and the update, which is
+            // exactly the production race (dispose on the UI thread, scan on the plugin scope).
+            lateinit var viewModel: SharedSecretsViewModel
+            val provider =
+                FakeSharingProvider(
+                    listOf(entry("1", "theirs.com", "read", false)),
+                    beforeReturning = { viewModel.dispose() },
+                )
+            viewModel = SharedSecretsViewModel(provider, this)
+
+            viewModel.ensureLoaded()
+            advanceUntilIdle()
+
+            assertTrue(
+                viewModel.state.value.allShared.isEmpty(),
+                "a load that returned after dispose seated ${viewModel.state.value.allShared.size} decrypted secrets",
+            )
+        }
+
+    @Test
+    fun `loadMore does nothing while a filter is active`() =
+        runTest {
+            // Deliberate: `shared` is the filtered view and the pages arrive unfiltered, so
+            // appending to it mid-filter would show rows the filter excludes. Pinned because it
+            // reads like a missing feature rather than a decision.
+            val own = (1..SharedSecretsViewModel.PAGE_SIZE).map { entry("own-$it", "mine.com", "owner", true) }
+            val provider = FakeSharingProvider(own + entry("shared-1", "theirs.com", "read", false))
+            val viewModel = SharedSecretsViewModel(provider, this)
+            viewModel.ensureLoaded()
+            advanceUntilIdle()
+            val pagesSoFar = provider.offsets.size
+
+            viewModel.search("nothing-matches-this")
+            viewModel.loadMore()
+            advanceUntilIdle()
+
+            assertEquals(pagesSoFar, provider.offsets.size, "loadMore fetched a page while filtering")
+        }
+
+    @Test
+    fun `a refresh after a failed load shows the list, not the error`() =
+        runTest {
+            // What this pins is the user-visible property: a transient failure does not leave a
+            // full-screen error standing over a list that has since loaded.
+            //
+            // It does NOT pin the terminal `errorMessage = null` specifically - both entry
+            // points also clear on the way in, so either alone satisfies this. That line
+            // defends a different case: a cancelled load's failure update landing after a fresh
+            // load has already started. Cancellation is cooperative and the writer is the same
+            // coroutine, so a single-threaded test dispatcher cannot stage that interleaving.
+            // Kept as belt and braces, recorded here as unproven rather than proven.
+            val provider = FakeSharingProvider(listOf(entry("1", "theirs.com", "read", false)), failFirstCall = true)
+            val viewModel = SharedSecretsViewModel(provider, this)
+
+            viewModel.ensureLoaded()
+            advanceUntilIdle()
+            assertNotNull(viewModel.state.value.errorMessage, "precondition: the first load failed")
+
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            assertEquals(null, viewModel.state.value.errorMessage)
+            assertEquals(listOf("1"), viewModel.state.value.shared.map { it.id })
+        }
+
+    @Test
+    fun `a copied secret is wiped from the clipboard`() =
+        runTest {
+            // The managed list has cleared after 45s since it shipped; the panel this section
+            // came from never did. One panel, two policies for the same data, would be an
+            // oversight rather than a decision.
+            val clipboard = FakeClipboard()
+            val viewModel = SharedSecretsViewModel(FakeSharingProvider(emptyList()), this)
+
+            viewModel.copySecretToClipboard("sk-shared-key", clipboard)
+            assertEquals("sk-shared-key", clipboard.getText()?.text)
+
+            advanceTimeBy(46_000)
+            assertEquals("", clipboard.getText()?.text, "the credential is still on the clipboard")
+        }
+
+    @Test
+    fun `re-copying the same value gets a full window, not the remainder of the first`() =
+        runTest {
+            // What the generation token is actually for. The value check alone covers a re-copy
+            // of a DIFFERENT value - the first timer fires, sees something else on the
+            // clipboard and leaves it - so testing it that way proves nothing about the token.
+            // Copying the same value twice is the case only the token survives: without it the
+            // first timer wipes the second copy 2s in instead of 45s, and the user pastes
+            // nothing.
+            val clipboard = FakeClipboard()
+            val viewModel = SharedSecretsViewModel(FakeSharingProvider(emptyList()), this)
+
+            viewModel.copySecretToClipboard("sk-same-key", clipboard)
+            advanceTimeBy(44_000)
+            viewModel.copySecretToClipboard("sk-same-key", clipboard)
+            advanceTimeBy(2_000)
+
+            assertEquals(
+                "sk-same-key",
+                clipboard.getText()?.text,
+                "the first copy's timer wiped the second copy early",
+            )
+
+            advanceTimeBy(44_000)
+            assertEquals("", clipboard.getText()?.text, "the second copy was never wiped")
+        }
+
+    @Test
+    fun `a wipe does not clobber something else copied since`() =
+        runTest {
+            val clipboard = FakeClipboard()
+            val viewModel = SharedSecretsViewModel(FakeSharingProvider(emptyList()), this)
+
+            viewModel.copySecretToClipboard("secret", clipboard)
+            clipboard.setText(AnnotatedString("a shopping list"))
+            advanceTimeBy(46_000)
+
+            assertEquals("a shopping list", clipboard.getText()?.text, "the wipe cleared an unrelated copy")
+        }
+
+    @Test
+    fun `dispose does not cancel a pending clipboard wipe`() =
+        runTest {
+            // Deliberate, and the same call SecretManagerViewModel makes: the wipe is meant to
+            // outlive the panel. Cancelling it would leave a credential on the system clipboard
+            // indefinitely - an unbounded OS-level exposure traded for a bounded in-memory one.
+            val clipboard = FakeClipboard()
+            val viewModel = SharedSecretsViewModel(FakeSharingProvider(emptyList()), this)
+
+            viewModel.copySecretToClipboard("sk-shared-key", clipboard)
+            viewModel.dispose()
+            advanceTimeBy(46_000)
+
+            assertEquals("", clipboard.getText()?.text, "dispose cancelled the wipe")
+        }
+
     private fun entry(
         id: String,
         website: String,
@@ -290,6 +453,17 @@ class SharedSecretsViewModelTest {
         private val failWith: String? = null,
         /** Forces `hasMore`, to reach the shape the host should never send. */
         private val hasMoreOverride: Boolean? = null,
+        /** Fails only the first call, so a later load can be observed recovering. */
+        private val failFirstCall: Boolean = false,
+        /**
+         * Run just before a successful page is returned.
+         *
+         * The only way to stage "cancelled while running non-suspending code" on a
+         * single-threaded test dispatcher: there is no suspension point between this and the
+         * ViewModel's terminal state update, so a `dispose()` here lands in the same window the
+         * production race opens.
+         */
+        private val beforeReturning: (() -> Unit)? = null,
     ) : SecretDataProvider {
         val offsets = mutableListOf<Int>()
 
@@ -301,9 +475,12 @@ class SharedSecretsViewModelTest {
             offset: Int,
         ): Result<PaginatedSecretsWithSharingData> {
             gate?.await()
+            val firstCall = offsets.isEmpty()
             offsets += offset
             failWith?.let { return Result.failure(IllegalStateException(it)) }
+            if (failFirstCall && firstCall) return Result.failure(IllegalStateException("transient"))
             val page = all.drop(offset).take(limit)
+            beforeReturning?.invoke()
             return Result.success(
                 PaginatedSecretsWithSharingData(
                     data = page,
@@ -340,5 +517,19 @@ class SharedSecretsViewModelTest {
 
         override suspend fun unshareSecret(request: UnshareSecretRequestData): Result<Unit> =
             Result.failure(UnsupportedOperationException())
+    }
+
+    /**
+     * Backing field deliberately not called `text`: a `var text: AnnotatedString?` collides with
+     * the interface's own `getText`/`setText` JVM signatures and does not compile.
+     */
+    private class FakeClipboard : ClipboardManager {
+        private var stored: AnnotatedString? = null
+
+        override fun setText(annotatedString: AnnotatedString) {
+            stored = annotatedString
+        }
+
+        override fun getText(): AnnotatedString? = stored
     }
 }

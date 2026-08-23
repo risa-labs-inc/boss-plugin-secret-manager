@@ -138,6 +138,10 @@ private fun SecretManagerView(
     val state = viewModel.state
     val sharedState by sharedSecretsViewModel.state.collectAsState()
     val listState = rememberLazyListState()
+    // Hoisted for the same reason `listState` is: each section leaves composition while the
+    // other is on screen (and on every Refresh), so a state remembered down there would drop
+    // the scroll position every time the user looks at the other tab and comes back.
+    val sharedListState = rememberLazyListState()
     val clipboardManager = LocalClipboardManager.current
     var showAddDropdown by remember { mutableStateOf(false) }
 
@@ -220,6 +224,11 @@ private fun SecretManagerView(
                         DropdownMenuItem(
                             onClick = {
                                 showAddDropdown = false
+                                // Back to Secrets first: a secret created from the read-only
+                                // tab appears in the other one, so leaving the user here would
+                                // look like the create silently did nothing. (Refresh is
+                                // section-aware for the same reason.)
+                                onSelectSection(SecretPanelSection.SECRETS)
                                 viewModel.showCreateDialog()
                             }
                         ) {
@@ -243,6 +252,9 @@ private fun SecretManagerView(
                             DropdownMenuItem(
                                 onClick = {
                                     showAddDropdown = false
+                                    // Same reason as Add Secret: the new entry lands in the
+                                    // managed list.
+                                    onSelectSection(SecretPanelSection.SECRETS)
                                     viewModel.showAiProviderKeyDialog()
                                 }
                             ) {
@@ -315,7 +327,9 @@ private fun SecretManagerView(
 
             SectionTabs(
                 selectedSection = selectedSection,
-                sharedCount = sharedState.shared.size,
+                // allShared, not the filtered view: typing in the shared section's filter
+                // would otherwise make the tab report "(1)" while forty are loaded.
+                sharedCount = sharedState.allShared.size,
                 hasLoadedShared = sharedState.hasLoadedOnce,
                 onSelectSection = onSelectSection,
             )
@@ -332,8 +346,10 @@ private fun SecretManagerView(
                 SecretPanelSection.SHARED_WITH_ME ->
                     SharedSecretsSection(
                         state = sharedState,
+                        listState = sharedListState,
                         onSearch = { sharedSecretsViewModel.search(it) },
                         onToggleMetadata = { sharedSecretsViewModel.toggleMetadataExpanded(it) },
+                        onCopySecret = { sharedSecretsViewModel.copySecretToClipboard(it, clipboardManager) },
                         onLoadMore = { sharedSecretsViewModel.loadMore() },
                         onRefresh = { sharedSecretsViewModel.refresh() },
                         onDismissError = { sharedSecretsViewModel.clearError() },
