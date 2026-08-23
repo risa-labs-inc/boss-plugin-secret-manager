@@ -248,6 +248,27 @@ class SecretManagerMcpToolsTest {
             assertTrue(result.text.contains("[shared(read)]"), result.text)
         }
 
+    @Test
+    fun `a colleague's organisation secret is not reported as shared`() =
+        runTest {
+            // The exact trap the panel's sections exist to avoid, on the surface a model reads.
+            // Source 4 of get_user_secrets_with_shared returns is_owner = (s.user_id =
+            // auth.uid()), so a colleague's org secret arrives with isOwner = false - and
+            // labelling off that field told the agent somebody shared it.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries =
+                listOf(sharingEntry("1", "org-owned.com", accessLevel = "org", isOwner = false))
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(emptyMap()))
+
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains("[org]"), result.text)
+            assertFalse(result.text.contains("shared("), "reported as shared: ${result.text}")
+        }
+
     private fun sharedProviderKey(
         id: String,
         providerId: String,

@@ -69,6 +69,10 @@ ones gets a first page that filters to nothing. An empty page auto-continues (ca
 shared with you" while the server still has some is a lie the user cannot tell from the truth.
 The offset advances by the **raw** row count, not the filtered one.
 
+Past that first load, paging is scroll-driven and only on a list that actually scrolls: a short
+list of shares in a large vault gets a footer button instead of an invisible scan. Auto-prefetch
+without that test turned one tab switch into hundreds of sequential requests.
+
 ## MCP tools
 
 | Tool | Purpose |
@@ -147,7 +151,7 @@ ungated, and sharing with an organisation already requires membership of it.
 ```bash
 ./gradlew buildPluginJar
 cp build/libs/boss-plugin-secret-manager-*.jar ~/.boss/plugins/
-./gradlew test    # 186 host-independent cases, no live credential needed
+./gradlew test    # 195 host-independent cases, no live credential needed
 ```
 
 Do not delete `compose-stability.conf`. It stops the Compose compiler emitting a `$stable` read

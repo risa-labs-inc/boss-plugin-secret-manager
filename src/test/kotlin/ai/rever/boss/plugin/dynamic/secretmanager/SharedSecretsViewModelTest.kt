@@ -354,6 +354,31 @@ class SharedSecretsViewModelTest {
         }
 
     @Test
+    fun `refresh keeps the filter the user typed`() =
+        runTest {
+            // The panel this came from cleared it on every load, so the header Refresh silently
+            // discarded the query with nothing to say so.
+            val provider =
+                FakeSharingProvider(
+                    listOf(
+                        entry("1", "stripe.com", "read", false),
+                        entry("2", "github.com", "read", false),
+                    ),
+                )
+            val viewModel = SharedSecretsViewModel(provider, this)
+            viewModel.ensureLoaded()
+            advanceUntilIdle()
+            viewModel.search("stripe")
+            assertEquals(listOf("1"), viewModel.state.value.shared.map { it.id })
+
+            viewModel.refresh()
+            advanceUntilIdle()
+
+            assertEquals("stripe", viewModel.state.value.searchQuery, "refresh dropped the filter")
+            assertEquals(listOf("1"), viewModel.state.value.shared.map { it.id }, "the filter was not re-applied")
+        }
+
+    @Test
     fun `a copied secret is wiped from the clipboard`() =
         runTest {
             // The managed list has cleared after 45s since it shipped; the panel this section

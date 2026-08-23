@@ -107,11 +107,24 @@ internal fun SharedSecretsSection(
             modifier = Modifier.padding(bottom = 8.dp),
         )
 
+        // A failed *continuation* must not replace rows that are already on screen, so the error
+        // is a banner over the retained list and only takes the whole section when there is
+        // nothing to show. `SecretsSection` still does the latter unconditionally; that is worth
+        // fixing too, but changing it here alone would put two behaviours in one panel.
+        val errorMessage = state.errorMessage
+        if (errorMessage != null && state.shared.isNotEmpty()) {
+            SharedSecretsErrorBanner(message = errorMessage, onDismiss = onDismissError)
+        }
+
         when {
-            state.isLoading -> SharedSecretsLoadingView()
-            state.errorMessage != null ->
+            // Also true on the very first frame: ensureLoaded() runs from a LaunchedEffect after
+            // the first composition, so without the hasLoadedOnce half the section opens on
+            // "Nothing shared with you - none in the 0 secrets scanned so far" with a button,
+            // then replaces it. Nothing had been checked at that point.
+            state.isLoading || !state.hasLoadedOnce -> SharedSecretsLoadingView()
+            errorMessage != null && state.shared.isEmpty() ->
                 SharedSecretsErrorView(
-                    message = state.errorMessage,
+                    message = errorMessage,
                     onRetry = onRefresh,
                     onDismiss = onDismissError,
                 )
@@ -131,6 +144,51 @@ internal fun SharedSecretsSection(
         }
     }
 }
+
+/**
+ * What the prefetch decision reads off the layout. A value class rather than four parameters so
+ * `snapshotFlow` emits one comparable thing and dedupes on all of it together.
+ */
+internal data class PrefetchWindow(
+    val lastVisibleIndex: Int?,
+    val visibleItemCount: Int,
+    /** Items the LazyColumn is currently rendering - shares plus the spinner and footer rows. */
+    val renderedItemCount: Int,
+)
+
+/**
+ * Whether scrolling near the end should fetch the next page.
+ *
+ * **The overflow test is the point.** Without it a section showing 2 shares out of a
+ * 10,000-secret vault prefetches on its very first frame with nothing scrolled, because
+ * `lastVisibleIndex (1) >= loadedCount (2) - 3` is true - and then keeps going: the spinner
+ * appearing and disappearing changes the last visible index, so `snapshotFlow` emits again,
+ * `loadMore()` fires again, and one tab switch turns into ~200 sequential RPCs materialising 50
+ * decrypted passwords each. `MAX_AUTO_PAGES` does not bound that, because the cap lives in the
+ * ViewModel's first-load auto-continue and each of these is a separate user-initiated-looking
+ * `loadMore()`.
+ *
+ * So: prefetch only while the list genuinely scrolls, and let the footer button carry the
+ * "there is more, but you have to ask" case. This is a pure function because the alternative
+ * was reasoning about `snapshotFlow` dedup in review comments, which is how the loop above
+ * survived one round of it.
+ */
+internal fun shouldPrefetchMore(
+    window: PrefetchWindow,
+    loadedCount: Int,
+    hasMore: Boolean,
+    isLoadingMore: Boolean,
+): Boolean {
+    if (!hasMore || isLoadingMore || loadedCount == 0) return false
+    val lastVisible = window.lastVisibleIndex ?: return false
+    // Everything rendered is on screen: nothing to scroll, so a "near the end" test is
+    // meaningless and would be true forever.
+    if (window.renderedItemCount <= window.visibleItemCount) return false
+    return lastVisible >= loadedCount - PREFETCH_THRESHOLD
+}
+
+/** How close to the last loaded share counts as "near the end". */
+private const val PREFETCH_THRESHOLD = 3
 
 /**
  * The count line. Says how many were *scanned* as well as how many were found, because the
@@ -210,26 +268,31 @@ private fun SharedSecretList(
     modifier: Modifier = Modifier,
 ) {
     // Keyed on `listState` alone, this effect never restarts - so the values it reads would be
-    // frozen at the composition that launched it, and the prefetch threshold below would be
-    // computed against a stale `secrets.size`. rememberUpdatedState makes it read what it says
-    // it reads. (`loadMore()` re-checks live state, so the stale version misfired harmlessly
-    // rather than storming the server - but the threshold still did not mean what it looked
-    // like it meant.)
+    // frozen at the composition that launched it. rememberUpdatedState makes it read what it
+    // says it reads.
     val currentCount by rememberUpdatedState(secrets.size)
     val currentHasMore by rememberUpdatedState(hasMore)
     val currentIsLoadingMore by rememberUpdatedState(isLoadingMore)
 
     LaunchedEffect(listState) {
-        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
-            .collect { lastVisibleIndex ->
-                if (lastVisibleIndex != null &&
-                    lastVisibleIndex >= currentCount - 3 &&
-                    currentHasMore &&
-                    !currentIsLoadingMore
-                ) {
-                    onLoadMore()
-                }
+        snapshotFlow {
+            val info = listState.layoutInfo
+            PrefetchWindow(
+                lastVisibleIndex = info.visibleItemsInfo.lastOrNull()?.index,
+                visibleItemCount = info.visibleItemsInfo.size,
+                renderedItemCount = info.totalItemsCount,
+            )
+        }.collect { window ->
+            if (shouldPrefetchMore(
+                    window = window,
+                    loadedCount = currentCount,
+                    hasMore = currentHasMore,
+                    isLoadingMore = currentIsLoadingMore,
+                )
+            ) {
+                onLoadMore()
             }
+        }
     }
 
     LazyColumn(
@@ -264,6 +327,28 @@ private fun SharedSecretList(
                         color = BossThemeColors.SuccessColor,
                         modifier = Modifier.size(24.dp),
                     )
+                }
+            }
+        }
+
+        // An explicit control, not a fallback nobody reaches. Auto-prefetch deliberately does
+        // not fire on a list that fits on screen (see shouldPrefetchMore), so for a handful of
+        // shares in a large vault this button is the only way on - and when the list does
+        // scroll, it is also the recovery from a prefetch that stalled because the last visible
+        // index stopped changing.
+        if (hasMore && !isLoadingMore && secrets.isNotEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    TextButton(onClick = onLoadMore) {
+                        Text(
+                            "Keep looking for more",
+                            color = BossThemeColors.SuccessColor,
+                            fontSize = 12.sp,
+                        )
+                    }
                 }
             }
         }
@@ -637,6 +722,35 @@ private fun SharedSecretsLoadingView() {
             }
         }
     }
+}
+
+/** The error over a list that still has rows in it - a banner, not a replacement. */
+@Composable
+private fun SharedSecretsErrorBanner(
+    message: String,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .background(BossThemeColors.SurfaceColor, RoundedCornerShape(4.dp))
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .padding(bottom = 0.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            message,
+            color = BossThemeColors.ErrorColor,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onDismiss) {
+            Text("Dismiss", color = BossThemeColors.TextSecondary, fontSize = 12.sp)
+        }
+    }
+    Spacer(Modifier.height(8.dp))
 }
 
 @Composable

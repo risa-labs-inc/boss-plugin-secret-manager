@@ -17,6 +17,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
+ * How long a copied credential may sit on the system clipboard. Same value the managed list
+ * uses ([SecretManagerViewModel] has its own copy, private to that file).
+ */
+private const val CLIPBOARD_CLEAR_DELAY_MS = 45_000L
+
+/**
  * How a secret reached the signed-in caller, as reported by `get_user_secrets_with_shared`.
  *
  * The RPC's `access_level` is the ONLY reliable partition key, and `isOwner` is not:
@@ -29,12 +35,6 @@ import kotlinx.coroutines.launch
  * assigns these literals per source with an explicit dedup priority so the value cannot
  * flap between calls when a secret is reachable by several routes.
  */
-/**
- * How long a copied credential may sit on the system clipboard. Same value the managed list
- * uses ([SecretManagerViewModel] has its own copy, private to that file).
- */
-private const val CLIPBOARD_CLEAR_DELAY_MS = 45_000L
-
 internal object SecretAccess {
     /** Source 1: the caller created it. */
     const val OWNER = "owner"
@@ -145,7 +145,10 @@ class SharedSecretsViewModel(
                     isLoading = true,
                     isLoadingMore = false,
                     errorMessage = null,
-                    searchQuery = "",
+                    // The filter is deliberately KEPT. The panel this section came from cleared
+                    // it on every load, which means the header Refresh silently discards what
+                    // the user typed with nothing to say so. The terminal update re-applies it
+                    // to the fresh page.
                     lastLoadDurationMs = null,
                 )
             } else {

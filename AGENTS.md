@@ -73,6 +73,21 @@ server-side surfaces in the read-only section rather than in the one offering Ed
 Mutation-verified: swapping the predicate for `!isOwner` fails *an organisation secret created
 by a colleague is not a share*.
 
+**The scroll prefetch only fires on a list that actually scrolls, and that is load-bearing.**
+`shouldPrefetchMore` is a pure function with an overflow test (`renderedItemCount >
+visibleItemCount`) because without it the section showing 2 shares out of a 10,000-secret vault
+prefetched on its first frame with nothing scrolled - `lastVisibleIndex (1) >= loadedCount (2) - 3`
+is true by arithmetic - and then again every time the spinner appearing and disappearing changed
+the last visible index. One tab switch became roughly 200 sequential RPCs, each materialising 50
+decrypted passwords. `MAX_AUTO_PAGES` did **not** bound that: the cap governs the ViewModel's
+first-load auto-continue, and each of those was a separate `loadMore()`.
+
+It is a pure function rather than an inline condition because the alternative was reasoning about
+`snapshotFlow` dedup in review comments, which is how the loop survived a round of that. The
+footer "Keep looking for more" button carries the case prefetch now declines - a handful of shares
+in a large vault - and doubles as the recovery when a long list's last visible index stops
+changing.
+
 **The section pages over the unfiltered set, so it auto-continues.** A page is 50 entries of
 everything readable, filtered client-side down to the shares, so a user with 50 of their own
 secrets and one shared with them gets a first page that filters to nothing - and a section
@@ -114,6 +129,18 @@ value check already saves the second copy - which is why the test copies one val
 other section is on screen, so a local `rememberLazyListState` would drop the scroll position
 every time the user glances at their shared secrets and comes back. Same reasoning for
 `selectedSection`, which lives on `SecretManagerComponent` rather than being `remember`ed.
+
+**The MCP tools label on `accessLevel` too.** They shipped labelling on `isOwner`, which told an
+agent `shared(org)` about a colleague's organisation secret - the exact claim the sections exist to
+avoid, on the surface a model actually reads rather than the one a person looks at. `accessLabel`
+goes through `SecretAccess.isShare`, and `my_secret_get` uses `fold` rather than `getOrNull` so a
+network or auth failure is not reported as "no secret with id X".
+
+**`SharedSecretsViewModel` holds a `ComponentLogger` instance property and is passed as a
+`@Composable` parameter** - the shape that made 1.2.6 and 1.2.7 unloadable. It is safe only
+because `compose-stability.conf` resolves that package's stability at compile time, and
+`buildPluginJar`'s `javap` guard proves no `$stable` read was emitted. Do not take that guard as
+optional when adding another class here.
 
 The two adopted MCP tools (`my_secrets_list`, `my_secret_get`) keep their original names because
 agents, prompts and skills already call them, and `getUserSecretsWithSharingInfo` is the only
@@ -628,7 +655,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 186 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 195 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

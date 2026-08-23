@@ -46,8 +46,8 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
  *
  * They partition the vault rather than overlap it: [SECRETS] is what the caller can manage
  * (their own secrets and their organisation's), [SHARED_WITH_ME] is what other people have
- * shared with them, read-only. Until 1.2.16 these were two separate plugins, and both listed
- * the caller's own secrets - which is the confusion this split removes.
+ * shared with them, read-only. These were two separate plugins, and both listed the caller's
+ * own secrets - which is the confusion this split removes.
  */
 enum class SecretPanelSection {
     SECRETS,

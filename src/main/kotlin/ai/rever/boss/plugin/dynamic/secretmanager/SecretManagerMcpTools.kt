@@ -106,8 +106,7 @@ internal class SecretManagerMcpToolProvider(
                     onSuccess = { page ->
                         if (page.data.isEmpty()) McpToolResult("No secrets.")
                         else McpToolResult(page.data.joinToString("\n") { s ->
-                            val owner = if (s.isOwner) "owner" else "shared(${s.accessLevel})"
-                            "${s.id}\t${s.website}\t${s.username}\t[$owner]"
+                            "${s.id}\t${s.website}\t${s.username}\t[${accessLabel(s.accessLevel)}]"
                         })
                     },
                     onFailure = { McpToolResult("Failed: ${it.message}", isError = true) },
@@ -126,8 +125,14 @@ internal class SecretManagerMcpToolProvider(
             handler = McpToolHandler { args ->
                 val id = args.string("id")
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
-                val entry = secrets.getUserSecretsWithSharingInfo(limit = 500).getOrNull()
-                    ?.data?.firstOrNull { it.id == id }
+                // fold, not getOrNull: a network or auth failure collapsed into "No secret with
+                // id X" tells the agent the secret does not exist, which is a different fact and
+                // one it may act on.
+                val page = secrets.getUserSecretsWithSharingInfo(limit = 500).fold(
+                    onSuccess = { it },
+                    onFailure = { return@McpToolHandler McpToolResult("Failed: ${it.message}", isError = true) },
+                )
+                val entry = page.data.firstOrNull { it.id == id }
                     ?: return@McpToolHandler McpToolResult("No secret with id $id", isError = true)
                 // The same refusal secret_get carries. This tool shipped without it for three
                 // days and read exactly the keys the other one withholds: same vault, same
@@ -139,7 +144,7 @@ internal class SecretManagerMcpToolProvider(
                         appendLine("username: ${entry.username}")
                         appendLine("password: ${entry.password}")
                         entry.notes?.let { appendLine("notes: $it") }
-                        append(if (entry.isOwner) "access: owner" else "access: shared(${entry.accessLevel})")
+                        append("access: ${accessLabel(entry.accessLevel)}")
                     }
                 )
             },
@@ -202,6 +207,20 @@ internal class SecretManagerMcpToolProvider(
     // secrets.create/secrets.delete strings are NOT seeded in the RBAC catalog,
     // so gating on them would silently make the write tools admin-only and
     // diverge from what the panel allows.
+
+    /**
+     * How a secret reached the caller, for an agent.
+     *
+     * On `accessLevel`, **not** `isOwner`, for exactly the reason the panel's sections split on
+     * it: source 4 of `get_user_secrets_with_shared` returns
+     * `is_owner = (s.user_id = auth.uid())`, so a colleague's organisation secret arrives with
+     * `isOwner = false`. Labelling off that field told an agent `shared(org)` - that somebody
+     * shared it - about a secret nobody shared with anyone. The UI stopped making that claim
+     * when the sections landed; the tool is the surface a model actually reads, so it mattered
+     * more here.
+     */
+    private fun accessLabel(accessLevel: String): String =
+        if (SecretAccess.isShare(accessLevel)) "shared($accessLevel)" else accessLevel
 
     /**
      * The refusal every value-revealing tool here shares, or null when the secret is
