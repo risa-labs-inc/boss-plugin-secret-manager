@@ -1,17 +1,25 @@
 # BOSS Secret Manager
 
-Encrypted credentials, Plugin Store API keys, and every AI provider setting in BOSS.
+Encrypted credentials, the secrets other people share with you, Plugin Store API keys, and
+every AI provider setting in BOSS.
 
 A right-hand sidebar panel over the host's `SecretDataProvider`, plus the `Settings > AI
 Providers` section: this plugin owns **all** AI provider configuration for the application.
 The host has none of its own, and `PluginContext.llmProvider` is relayed from the instance
 registered here.
 
+It is also the *only* secrets plugin: the separate **My Secrets** (`user-secret-list`) panel
+is retired, and its list is this panel's "Shared with me" section. See
+[Two sections, not two panels](#two-sections-not-two-panels).
+
 ## What it does
 
 - **Secret CRUD**: website, username, password, notes, tags, expiry, 2FA type and secret, and
   recovery codes. Paginated at 50 per page with server-side search plus a client filter,
   copy-to-clipboard, and a per-secret reveal toggle.
+- **Shared with me**: a read-only second section listing what other people have shared with
+  you, by user, role or organisation, with the access level and who shared it. No edit, delete
+  or re-share control exists anywhere in that section.
 - **Sharing**: share a secret with individual users (searched through Supabase) or with whole
   RBAC roles, each at an access level, and unshare again.
 - **Plugin Store API keys**: create, list and revoke them, with a `publish` scope checkbox. The
@@ -26,6 +34,45 @@ Credential precedence is environment, then stored, then none. Environment values
 the process environment, system properties, macOS `launchctl`, and finally `~/.boss/env_vars`.
 **A key supplied by the environment is never written back to disk.**
 
+## Two sections, not two panels
+
+The panel has two segmented sections, and they partition the vault rather than overlap it:
+
+| Section | Reads | Rows | Controls |
+|---|---|---|---|
+| **Secrets** | `getUserSecrets` | your own plus your organisation's | full CRUD, sharing, API keys, AI provider keys |
+| **Shared with me** | `getUserSecretsWithSharingInfo` | only what was shared with you | none - read-only |
+
+Those were two separate plugins, `secret-manager` and `user-secret-list`, and **both listed
+your own secrets** - the confusion this merge removes. `user-secret-list` was also the panel the
+first-run wizard installed by default while this one was not, so the typical install had the
+read-only half and not the half that can add a key.
+
+**The partition key is `accessLevel`, not `isOwner`.** `get_user_secrets_with_shared` assigns it
+per UNION source: `owner` for your own, `org` for an organisation's, and the share's own level
+(`read` / `write`) for an actual share. Source 4 returns `is_owner = (s.user_id = auth.uid())`,
+so **a colleague's organisation secret arrives with `isOwner = false`** while nobody shared it
+with anyone - splitting on `isOwner` files it under "Shared with me" and tells the user someone
+shared it with them. An unrecognised level counts as a share, so a new source added server-side
+surfaces in the read-only section rather than in the one offering Edit and Delete.
+
+**A copied credential is wiped from the clipboard after 45 seconds**, the same policy the
+managed list applies. The panel this section came from had no wipe at all, and one panel holding
+two clipboard policies for the same class of data would be an oversight rather than a decision.
+The wipe deliberately outlives the panel: cancelling it on close would leave the credential
+there indefinitely.
+
+**The section loads lazily and may scan several pages.** A page is 50 entries of everything you
+can read, filtered down to the shares, so someone with 60 of their own secrets and two shared
+ones gets a first page that filters to nothing. An empty page auto-continues (capped at 5 pages
+/ 250 rows, then a "Keep looking" control takes over), because a section reporting "nothing
+shared with you" while the server still has some is a lie the user cannot tell from the truth.
+The offset advances by the **raw** row count, not the filtered one.
+
+Past that first load, paging is scroll-driven and only on a list that actually scrolls: a short
+list of shares in a large vault gets a footer button instead of an invisible scan. Auto-prefetch
+without that test turned one tab switch into hundreds of sequential requests.
+
 ## MCP tools
 
 | Tool | Purpose |
@@ -35,11 +82,23 @@ the process environment, system properties, macOS `launchctl`, and finally `~/.b
 | `secret_get` | Reveal password, notes and 2FA for one secret id |
 | `secret_create` | Create a secret |
 | `secret_delete` | Delete a secret |
+| `my_secrets_list` | Your own **and** shared-with-you secrets, with owner/access, metadata only |
+| `my_secret_get` | Reveal one secret by id, including one shared with you |
 
-**`secret_get` refuses any secret tagged `ai-provider`.** `secrets_list` hands out ids and
-`secret_get` hands out the plaintext password, so without that gate a prompt-injected agent is
-two tool calls away from every configured provider key. An agent that needs to *use* a provider
-goes through `PluginContext.llmProvider` and never needs the raw value.
+The `my_*` pair came from the retired `user-secret-list` plugin and keeps its original names:
+agents, prompts and skills already call them, and `getUserSecretsWithSharingInfo` is the only
+call that reports *how* a secret reached you. `secrets_list` / `secret_get` still read only
+what you can manage.
+
+**`secret_get` and `my_secret_get` both refuse any secret tagged `ai-provider`.** A `*_list`
+tool hands out ids and a `*_get` tool hands out the plaintext password, so without that gate a
+prompt-injected agent is two tool calls away from every configured provider key. An agent that
+needs to *use* a provider goes through `PluginContext.llmProvider` and never needs the raw
+value.
+
+Both call one function (`aiProviderRefusal`) rather than repeating the check, because repeating
+it is exactly how `my_secret_get` shipped *without* it in the sibling plugin and read the keys
+`secret_get` withheld. Any new tool here that returns a password calls it too.
 
 ## Permissions
 
@@ -92,7 +151,7 @@ ungated, and sharing with an organisation already requires membership of it.
 ```bash
 ./gradlew buildPluginJar
 cp build/libs/boss-plugin-secret-manager-*.jar ~/.boss/plugins/
-./gradlew test    # 152 host-independent cases, no live credential needed
+./gradlew test    # 195 host-independent cases, no live credential needed
 ```
 
 Do not delete `compose-stability.conf`. It stops the Compose compiler emitting a `$stable` read

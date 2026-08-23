@@ -6,6 +6,7 @@ import ai.rever.boss.plugin.api.PaginatedSecretsData
 import ai.rever.boss.plugin.api.PaginatedSecretsWithSharingData
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.api.SecretEntryWithSharingData
 import ai.rever.boss.plugin.api.SecretShareData
 import ai.rever.boss.plugin.api.ShareSecretRequestData
 import ai.rever.boss.plugin.api.UnshareSecretRequestData
@@ -175,6 +176,131 @@ class SecretManagerMcpToolsTest {
             assertTrue(result.text.contains("hunter2"))
         }
 
+    @Test
+    fun `my_secret_get withholds an AI provider key`() =
+        runTest {
+            // The sibling gate. This tool came from the retired user-secret-list plugin, where
+            // it had no such check for three days: same vault, same secret.read gate, so it
+            // read exactly the keys secret_get refuses. A gate on one tool and not the other
+            // is no gate, which is why both now call one function.
+            val (store, secrets) =
+                storeWith(listOf(aiProviderSecret("1", "OPENAI", "sk-live-secret")))
+            secrets.sharingEntries = listOf(sharedProviderKey("1", "OPENAI", "sk-live-secret"))
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "1")))
+
+            assertTrue(result.isError)
+            assertFalse(result.text.contains("sk-live-secret"), "the key leaked: ${result.text}")
+        }
+
+    @Test
+    fun `my_secret_get returns a secret shared with me`() =
+        runTest {
+            // The gate must not cost this tool its purpose: reading something a colleague
+            // shared, which is the one thing secret_get cannot see at all.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries =
+                listOf(
+                    SecretEntryWithSharingData(
+                        id = "9",
+                        website = "stripe.com",
+                        username = "ops",
+                        password = "shared-pw",
+                        tags = listOf("billing"),
+                        createdAt = "2026-01-01",
+                        updatedAt = "2026-01-01",
+                        isOwner = false,
+                        sharedByEmail = "anu@example.com",
+                        accessLevel = "read",
+                    ),
+                )
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "9")))
+
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains("shared-pw"))
+            assertTrue(result.text.contains("shared(read)"), result.text)
+        }
+
+    @Test
+    fun `my_secrets_list reports how each secret was reached`() =
+        runTest {
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries =
+                listOf(
+                    sharingEntry("1", "mine.com", accessLevel = "owner", isOwner = true),
+                    sharingEntry("2", "theirs.com", accessLevel = "read", isOwner = false),
+                )
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(emptyMap()))
+
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains("[owner]"), result.text)
+            assertTrue(result.text.contains("[shared(read)]"), result.text)
+        }
+
+    @Test
+    fun `a colleague's organisation secret is not reported as shared`() =
+        runTest {
+            // The exact trap the panel's sections exist to avoid, on the surface a model reads.
+            // Source 4 of get_user_secrets_with_shared returns is_owner = (s.user_id =
+            // auth.uid()), so a colleague's org secret arrives with isOwner = false - and
+            // labelling off that field told the agent somebody shared it.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries =
+                listOf(sharingEntry("1", "org-owned.com", accessLevel = "org", isOwner = false))
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(emptyMap()))
+
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains("[org]"), result.text)
+            assertFalse(result.text.contains("shared("), "reported as shared: ${result.text}")
+        }
+
+    private fun sharedProviderKey(
+        id: String,
+        providerId: String,
+        password: String,
+    ) = SecretEntryWithSharingData(
+        id = id,
+        website = providerId,
+        username = "${providerId}_API_KEY",
+        password = password,
+        tags = listOf(ProviderCredentialStore.TAG_AI_PROVIDER, providerId),
+        createdAt = "2026-01-01",
+        updatedAt = "2026-01-01",
+        isOwner = true,
+        accessLevel = "owner",
+    )
+
+    private fun sharingEntry(
+        id: String,
+        website: String,
+        accessLevel: String,
+        isOwner: Boolean,
+    ) = SecretEntryWithSharingData(
+        id = id,
+        website = website,
+        username = "user",
+        password = "pw",
+        createdAt = "2026-01-01",
+        updatedAt = "2026-01-01",
+        isOwner = isOwner,
+        accessLevel = accessLevel,
+    )
+
     private fun aiProviderSecret(
         id: String,
         providerId: String,
@@ -192,6 +318,12 @@ class SecretManagerMcpToolsTest {
     /** Records writes; only the members the tools touch do anything. */
     private class FakeSecrets(
         var entries: List<SecretEntryData>,
+        /**
+         * What `getUserSecretsWithSharingInfo` serves, separate from [entries] because the
+         * two RPCs behind them return different sets: `get_user_secrets` is own + organisation
+         * secrets, `get_user_secrets_with_shared` adds everything shared with the caller.
+         */
+        var sharingEntries: List<SecretEntryWithSharingData> = emptyList(),
     ) : SecretDataProvider {
         val created = mutableListOf<CreateSecretRequestData>()
         val deleted = mutableListOf<String>()
@@ -224,7 +356,12 @@ class SecretManagerMcpToolsTest {
         override suspend fun getUserSecretsWithSharingInfo(
             limit: Int,
             offset: Int,
-        ): Result<PaginatedSecretsWithSharingData> = Result.failure(UnsupportedOperationException())
+        ): Result<PaginatedSecretsWithSharingData> {
+            val page = sharingEntries.drop(offset).take(limit)
+            return Result.success(
+                PaginatedSecretsWithSharingData(page, hasMore = offset + page.size < sharingEntries.size),
+            )
+        }
 
         override suspend fun searchSecrets(
             query: String,
