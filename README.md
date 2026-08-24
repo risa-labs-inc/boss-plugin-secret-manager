@@ -1,6 +1,6 @@
 # BOSS Secret Manager
 
-Encrypted credentials, the secrets other people share with you, Plugin Store API keys, and
+Encrypted credentials, the secrets other people share with you, Plugin Store publish keys, and
 every AI provider setting in BOSS.
 
 A right-hand sidebar panel over the host's `SecretDataProvider`, plus the `Settings > AI
@@ -22,7 +22,13 @@ is retired, and its list is this panel's "Shared with me" section. See
   or re-share control exists anywhere in that section.
 - **Sharing**: share a secret with individual users (searched through Supabase) or with whole
   RBAC roles, each at an access level, and unshare again.
-- **Plugin Store API keys**: create, list and revoke them, with a `publish` scope checkbox. The
+- **AI**: a third section holding every AI credential in BOSS - local CLI sessions (a `claude` or
+  `codex` login you already have), provider API keys, and a model picker driven by each provider's
+  live list. The same panel the host renders at Settings, AI Providers, from one definition rather
+  than a second copy: the keys live in this vault, so the page that manages them belongs here too.
+  When the AI Gateway plugin is missing the section says so and offers to install it, because
+  without the gateway there are no CLI sessions and no common AI interface for other plugins.
+- **Plugin Store publish keys**: create, list and revoke them, with a `publish` scope checkbox. The
   key is shown once at creation and never again.
 - **AI providers**: Anthropic, OpenAI, Google Gemini, xAI Grok, Moonshot (Kimi), Together AI,
   and any custom OpenAI-compatible endpoint.
@@ -122,7 +128,7 @@ Two surfaces inside the panel carry their own gate, because they reach past the 
 | Surface | Permission | Held by |
 |---|---|---|
 | Share with a role (the share dialog's Roles tab) | `secret.share.role` | admin, boss_admin |
-| Plugin Store API keys | `api_key.create` | admin, boss_admin |
+| Plugin Store publish keys | `api_key.create` | admin, boss_admin |
 
 The role-share gate exists because a role share reaches every holder of that role, and `user`
 is a descendant of every role - so a role target is the one control here that can publish a
@@ -151,7 +157,7 @@ ungated, and sharing with an organisation already requires membership of it.
 ```bash
 ./gradlew buildPluginJar
 cp build/libs/boss-plugin-secret-manager-*.jar ~/.boss/plugins/
-./gradlew test    # 195 host-independent cases, no live credential needed
+./gradlew test    # 214 host-independent cases, no live credential needed
 ```
 
 Do not delete `compose-stability.conf`. It stops the Compose compiler emitting a `$stable` read

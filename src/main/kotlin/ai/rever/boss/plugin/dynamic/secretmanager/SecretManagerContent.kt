@@ -1,12 +1,22 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
-import ai.rever.boss.plugin.ui.BossAlertDialog
-import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.api.*
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersPanel
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
+import ai.rever.boss.plugin.ui.BossAlertDialog
+import ai.rever.boss.plugin.ui.BossBadge
+import ai.rever.boss.plugin.ui.BossCard
+import ai.rever.boss.plugin.ui.BossDialog
+import ai.rever.boss.plugin.ui.BossEmptyState
+import ai.rever.boss.plugin.ui.BossSearchBar
+import ai.rever.boss.plugin.ui.BossTabIndicator
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.ui.BossThemeColors
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,6 +26,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.*
@@ -24,22 +36,20 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.BorderStroke
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
 
 /**
  * The two halves of the panel.
@@ -52,6 +62,16 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
 enum class SecretPanelSection {
     SECRETS,
     SHARED_WITH_ME,
+
+    /**
+     * AI provider configuration: the same panel the host serves at Settings, AI Providers.
+     *
+     * One definition rendered in two places rather than a second copy. It is here because this
+     * plugin owns every AI credential in BOSS and the panel that holds them was reachable only
+     * through the host's Settings window - two clicks and a different window away from the vault
+     * the keys are actually stored in.
+     */
+    AI_PROVIDERS,
 }
 
 /**
@@ -71,6 +91,16 @@ fun SecretManagerContent(
     sharedSecretsViewModel: SharedSecretsViewModel,
     selectedSection: SecretPanelSection,
     onSelectSection: (SecretPanelSection) -> Unit,
+    /**
+     * The AI providers ViewModel, or null on a host that cannot serve one.
+     *
+     * A **supplier**, not the value: it is built inside `registerAiProviderSettings`'s
+     * `LinkageError` guard, which runs after `registerPanel`, so anything reading it at
+     * registration time would read null forever. Resolved when the section is first shown
+     * instead. Null means the host's api predates `LlmProviderSettingsAPI` (1.0.71), and the tab
+     * is not offered at all - a tab whose only content is "not available here" is noise.
+     */
+    aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
 ) {
     BossTheme {
         if (!viewModel.isAvailable()) {
@@ -79,6 +109,7 @@ fun SecretManagerContent(
             SecretManagerView(
                 viewModel = viewModel,
                 sharedSecretsViewModel = sharedSecretsViewModel,
+                aiProvidersViewModel = aiProvidersViewModel,
                 selectedSection = selectedSection,
                 onSelectSection = onSelectSection,
             )
@@ -108,18 +139,17 @@ private fun NoProviderMessage() {
             Text(
                 "Secret Manager",
                 color = BossThemeColors.TextPrimary,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
+                style = SecretPanelType.title
             )
             Text(
                 "Secret provider not available",
                 color = BossThemeColors.TextSecondary,
-                fontSize = 13.sp
+                style = SecretPanelType.body
             )
             Text(
                 "Please ensure the host provides secret management access",
                 color = BossThemeColors.TextSecondary.copy(alpha = 0.6f),
-                fontSize = 11.sp
+                style = SecretPanelType.caption
             )
         }
     }
@@ -134,6 +164,7 @@ private fun SecretManagerView(
     sharedSecretsViewModel: SharedSecretsViewModel,
     selectedSection: SecretPanelSection,
     onSelectSection: (SecretPanelSection) -> Unit,
+    aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
 ) {
     val state = viewModel.state
     val sharedState by sharedSecretsViewModel.state.collectAsState()
@@ -143,6 +174,9 @@ private fun SecretManagerView(
     // the scroll position every time the user looks at the other tab and comes back.
     val sharedListState = rememberLazyListState()
     val clipboardManager = LocalClipboardManager.current
+    // Resolved here rather than at registration: see the parameter's own note. `remember` with no
+    // key is right - the supplier reads a field that is set once, before any panel is created.
+    val aiViewModel = remember { aiProvidersViewModel() }
     var showAddDropdown by remember { mutableStateOf(false) }
 
     // Fetch on first entry into the section, not on panel open: this is a second secrets RPC
@@ -160,41 +194,54 @@ private fun SecretManagerView(
             .padding(16.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Header with title and refresh button
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
+            // One row switches section and carries the panel's two actions. There is no title:
+            // the panel chrome prints "Secret Manager" directly above, and at a real sidebar width
+            // the in-panel copy truncated to "Secret M..." - which is how the duplication was
+            // noticed. Deleting it then left a 56dp band holding two icons and nothing else, so
+            // the actions came down onto the tab strip's baseline instead of floating above it.
+            SectionTabs(
+                selectedSection = selectedSection,
+                // allShared, not the filtered view: typing in the shared section's filter
+                // would otherwise make the tab report "(1)" while forty are loaded.
+                sharedCount = sharedState.allShared.size,
+                showAiSection = aiViewModel != null,
+                onSelectSection = onSelectSection,
             ) {
-                Text(
-                    "Secret Manager",
-                    color = BossThemeColors.TextPrimary,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-
                 // Refresh button. Refetches whichever section is on screen - the two read
                 // different RPCs, so refreshing the hidden one would look like doing nothing.
                 val isRefreshing =
                     when (selectedSection) {
                         SecretPanelSection.SECRETS -> state.isLoading
                         SecretPanelSection.SHARED_WITH_ME -> sharedState.isLoading
+                        // The AI section's own rows carry their spinners, and its refresh is
+                        // several independent fetches rather than one load, so there is no single
+                        // flag to disable the button on.
+                        SecretPanelSection.AI_PROVIDERS -> false
                     }
                 IconButton(
                     onClick = {
                         when (selectedSection) {
                             SecretPanelSection.SECRETS -> viewModel.loadSecrets()
                             SecretPanelSection.SHARED_WITH_ME -> sharedSecretsViewModel.refresh()
+                            SecretPanelSection.AI_PROVIDERS ->
+                                aiViewModel?.let {
+                                    // All three, because all three can go stale while the panel
+                                    // sits open: a key edited elsewhere, a gateway installed in
+                                    // the Toolbox, a CLI signed into in a terminal.
+                                    it.refreshConnections()
+                                    it.checkGateway()
+                                    it.refreshCliEngines()
+                                }
                         }
                     },
-                    enabled = !isRefreshing
+                    enabled = !isRefreshing,
+                    modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
                         Icons.Default.Refresh,
                         contentDescription = "Refresh",
-                        tint = if (isRefreshing) BossThemeColors.TextSecondary else BossThemeColors.TextPrimary
+                        tint = if (isRefreshing) BossThemeColors.TextMuted else BossThemeColors.TextSecondary,
+                        modifier = Modifier.size(17.dp)
                     )
                 }
 
@@ -206,12 +253,16 @@ private fun SecretManagerView(
                             // Fallback trigger; normally pre-warmed after the first secrets load
                             viewModel.checkApiKeyPermission()
                         },
-                        enabled = !state.isLoading
+                        enabled = !state.isLoading,
+                        modifier = Modifier.size(28.dp)
                     ) {
+                        // Accent, not success-green: this is the panel's primary action, and
+                        // green here reads as a state ("all good") rather than an invitation.
                         Icon(
                             Icons.Default.Add,
                             contentDescription = "Add",
-                            tint = BossThemeColors.SuccessColor
+                            tint = BossThemeColors.AccentColor,
+                            modifier = Modifier.size(19.dp)
                         )
                     }
 
@@ -239,10 +290,10 @@ private fun SecretManagerView(
                                 Icon(
                                     Icons.Default.Lock,
                                     contentDescription = null,
-                                    tint = BossThemeColors.TextPrimary,
+                                    tint = BossThemeColors.TextSecondary,
                                     modifier = Modifier.size(18.dp)
                                 )
-                                Text("Add Secret", color = BossThemeColors.TextPrimary, fontSize = 13.sp)
+                                Text("Add secret", color = BossThemeColors.TextPrimary, style = SecretPanelType.body)
                             }
                         }
 
@@ -265,19 +316,24 @@ private fun SecretManagerView(
                                     Icon(
                                         Icons.Default.AutoAwesome,
                                         contentDescription = null,
-                                        tint = BossThemeColors.AccentColor,
+                                        tint = BossThemeColors.TextSecondary,
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Text(
-                                        "Add AI Provider Key",
+                                        "Add AI provider key",
                                         color = BossThemeColors.TextPrimary,
-                                        fontSize = 13.sp
+                                        style = SecretPanelType.body
                                     )
                                 }
                             }
                         }
 
-                        // Create API Key option (visible for admin/plugin_admin)
+                        // Named for the job, not the mechanism. "Create API Key" was the third
+                        // unrelated thing in this panel called an API key - alongside an AI
+                        // provider's key and the "this is an API key" tag on an ordinary secret -
+                        // and the only one that publishes a plugin to the store. A user who came
+                        // here to release a plugin could not tell which item to press.
+                        // Visible for admin/plugin_admin.
                         if (state.canManageApiKeys) {
                             Divider(color = BossThemeColors.BorderColor)
 
@@ -294,10 +350,14 @@ private fun SecretManagerView(
                                     Icon(
                                         Icons.Default.VpnKey,
                                         contentDescription = null,
-                                        tint = BossThemeColors.WarningColor,
+                                        tint = BossThemeColors.TextSecondary,
                                         modifier = Modifier.size(18.dp)
                                     )
-                                    Text("Create API Key", color = BossThemeColors.TextPrimary, fontSize = 13.sp)
+                                    Text(
+                                        "Create Plugin Store publish key",
+                                        color = BossThemeColors.TextPrimary,
+                                        style = SecretPanelType.body
+                                    )
                                 }
                             }
 
@@ -314,25 +374,20 @@ private fun SecretManagerView(
                                     Icon(
                                         Icons.Default.List,
                                         contentDescription = null,
-                                        tint = BossThemeColors.AccentColor,
+                                        tint = BossThemeColors.TextSecondary,
                                         modifier = Modifier.size(18.dp)
                                     )
-                                    Text("Manage API Keys", color = BossThemeColors.TextPrimary, fontSize = 13.sp)
+                                    Text(
+                                        "Manage publish keys",
+                                        color = BossThemeColors.TextPrimary,
+                                        style = SecretPanelType.body
+                                    )
                                 }
                             }
                         }
                     }
                 }
             }
-
-            SectionTabs(
-                selectedSection = selectedSection,
-                // allShared, not the filtered view: typing in the shared section's filter
-                // would otherwise make the tab report "(1)" while forty are loaded.
-                sharedCount = sharedState.allShared.size,
-                hasLoadedShared = sharedState.hasLoadedOnce,
-                onSelectSection = onSelectSection,
-            )
 
             when (selectedSection) {
                 SecretPanelSection.SECRETS ->
@@ -355,6 +410,19 @@ private fun SecretManagerView(
                         onDismissError = { sharedSecretsViewModel.clearError() },
                         modifier = Modifier.weight(1f),
                     )
+
+                SecretPanelSection.AI_PROVIDERS ->
+                    // The same composable the host renders at Settings, AI Providers, from one
+                    // definition. It scrolls itself, so it takes the remaining height and no
+                    // scroll container of its own - nesting two would measure with infinite
+                    // height and crash.
+                    //
+                    // `aiViewModel` cannot be null here: the tab is only offered when it is not.
+                    // Guarded anyway rather than asserted, because the day the tab is offered
+                    // some other way, a blank section beats a crash inside a credentials panel.
+                    aiViewModel?.let { model ->
+                        AiProvidersPanel(viewModel = model, modifier = Modifier.weight(1f))
+                    }
             }
         }
     }
@@ -469,9 +537,10 @@ private fun SecretsSection(
 
     Column(modifier = modifier.fillMaxSize()) {
         // Search bar
-        SearchBar(
+        PanelSearchField(
             query = state.searchQuery,
             onQueryChange = { viewModel.searchSecrets(it) },
+            placeholder = "Search secrets",
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
         )
 
@@ -480,7 +549,7 @@ private fun SecretsSection(
             "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}" +
                 (state.lastLoadDurationMs?.let { " · last fetch ${formatLoadDuration(it)}" } ?: ""),
             color = BossThemeColors.TextSecondary,
-            fontSize = 12.sp,
+            style = SecretPanelType.meta,
             modifier = Modifier.padding(bottom = 8.dp)
         )
 
@@ -549,7 +618,7 @@ private fun SecretsSection(
                             ) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(24.dp),
-                                    color = BossThemeColors.SuccessColor,
+                                    color = BossThemeColors.AccentColor,
                                     strokeWidth = 2.dp
                                 )
                             }
@@ -562,99 +631,178 @@ private fun SecretsSection(
 }
 
 /**
- * The section switcher, in the same [TabRow] idiom the share dialog already uses in this file,
- * so it reads as part of the panel rather than a bolted-on control.
+ * The section switcher.
  *
- * The shared count appears only once that section has loaded: it loads lazily, and a "(0)"
- * printed before anything was fetched states a fact nobody has checked.
+ * Hand-built rather than a Material `TabRow`: that paints its own indicator, ripple and 48dp
+ * minimum height, none of which belong to this design system, and at a real sidebar width it wrapped
+ * "Shared with me" onto two lines. This is the system's own vocabulary instead - `label` type for the
+ * tab names, `BossTabIndicator` (the shared 3dp accent marker) under the selected one, and a hairline
+ * rule carrying the full width so the tabs read as attached to the content below rather than floating.
+ *
+ * The shared count is a `BossBadge`, the same count chip the rest of BOSS uses, and it appears only
+ * once that section has loaded: it loads lazily, and a "0" printed before anything was fetched states
+ * a fact nobody has checked.
  */
 @Composable
 private fun SectionTabs(
     selectedSection: SecretPanelSection,
     sharedCount: Int,
-    hasLoadedShared: Boolean,
+    showAiSection: Boolean,
     onSelectSection: (SecretPanelSection) -> Unit,
+    actions: @Composable () -> Unit,
 ) {
-    TabRow(
-        selectedTabIndex = if (selectedSection == SecretPanelSection.SECRETS) 0 else 1,
-        backgroundColor = BossThemeColors.BackgroundColor,
-        contentColor = BossThemeColors.SuccessColor,
-        modifier = Modifier.padding(bottom = 12.dp)
-    ) {
-        Tab(
-            selected = selectedSection == SecretPanelSection.SECRETS,
-            onClick = { onSelectSection(SecretPanelSection.SECRETS) },
-            text = { Text("Secrets", fontSize = 12.sp) }
-        )
-        Tab(
-            selected = selectedSection == SecretPanelSection.SHARED_WITH_ME,
-            onClick = { onSelectSection(SecretPanelSection.SHARED_WITH_ME) },
-            text = {
-                Text(
-                    if (hasLoadedShared) "Shared with me ($sharedCount)" else "Shared with me",
-                    fontSize = 12.sp
+    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        // Bottom-aligned so the selected tab's indicator lands on the rule below the row. The
+        // tabs take their natural width rather than half each: an underline stretched across
+        // half a sidebar stops reading as "this word is selected".
+        Row(
+            modifier = Modifier.fillMaxWidth().selectableGroup(),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            SectionTab(
+                label = "SECRETS",
+                selected = selectedSection == SecretPanelSection.SECRETS,
+                onClick = { onSelectSection(SecretPanelSection.SECRETS) },
+            )
+            SectionTab(
+                label = "SHARED",
+                selected = selectedSection == SecretPanelSection.SHARED_WITH_ME,
+                onClick = { onSelectSection(SecretPanelSection.SHARED_WITH_ME) },
+                // Straight through. There was a `hasLoadedShared` guard here to keep a `0` off
+                // the tab before anything had been fetched, but `BossBadge` declines to draw a
+                // zero itself (`if (count > 0)`), so the flag decided nothing and the local
+                // `badge > 0` check restated the component's own rule.
+                badge = sharedCount,
+                modifier = Modifier.padding(start = 20.dp),
+            )
+            // Absent, not disabled, on a host whose api predates LlmProviderSettingsAPI: the
+            // section cannot render there at all, and a tab that only ever says "not available"
+            // is worse than one tab fewer.
+            if (showAiSection) {
+                SectionTab(
+                    label = "AI",
+                    selected = selectedSection == SecretPanelSection.AI_PROVIDERS,
+                    onClick = { onSelectSection(SecretPanelSection.AI_PROVIDERS) },
+                    modifier = Modifier.padding(start = 20.dp),
                 )
             }
+            Spacer(Modifier.weight(1f))
+            Row(
+                modifier = Modifier.padding(bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                actions()
+            }
+        }
+        // The rule runs the full width under both tabs; the indicator sits on top of it.
+        Box(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(BossThemeColors.BorderColor),
         )
     }
 }
 
 @Composable
-private fun SearchBar(
+private fun SectionTab(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    badge: Int = 0,
+) {
+    // `IntrinsicSize.Max` is load-bearing, not tidying. The indicator is `fillMaxWidth()`, and
+    // in an unweighted Row that resolves to the whole *remaining* width - so the first tab ate
+    // the row, pushed the second one off the edge and took the actions with it. Constraining the
+    // Column to its content's natural width makes the underline measure the label. (The tabs used
+    // to be `weight(1f)` each, which bounded it by accident and is why this only broke now.)
+    // `selectable` rather than `clickable`: Material's `Tab` supplied the role and the selected
+    // state to the accessibility tree, and hand-building the strip dropped both. A screen reader
+    // otherwise announces two unlabelled buttons and never says which one is current.
+    Column(
+        modifier =
+            modifier
+                .width(IntrinsicSize.Max)
+                .selectable(selected = selected, onClick = onClick, role = Role.Tab),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(
+            modifier = Modifier.padding(top = 2.dp, bottom = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                label,
+                style = SecretPanelType.label,
+                // AccentColor for the selected tab is the design system's "signal = live/now".
+                color = if (selected) BossThemeColors.AccentColor else BossThemeColors.TextSecondary,
+                maxLines = 1,
+            )
+            BossBadge(count = badge)
+        }
+        // Always rendered, transparent when unselected: selecting a tab must not shift the row,
+        // and the previous `else Box(height(3.dp))` hardcoded a second copy of the indicator's
+        // height - so a host that changed it would have made this row jump.
+        BossTabIndicator(
+            modifier = Modifier.fillMaxWidth().alpha(if (selected) 1f else 0f),
+        )
+    }
+}
+
+/**
+ * The panel's search field: `BossSearchBar` plus the clear button it does not carry.
+ *
+ * `BossSearchBar` is the same field the rest of BOSS paints (surface fill, hairline border, 14dp
+ * muted magnifier, accent caret), and this panel had **two** hand-rolled copies of it that had
+ * already drifted apart in padding and placeholder colour. Now there is one, used by both
+ * sections, which is what the two wrappers this replaced each claimed to be.
+ *
+ * **The clear button is not decoration.** The managed section's hand-rolled field had one and
+ * `BossSearchBar` does not, so adopting the component on its own silently removed the only
+ * pointer-driven way to reset a filter - a control lost inside a change that was supposed to be
+ * about type and colour. It goes beside the field rather than inside it, because the component
+ * gives no slot within its border and overlaying one would put the button on top of the tail of
+ * a long query.
+ *
+ * **It takes the space only when there is something to clear.** Reserving the slot permanently
+ * was the first version and left the field ending 26dp short of the cards below it - a visible
+ * step in the panel's left-to-right edge, in the state the user is looking at almost all the
+ * time. Trading that for a one-off narrowing on the first keystroke is the right way round: the
+ * resting state is the one that has to line up, and while typing the eye is on the text.
+ *
+ * The shared section gains the button it never had, since two search fields one tab apart
+ * behaving differently is the same incoherence in a different place.
+ */
+@Composable
+internal fun PanelSearchField(
     query: String,
     onQueryChange: (String) -> Unit,
-    modifier: Modifier = Modifier
+    placeholder: String,
+    modifier: Modifier = Modifier,
 ) {
-    BasicTextField(
-        value = query,
-        onValueChange = onQueryChange,
-        modifier = modifier.height(32.dp),
-        singleLine = true,
-        textStyle = MaterialTheme.typography.body2.copy(color = BossThemeColors.TextPrimary),
-        cursorBrush = SolidColor(BossThemeColors.SuccessColor),
-        decorationBox = { innerTextField ->
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(BossThemeColors.BackgroundColor, RoundedCornerShape(4.dp))
-                    .border(1.dp, BossThemeColors.BorderColor, RoundedCornerShape(4.dp))
-                    .padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BossSearchBar(
+            query = query,
+            onQueryChange = onQueryChange,
+            modifier = Modifier.weight(1f).height(32.dp),
+            placeholder = placeholder,
+        )
+        if (query.isNotEmpty()) {
+            IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(26.dp)) {
                 Icon(
-                    Icons.Default.Search,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = BossThemeColors.TextSecondary
+                    Icons.Default.Clear,
+                    contentDescription = "Clear search",
+                    tint = BossThemeColors.TextSecondary,
+                    modifier = Modifier.size(15.dp),
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                Box(modifier = Modifier.weight(1f)) {
-                    if (query.isEmpty()) {
-                        Text(
-                            "Search secrets...",
-                            style = MaterialTheme.typography.body2,
-                            color = BossThemeColors.TextSecondary,
-                            fontSize = 12.sp
-                        )
-                    }
-                    innerTextField()
-                }
-                if (query.isNotEmpty()) {
-                    IconButton(
-                        onClick = { onQueryChange("") },
-                        modifier = Modifier.size(16.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Clear,
-                            contentDescription = "Clear",
-                            modifier = Modifier.size(14.dp),
-                            tint = BossThemeColors.TextSecondary
-                        )
-                    }
-                }
             }
         }
-    )
+    }
 }
 
 private fun formatLoadDuration(ms: Long): String = when {
@@ -677,19 +825,19 @@ private fun LoadingView() {
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator(color = BossThemeColors.SuccessColor)
+            CircularProgressIndicator(color = BossThemeColors.AccentColor)
             Spacer(modifier = Modifier.height(16.dp))
             Text(
                 if (elapsedSeconds < 3) "Loading secrets..." else "Loading secrets... ${elapsedSeconds}s",
                 color = BossThemeColors.TextSecondary,
-                fontSize = 12.sp
+                style = SecretPanelType.meta
             )
             if (elapsedSeconds >= 10) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     "Still waiting on the server — the network may be slow",
                     color = BossThemeColors.TextSecondary.copy(alpha = 0.6f),
-                    fontSize = 11.sp
+                    style = SecretPanelType.caption
                 )
             }
         }
@@ -717,16 +865,16 @@ private fun ErrorView(
                 tint = BossThemeColors.ErrorColor,
                 modifier = Modifier.size(32.dp)
             )
-            Text(message, color = BossThemeColors.TextSecondary, fontSize = 12.sp)
+            Text(message, color = BossThemeColors.TextSecondary, style = SecretPanelType.meta)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onRetry,
-                    colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.SuccessColor)
+                    colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.AccentColor)
                 ) {
-                    Text("Retry", color = BossThemeColors.TextPrimary, fontSize = 12.sp)
+                    Text("Retry", color = BossThemeColors.TextPrimary, style = SecretPanelType.meta)
                 }
                 TextButton(onClick = onDismiss) {
-                    Text("Dismiss", color = BossThemeColors.TextSecondary, fontSize = 12.sp)
+                    Text("Dismiss", color = BossThemeColors.TextSecondary, style = SecretPanelType.meta)
                 }
             }
         }
@@ -738,41 +886,36 @@ private fun EmptyView(
     searchQuery: String,
     onAddSecret: () -> Unit
 ) {
+    // `BossEmptyState` here too, not just in the shared section. Half-converting it left the two
+    // sections hand-rolling and importing the same empty state one tab apart, with the copy for
+    // the identical situation already drifting ("No results found" against "No results").
+    // `BossEmptyState` has no action slot, so the button sits under it in the same Column.
     Box(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(24.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Icon(
-                Icons.Default.Lock,
-                contentDescription = null,
-                tint = BossThemeColors.TextSecondary,
-                modifier = Modifier.size(48.dp)
-            )
-            Text(
-                if (searchQuery.isBlank()) "No secrets yet" else "No results found",
-                color = BossThemeColors.TextPrimary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium
-            )
-            Text(
-                if (searchQuery.isBlank()) "Add your first secret to get started"
-                else "Try a different search term",
-                color = BossThemeColors.TextSecondary,
-                fontSize = 12.sp
+            BossEmptyState(
+                icon = if (searchQuery.isBlank()) Icons.Default.Lock else Icons.Default.Search,
+                message = if (searchQuery.isBlank()) "No secrets yet" else "No results",
+                // Each description names its own control: this section searches the server,
+                // the shared one filters what it already has, and telling the user to change
+                // a "filter" when the box says Search sends them looking for one.
+                description =
+                    if (searchQuery.isBlank()) "Add your first secret to get started"
+                    else "Try a different search term"
             )
             if (searchQuery.isBlank()) {
                 Button(
                     onClick = onAddSecret,
-                    colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.SuccessColor)
+                    colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.AccentColor)
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Add Secret", color = BossThemeColors.TextPrimary, fontSize = 12.sp)
+                    Text("Add secret", color = BossThemeColors.TextPrimary, style = SecretPanelType.meta)
                 }
             }
         }
@@ -803,16 +946,8 @@ private fun SecretCard(
         secret.expirationDate != null ||
         (metadata != null && metadata.twofaEnabled)
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        backgroundColor = BossThemeColors.SurfaceColor,
-        elevation = 2.dp
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+    BossCard(modifier = Modifier.fillMaxWidth()) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // AI provider entries are configuration, not a password: the useful action is
             // to open the settings section where the key can be tested and a model picked.
             if (isAiProvider) {
@@ -835,14 +970,13 @@ private fun SecretCard(
                     Text(
                         text = "AI provider${if (aiProviderLabel.isNotBlank()) " · $aiProviderLabel" else ""}",
                         color = BossThemeColors.TextPrimary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = SecretPanelType.metaStrong,
                         modifier = Modifier.weight(1f)
                     )
                     Text(
                         text = "Open settings →",
                         color = BossThemeColors.AccentColor,
-                        fontSize = 12.sp
+                        style = SecretPanelType.meta
                     )
                 }
             }
@@ -871,8 +1005,7 @@ private fun SecretCard(
                         Text(
                             text = secret.website,
                             color = BossThemeColors.TextPrimary,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
+                            style = SecretPanelType.bodyStrong,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -891,37 +1024,40 @@ private fun SecretCard(
                         Text(
                             text = secret.username,
                             color = BossThemeColors.TextSecondary,
-                            fontSize = 14.sp,
+                            style = SecretPanelType.meta,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                // Action buttons
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
+                // The three actions were a hardcoded blue, success-green and error-red, on
+                // every card - a row of traffic lights repeated down the list, none of which
+                // meant anything. Colour here is reserved for the one action that cannot be
+                // undone; Share and Edit are ordinary controls and read as text does.
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    IconButton(onClick = onShare, modifier = Modifier.size(28.dp)) {
                         Icon(
                             Icons.Default.Share,
                             contentDescription = "Share",
-                            tint = Color(0xFF64B5F6),
-                            modifier = Modifier.size(18.dp)
+                            tint = BossThemeColors.TextSecondary,
+                            modifier = Modifier.size(16.dp)
                         )
                     }
-                    IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = onEdit, modifier = Modifier.size(28.dp)) {
                         Icon(
                             Icons.Default.Edit,
                             contentDescription = "Edit",
-                            tint = BossThemeColors.SuccessColor,
-                            modifier = Modifier.size(18.dp)
+                            tint = BossThemeColors.TextSecondary,
+                            modifier = Modifier.size(16.dp)
                         )
                     }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
                         Icon(
                             Icons.Default.Delete,
                             contentDescription = "Delete",
-                            tint = BossThemeColors.ErrorColor,
-                            modifier = Modifier.size(18.dp)
+                            tint = BossThemeColors.ErrorColor.copy(alpha = 0.75f),
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
@@ -934,13 +1070,16 @@ private fun SecretCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(BossThemeColors.BackgroundColor, RoundedCornerShape(4.dp))
-                    .padding(12.dp),
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
+                    // The confirmation was "Copied - clipboard clears in 45s", which wrapped or
+                    // ellipsised at a real sidebar width. The middot form is the one the count
+                    // line above the list already uses.
                     text = when {
-                        justCopied -> "Copied — clipboard clears in 45s"
+                        justCopied -> "Copied · clears in 45s"
                         isPasswordVisible -> secret.password
                         else -> "••••••••"
                     },
@@ -949,7 +1088,9 @@ private fun SecretCard(
                         isPasswordVisible -> BossThemeColors.TextPrimary
                         else -> BossThemeColors.TextSecondary
                     },
-                    fontSize = 14.sp,
+                    // A credential is read a character at a time, which is what the data role
+                    // is for. The confirmation borrows it rather than switching family mid-row.
+                    style = SecretPanelType.data,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -985,25 +1126,26 @@ private fun SecretCard(
 
             // Show/Hide details (tags, notes, expiration, 2FA)
             if (hasDetails) {
+                // Left-aligned and quiet. Full-width SpaceBetween put the label and its own
+                // chevron at opposite ends of the card, reading as two unrelated controls, and
+                // success-green made the least important thing on the card the loudest.
                 Row(
                     modifier = Modifier
-                        .fillMaxWidth()
                         .clickable { onToggleExpand() }
-                        .padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                        .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        if (isExpanded) "Hide Details" else "Show Details",
-                        color = BossThemeColors.SuccessColor,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
+                        if (isExpanded) "Hide details" else "Show details",
+                        color = BossThemeColors.TextSecondary,
+                        style = SecretPanelType.meta
                     )
                     Icon(
                         if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         contentDescription = if (isExpanded) "Hide details" else "Show details",
-                        tint = BossThemeColors.SuccessColor,
-                        modifier = Modifier.size(16.dp)
+                        tint = BossThemeColors.TextSecondary,
+                        modifier = Modifier.size(14.dp)
                     )
                 }
 
@@ -1024,7 +1166,7 @@ private fun SecretCard(
                                 Icon(
                                     Icons.Default.Label,
                                     contentDescription = "Tags",
-                                    tint = BossThemeColors.SuccessColor,
+                                    tint = BossThemeColors.AccentColor,
                                     modifier = Modifier.size(14.dp)
                                 )
                                 secret.tags.forEach { tag ->
@@ -1048,7 +1190,7 @@ private fun SecretCard(
                                 Text(
                                     notes,
                                     color = BossThemeColors.TextSecondary,
-                                    fontSize = 12.sp
+                                    style = SecretPanelType.meta
                                 )
                             }
                         }
@@ -1068,7 +1210,7 @@ private fun SecretCard(
                                 Text(
                                     "Expires: $expirationDate",
                                     color = BossThemeColors.WarningColor,
-                                    fontSize = 12.sp
+                                    style = SecretPanelType.meta
                                 )
                             }
                         }
@@ -1088,21 +1230,20 @@ private fun SecretCard(
                                 Text(
                                     "2FA: ${metadata.twofaType?.uppercase() ?: "ENABLED"}",
                                     color = BossThemeColors.TextPrimary,
-                                    fontSize = 12.sp
+                                    style = SecretPanelType.meta
                                 )
                             }
                             if (metadata.recoveryCodes.isNotEmpty()) {
                                 Text(
                                     text = "Recovery Codes:",
                                     color = BossThemeColors.TextSecondary,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
+                                    style = SecretPanelType.metaStrong
                                 )
                                 metadata.recoveryCodes.forEach { code ->
                                     Text(
                                         text = "• $code",
                                         color = BossThemeColors.TextPrimary,
-                                        fontSize = 11.sp,
+                                        style = SecretPanelType.caption,
                                         modifier = Modifier.padding(start = 8.dp)
                                     )
                                 }
@@ -1123,7 +1264,7 @@ private fun SecretCard(
                             Text(
                                 "Created: ${secret.createdAt}",
                                 color = BossThemeColors.TextSecondary,
-                                fontSize = 11.sp
+                                style = SecretPanelType.caption
                             )
                         }
                     }
@@ -1140,12 +1281,12 @@ private fun SecretCard(
 private fun TagBadge(tag: String) {
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = BossThemeColors.SuccessColor.copy(alpha = 0.2f)
+        color = BossThemeColors.AccentColor.copy(alpha = 0.2f)
     ) {
         Text(
             text = tag,
-            color = BossThemeColors.SuccessColor,
-            fontSize = 11.sp,
+            color = BossThemeColors.AccentColor,
+            style = SecretPanelType.caption,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
         )
     }
@@ -1176,8 +1317,7 @@ private fun CreateSecretDialog(
                 Text(
                     "Add New Secret",
                     color = BossThemeColors.TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
+                    style = SecretPanelType.title
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1234,7 +1374,7 @@ private fun CreateSecretDialog(
                         checked = isApiKey,
                         onCheckedChange = { isApiKey = it },
                         colors = CheckboxDefaults.colors(
-                            checkedColor = BossThemeColors.SuccessColor,
+                            checkedColor = BossThemeColors.AccentColor,
                             uncheckedColor = BossThemeColors.TextSecondary
                         )
                     )
@@ -1242,7 +1382,7 @@ private fun CreateSecretDialog(
                     Text(
                         "This is an API Key",
                         color = BossThemeColors.TextPrimary,
-                        fontSize = 14.sp
+                        style = SecretPanelType.bodyStrong
                     )
                 }
 
@@ -1269,7 +1409,7 @@ private fun CreateSecretDialog(
                             }
                         },
                         enabled = !isLoading && website.isNotBlank() && username.isNotBlank() && password.isNotBlank(),
-                        colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.SuccessColor)
+                        colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.AccentColor)
                     ) {
                         if (isLoading) {
                             CircularProgressIndicator(
@@ -1311,8 +1451,7 @@ private fun EditSecretDialog(
                 Text(
                     "Edit Secret",
                     color = BossThemeColors.TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
+                    style = SecretPanelType.title
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1365,7 +1504,7 @@ private fun EditSecretDialog(
                         checked = isApiKey,
                         onCheckedChange = { isApiKey = it },
                         colors = CheckboxDefaults.colors(
-                            checkedColor = BossThemeColors.SuccessColor,
+                            checkedColor = BossThemeColors.AccentColor,
                             uncheckedColor = BossThemeColors.TextSecondary
                         )
                     )
@@ -1373,7 +1512,7 @@ private fun EditSecretDialog(
                     Text(
                         "This is an API Key",
                         color = BossThemeColors.TextPrimary,
-                        fontSize = 14.sp
+                        style = SecretPanelType.bodyStrong
                     )
                 }
 
@@ -1407,7 +1546,7 @@ private fun EditSecretDialog(
                             }
                         },
                         enabled = !isLoading && website.isNotBlank() && username.isNotBlank() && password.isNotBlank(),
-                        colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.SuccessColor)
+                        colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.AccentColor)
                     ) {
                         if (isLoading) {
                             CircularProgressIndicator(
@@ -1446,14 +1585,14 @@ private fun DeleteConfirmationDialog(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     "${secret.website} - ${secret.username}",
-                    color = Color(0xFF90CAF9),
-                    fontSize = 12.sp
+                    color = BossThemeColors.AccentColor,
+                    style = SecretPanelType.bodyStrong
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     "This action cannot be undone.",
                     color = BossThemeColors.ErrorColor,
-                    fontSize = 11.sp
+                    style = SecretPanelType.caption
                 )
             }
         },
@@ -1517,8 +1656,7 @@ private fun ShareSecretDialog(
                 Text(
                     "Share Secret",
                     color = BossThemeColors.TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
+                    style = SecretPanelType.title
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -1526,7 +1664,7 @@ private fun ShareSecretDialog(
                 Text(
                     "${secret.website} - ${secret.username}",
                     color = BossThemeColors.TextSecondary,
-                    fontSize = 12.sp
+                    style = SecretPanelType.meta
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1536,15 +1674,14 @@ private fun ShareSecretDialog(
                     Text(
                         "Currently shared with:",
                         color = BossThemeColors.TextPrimary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+                        style = SecretPanelType.metaStrong
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
                     if (isLoadingShares) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(20.dp),
-                            color = BossThemeColors.SuccessColor,
+                            color = BossThemeColors.AccentColor,
                             strokeWidth = 2.dp
                         )
                     } else {
@@ -1561,12 +1698,12 @@ private fun ShareSecretDialog(
                                     Text(
                                         share.sharedWithUserEmail ?: share.sharedWithRoleName ?: "Unknown",
                                         color = BossThemeColors.TextPrimary,
-                                        fontSize = 12.sp
+                                        style = SecretPanelType.meta
                                     )
                                     Text(
                                         if (share.sharedWithUserId != null) "User" else "Role",
                                         color = BossThemeColors.TextSecondary,
-                                        fontSize = 10.sp
+                                        style = SecretPanelType.micro
                                     )
                                 }
                                 IconButton(
@@ -1595,12 +1732,12 @@ private fun ShareSecretDialog(
                 TabRow(
                     selectedTabIndex = selectedTab,
                     backgroundColor = BossThemeColors.BackgroundColor,
-                    contentColor = BossThemeColors.SuccessColor
+                    contentColor = BossThemeColors.AccentColor
                 ) {
                     Tab(
                         selected = selectedTab == 0,
                         onClick = { tabSelection = 0 },
-                        text = { Text("Users", fontSize = 12.sp) }
+                        text = { Text("Users", style = SecretPanelType.meta) }
                     )
                     // Hidden without `secret.share.role`. A role share reaches every
                     // holder of that role, and `user` is a descendant of every role, so
@@ -1611,7 +1748,7 @@ private fun ShareSecretDialog(
                         Tab(
                             selected = selectedTab == 1,
                             onClick = { tabSelection = 1 },
-                            text = { Text("Roles", fontSize = 12.sp) }
+                            text = { Text("Roles", style = SecretPanelType.meta) }
                         )
                     }
                 }
@@ -1634,7 +1771,7 @@ private fun ShareSecretDialog(
                             .padding(horizontal = 8.dp),
                         singleLine = true,
                         textStyle = MaterialTheme.typography.body2.copy(color = BossThemeColors.TextPrimary),
-                        cursorBrush = SolidColor(BossThemeColors.SuccessColor),
+                        cursorBrush = SolidColor(BossThemeColors.AccentColor),
                         decorationBox = { innerTextField ->
                             Row(
                                 modifier = Modifier.fillMaxSize(),
@@ -1652,7 +1789,7 @@ private fun ShareSecretDialog(
                                         Text(
                                             "Search users by email...",
                                             color = BossThemeColors.TextSecondary,
-                                            fontSize = 12.sp
+                                            style = SecretPanelType.meta
                                         )
                                     }
                                     innerTextField()
@@ -1671,7 +1808,7 @@ private fun ShareSecretDialog(
                         ) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(24.dp),
-                                color = BossThemeColors.SuccessColor,
+                                color = BossThemeColors.AccentColor,
                                 strokeWidth = 2.dp
                             )
                         }
@@ -1710,7 +1847,7 @@ private fun ShareSecretDialog(
                                     Text(
                                         user.email,
                                         color = BossThemeColors.TextPrimary,
-                                        fontSize = 12.sp
+                                        style = SecretPanelType.meta
                                     )
                                 }
                             }
@@ -1753,14 +1890,14 @@ private fun ShareSecretDialog(
                                     Text(
                                         role.name,
                                         color = BossThemeColors.TextPrimary,
-                                        fontSize = 12.sp
+                                        style = SecretPanelType.meta
                                     )
                                     val description = role.description
                                     if (description != null) {
                                         Text(
                                             description,
                                             color = BossThemeColors.TextSecondary,
-                                            fontSize = 10.sp
+                                            style = SecretPanelType.micro
                                         )
                                     }
                                 }
@@ -1802,7 +1939,7 @@ private fun DialogTextField(
         Text(
             label,
             color = BossThemeColors.TextSecondary,
-            fontSize = 11.sp,
+            style = SecretPanelType.caption,
             modifier = Modifier.padding(bottom = 4.dp)
         )
 
@@ -1820,7 +1957,7 @@ private fun DialogTextField(
                 modifier = Modifier.weight(1f),
                 singleLine = singleLine,
                 textStyle = MaterialTheme.typography.body2.copy(color = BossThemeColors.TextPrimary),
-                cursorBrush = SolidColor(BossThemeColors.SuccessColor),
+                cursorBrush = SolidColor(BossThemeColors.AccentColor),
                 visualTransformation = if (isPassword && !showPassword)
                     PasswordVisualTransformation() else VisualTransformation.None,
                 decorationBox = { innerTextField ->
@@ -1829,7 +1966,7 @@ private fun DialogTextField(
                             Text(
                                 placeholder,
                                 color = BossThemeColors.TextSecondary,
-                                fontSize = 13.sp
+                                style = SecretPanelType.body
                             )
                         }
                         innerTextField()
@@ -1898,10 +2035,9 @@ private fun CreateApiKeyDialog(
                             modifier = Modifier.size(24.dp)
                         )
                         Text(
-                            if (isSuccess) "API Key Created" else "Create API Key",
+                            if (isSuccess) "Publish key created" else "Create publish key",
                             color = BossThemeColors.TextPrimary,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
+                            style = SecretPanelType.title
                         )
                     }
                 }
@@ -1926,15 +2062,14 @@ private fun CreateApiKeyDialog(
                             modifier = Modifier.size(48.dp)
                         )
                         Text(
-                            "API Key Securely Stored",
+                            "Publish key stored",
                             color = BossThemeColors.TextPrimary,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium
+                            style = SecretPanelType.bodyStrong
                         )
                         Text(
-                            "Your API key has been automatically saved to your secrets.",
+                            "The key is saved to your secrets. This is the only time it is shown.",
                             color = BossThemeColors.TextSecondary,
-                            fontSize = 12.sp
+                            style = SecretPanelType.meta
                         )
                         Divider(color = BossThemeColors.BorderColor, modifier = Modifier.padding(vertical = 8.dp))
                         Column(
@@ -1954,7 +2089,7 @@ private fun CreateApiKeyDialog(
                                 Text(
                                     "Website: boss_plugin_store_api_key",
                                     color = BossThemeColors.TextPrimary,
-                                    fontSize = 11.sp
+                                    style = SecretPanelType.caption
                                 )
                             }
                             Row(
@@ -1970,7 +2105,7 @@ private fun CreateApiKeyDialog(
                                 Text(
                                     "Username: Your key name",
                                     color = BossThemeColors.TextPrimary,
-                                    fontSize = 11.sp
+                                    style = SecretPanelType.caption
                                 )
                             }
                             Row(
@@ -1984,9 +2119,9 @@ private fun CreateApiKeyDialog(
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Text(
-                                    "Password: Your API key",
+                                    "Password: the key itself",
                                     color = BossThemeColors.TextPrimary,
-                                    fontSize = 11.sp
+                                    style = SecretPanelType.caption
                                 )
                             }
                         }
@@ -1995,9 +2130,9 @@ private fun CreateApiKeyDialog(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        "Use the X-API-Key header with your key for CI/CD publishing.",
+                        "Send it as the X-API-Key header when publishing.",
                         color = BossThemeColors.TextSecondary,
-                        fontSize = 11.sp
+                        style = SecretPanelType.caption
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -2008,7 +2143,7 @@ private fun CreateApiKeyDialog(
                     ) {
                         Button(
                             onClick = onDismiss,
-                            colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.SuccessColor)
+                            colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.AccentColor)
                         ) {
                             Text("Done", color = BossThemeColors.TextPrimary)
                         }
@@ -2016,9 +2151,10 @@ private fun CreateApiKeyDialog(
                 } else {
                     // Creation form
                     Text(
-                        "Create an API key for CI/CD publishing to the Plugin Store. The key will be securely stored in your secrets.",
+                        "Publishes plugins to the BOSS Plugin Store from CI or a script. The key is stored in your " +
+                            "secrets automatically.",
                         color = BossThemeColors.TextSecondary,
-                        fontSize = 12.sp
+                        style = SecretPanelType.meta
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -2037,7 +2173,7 @@ private fun CreateApiKeyDialog(
                     Text(
                         "Scopes",
                         color = BossThemeColors.TextSecondary,
-                        fontSize = 11.sp
+                        style = SecretPanelType.caption
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -2073,7 +2209,7 @@ private fun CreateApiKeyDialog(
                             checked = hasExpiration,
                             onCheckedChange = { hasExpiration = it },
                             colors = CheckboxDefaults.colors(
-                                checkedColor = BossThemeColors.SuccessColor,
+                                checkedColor = BossThemeColors.AccentColor,
                                 uncheckedColor = BossThemeColors.TextSecondary
                             )
                         )
@@ -2081,12 +2217,12 @@ private fun CreateApiKeyDialog(
                             Text(
                                 "Set expiration",
                                 color = BossThemeColors.TextPrimary,
-                                fontSize = 12.sp
+                                style = SecretPanelType.meta
                             )
                             Text(
                                 "Key will expire after specified days",
                                 color = BossThemeColors.TextSecondary,
-                                fontSize = 10.sp
+                                style = SecretPanelType.micro
                             )
                         }
                     }
@@ -2113,12 +2249,12 @@ private fun CreateApiKeyDialog(
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
                                 singleLine = true,
                                 textStyle = MaterialTheme.typography.body2.copy(color = BossThemeColors.TextPrimary),
-                                cursorBrush = SolidColor(BossThemeColors.SuccessColor)
+                                cursorBrush = SolidColor(BossThemeColors.AccentColor)
                             )
                             Text(
                                 "days",
                                 color = BossThemeColors.TextSecondary,
-                                fontSize = 12.sp
+                                style = SecretPanelType.meta
                             )
                         }
                     }
@@ -2154,7 +2290,7 @@ private fun CreateApiKeyDialog(
                                     strokeWidth = 2.dp
                                 )
                             } else {
-                                Text("Create Key", color = Color.Black)
+                                Text("Create Key", color = Color.Black, style = SecretPanelType.body)
                             }
                         }
                     }
@@ -2185,7 +2321,7 @@ private fun ScopeCheckbox(
             checked = checked,
             onCheckedChange = onCheckedChange,
             colors = CheckboxDefaults.colors(
-                checkedColor = BossThemeColors.SuccessColor,
+                checkedColor = BossThemeColors.AccentColor,
                 uncheckedColor = BossThemeColors.TextSecondary
             )
         )
@@ -2193,13 +2329,12 @@ private fun ScopeCheckbox(
             Text(
                 label,
                 color = BossThemeColors.TextPrimary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
+                style = SecretPanelType.metaStrong
             )
             Text(
                 description,
                 color = BossThemeColors.TextSecondary,
-                fontSize = 10.sp
+                style = SecretPanelType.micro
             )
         }
     }
@@ -2238,14 +2373,13 @@ private fun ApiKeysListDialog(
                         Icon(
                             Icons.Default.VpnKey,
                             contentDescription = null,
-                            tint = Color(0xFF64B5F6),
-                            modifier = Modifier.size(24.dp)
+                            tint = BossThemeColors.AccentColor,
+                            modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            "Plugin Store API Keys",
+                            "Plugin Store publish keys",
                             color = BossThemeColors.TextPrimary,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
+                            style = SecretPanelType.title
                         )
                     }
                     IconButton(
@@ -2255,7 +2389,7 @@ private fun ApiKeysListDialog(
                         Icon(
                             Icons.Default.Add,
                             contentDescription = "Create new",
-                            tint = BossThemeColors.SuccessColor
+                            tint = BossThemeColors.AccentColor
                         )
                     }
                 }
@@ -2268,7 +2402,7 @@ private fun ApiKeysListDialog(
                         contentAlignment = Alignment.Center
                     ) {
                         CircularProgressIndicator(
-                            color = BossThemeColors.SuccessColor,
+                            color = BossThemeColors.AccentColor,
                             modifier = Modifier.size(32.dp)
                         )
                     }
@@ -2289,14 +2423,14 @@ private fun ApiKeysListDialog(
                                 modifier = Modifier.size(48.dp)
                             )
                             Text(
-                                "No API keys",
+                                "No publish keys",
                                 color = BossThemeColors.TextPrimary,
-                                fontSize = 14.sp
+                                style = SecretPanelType.bodyStrong
                             )
                             Text(
                                 "Create a key for CI/CD publishing",
                                 color = BossThemeColors.TextSecondary,
-                                fontSize = 12.sp
+                                style = SecretPanelType.meta
                             )
                             Button(
                                 onClick = onCreateNew,
@@ -2308,7 +2442,7 @@ private fun ApiKeysListDialog(
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Create API Key", color = Color.Black, fontSize = 12.sp)
+                                Text("New publish key", color = Color.Black, style = SecretPanelType.meta)
                             }
                         }
                     }
@@ -2358,25 +2492,25 @@ private fun ApiKeysListDialog(
         BossAlertDialog(
             onDismissRequest = { keyToRevoke = null },
             title = {
-                Text("Revoke API Key?", color = BossThemeColors.TextPrimary, fontWeight = FontWeight.Bold)
+                Text("Revoke publish key?", color = BossThemeColors.TextPrimary, fontWeight = FontWeight.Bold)
             },
             text = {
                 Column {
                     Text(
-                        "Are you sure you want to revoke this API key?",
+                        "Are you sure you want to revoke this publish key?",
                         color = BossThemeColors.TextPrimary
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         key.name,
-                        color = Color(0xFF90CAF9),
-                        fontSize = 12.sp
+                        color = BossThemeColors.AccentColor,
+                        style = SecretPanelType.bodyStrong
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         "This will immediately invalidate the key. CI/CD pipelines using this key will fail.",
                         color = BossThemeColors.ErrorColor,
-                        fontSize = 11.sp
+                        style = SecretPanelType.caption
                     )
                 }
             },
@@ -2427,8 +2561,7 @@ private fun ApiKeyCard(
                     Text(
                         apiKey.name,
                         color = BossThemeColors.TextPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
+                        style = SecretPanelType.bodyStrong
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(
@@ -2439,18 +2572,18 @@ private fun ApiKeyCard(
                         Text(
                             apiKey.keyPrefix + "...",
                             color = BossThemeColors.TextSecondary,
-                            fontSize = 11.sp
+                            style = SecretPanelType.caption
                         )
                         // Scopes
                         apiKey.scopes.forEach { scope ->
                             Surface(
                                 shape = RoundedCornerShape(4.dp),
-                                color = BossThemeColors.SuccessColor.copy(alpha = 0.2f)
+                                color = BossThemeColors.AccentColor.copy(alpha = 0.2f)
                             ) {
                                 Text(
                                     scope,
-                                    color = BossThemeColors.SuccessColor,
-                                    fontSize = 9.sp,
+                                    color = BossThemeColors.AccentColor,
+                                    style = SecretPanelType.micro,
                                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                                 )
                             }
@@ -2484,12 +2617,12 @@ private fun ApiKeyCard(
                     Text(
                         "Created",
                         color = BossThemeColors.TextSecondary,
-                        fontSize = 10.sp
+                        style = SecretPanelType.micro
                     )
                     Text(
                         formatTimestamp(apiKey.createdAt),
                         color = BossThemeColors.TextPrimary,
-                        fontSize = 11.sp
+                        style = SecretPanelType.caption
                     )
                 }
 
@@ -2499,12 +2632,12 @@ private fun ApiKeyCard(
                         Text(
                             "Last used",
                             color = BossThemeColors.TextSecondary,
-                            fontSize = 10.sp
+                            style = SecretPanelType.micro
                         )
                         Text(
                             formatTimestamp(lastUsed),
                             color = BossThemeColors.TextPrimary,
-                            fontSize = 11.sp
+                            style = SecretPanelType.caption
                         )
                     }
                 }
@@ -2515,12 +2648,12 @@ private fun ApiKeyCard(
                         Text(
                             "Expires",
                             color = BossThemeColors.TextSecondary,
-                            fontSize = 10.sp
+                            style = SecretPanelType.micro
                         )
                         Text(
                             formatTimestamp(expiresAt),
                             color = BossThemeColors.WarningColor,
-                            fontSize = 11.sp
+                            style = SecretPanelType.caption
                         )
                     }
                 }
@@ -2578,7 +2711,7 @@ private fun AiProviderKeyDialog(
         backgroundColor = BossThemeColors.SurfaceColor,
         title = {
             Text(
-                if (alreadyStored) "Change AI Provider Key" else "Add AI Provider Key",
+                if (alreadyStored) "Change AI provider key" else "Add AI provider key",
                 color = BossThemeColors.TextPrimary,
                 fontWeight = FontWeight.Bold
             )
@@ -2588,7 +2721,7 @@ private fun AiProviderKeyDialog(
                 Text(
                     "Stored as an encrypted secret. Pick a model afterwards in Settings → AI Providers.",
                     color = BossThemeColors.TextSecondary,
-                    fontSize = 12.sp
+                    style = SecretPanelType.meta
                 )
 
                 // Say plainly what saving will do to an existing credential.
@@ -2596,7 +2729,7 @@ private fun AiProviderKeyDialog(
                     Text(
                         "${descriptor.standardKeyName} is already stored. Entering a new key replaces it.",
                         color = BossThemeColors.WarningColor,
-                        fontSize = 12.sp
+                        style = SecretPanelType.meta
                     )
                 } else if (fromEnvironment) {
                     Text(
@@ -2604,7 +2737,7 @@ private fun AiProviderKeyDialog(
                             "(${descriptor.envVarNames.joinToString(" / ")}) and can't be stored here. " +
                             "Unset that variable to manage the key in BOSS.",
                         color = BossThemeColors.WarningColor,
-                        fontSize = 12.sp
+                        style = SecretPanelType.meta
                     )
                 }
 
@@ -2622,7 +2755,7 @@ private fun AiProviderKeyDialog(
                         Text(
                             text = descriptor.displayName,
                             color = BossThemeColors.TextPrimary,
-                            fontSize = 13.sp,
+                            style = SecretPanelType.body,
                             modifier = Modifier.weight(1f)
                         )
                         Icon(
@@ -2652,7 +2785,7 @@ private fun AiProviderKeyDialog(
                                     Text(
                                         candidate.displayName,
                                         color = BossThemeColors.TextPrimary,
-                                        fontSize = 13.sp,
+                                        style = SecretPanelType.body,
                                         modifier = Modifier.weight(1f)
                                     )
                                     // Marking configured providers means "already set" is
@@ -2661,12 +2794,12 @@ private fun AiProviderKeyDialog(
                                         CredentialSource.STORED -> Text(
                                             "set",
                                             color = BossThemeColors.SuccessColor,
-                                            fontSize = 11.sp
+                                            style = SecretPanelType.caption
                                         )
                                         CredentialSource.ENVIRONMENT -> Text(
                                             "env",
                                             color = BossThemeColors.SecondaryColor,
-                                            fontSize = 11.sp
+                                            style = SecretPanelType.caption
                                         )
                                         else -> Unit
                                     }
@@ -2716,7 +2849,7 @@ private fun AiProviderKeyDialog(
                         Text(
                             "Get API key",
                             color = BossThemeColors.TextPrimary,
-                            fontSize = 12.sp
+                            style = SecretPanelType.meta
                         )
                     }
                 }
@@ -2725,12 +2858,12 @@ private fun AiProviderKeyDialog(
                     Text(
                         "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
                         color = BossThemeColors.TextMuted,
-                        fontSize = 11.sp
+                        style = SecretPanelType.caption
                     )
                 }
 
                 errorMessage?.let {
-                    Text(it, color = BossThemeColors.ErrorColor, fontSize = 12.sp)
+                    Text(it, color = BossThemeColors.ErrorColor, style = SecretPanelType.meta)
                 }
             }
         },

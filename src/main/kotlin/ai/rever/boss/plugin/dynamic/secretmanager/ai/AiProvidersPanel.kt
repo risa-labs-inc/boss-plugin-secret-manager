@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
+import ai.rever.boss.plugin.dynamic.secretmanager.SecretPanelType
 import ai.rever.boss.plugin.ui.BossCard
 import ai.rever.boss.plugin.ui.BossPrimaryButton
 import ai.rever.boss.plugin.ui.BossSecondaryButton
@@ -30,6 +31,7 @@ import androidx.compose.material.Icon
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -93,6 +95,16 @@ fun AiProvidersPanel(
         state.error?.let { MessageBanner(it, BossThemeColors.ErrorColor) }
         state.notice?.let { MessageBanner(it, BossThemeColors.SuccessColor) }
 
+        // Where the CLI section would be. The gateway serving no engines is still silence, but
+        // the gateway being *absent* is a thing the user can fix, and telling them costs one row.
+        if (state.gatewayNotice != GatewayNotice.NONE) {
+            GatewayMissingNotice(
+                notice = state.gatewayNotice,
+                isAsking = state.isAskingForGateway,
+                onRequest = viewModel::requestGateway,
+            )
+        }
+
         // Above the providers on purpose: for a user who already has a `claude` or `codex`
         // login, this is the whole setup, and burying it under a key-entry form would have
         // them paste a key they never needed. Absent entirely when the gateway serves none,
@@ -151,6 +163,80 @@ fun AiProvidersPanel(
 }
 
 /**
+ * "AI Gateway is not installed", with the button that fixes it.
+ *
+ * This is the section's answer to a silence. Local CLI sessions, brokered organisation providers
+ * and the common completion API all come from the gateway, so without it this panel stores keys
+ * that only the plugins reading `PluginContext.llmProvider` directly can use - and nothing said
+ * so. A user who had signed into `claude` in a terminal specifically to use it here had no way to
+ * discover that one plugin stood in the way.
+ *
+ * Deliberately **not** an error colour. Nothing is broken: HTTP provider keys work without the
+ * gateway, which is exactly why this plugin declares the dependency `optional` rather than
+ * required. The host says the same thing in its own words at install time - "works without it,
+ * but some of its features need it" - and this is that sentence in the place it matters.
+ */
+@Composable
+private fun GatewayMissingNotice(
+    notice: GatewayNotice,
+    isAsking: Boolean,
+    onRequest: () -> Unit,
+) {
+    BossCard(modifier = Modifier.fillMaxWidth()) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Default.Extension,
+                    contentDescription = null,
+                    tint = BossThemeColors.TextSecondary,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    "AI Gateway is not installed",
+                    color = BossThemeColors.TextPrimary,
+                    style = SecretPanelType.bodyStrong,
+                )
+            }
+            Text(
+                "Provider keys below still work. The gateway adds local CLI sessions - a " +
+                    "claude or codex login you already have - and serves one AI interface to " +
+                    "every plugin.",
+                color = BossThemeColors.TextSecondary,
+                style = SecretPanelType.meta,
+            )
+            when (notice) {
+                // The label names what the press does, and the two routes really do differ: one
+                // raises the Toolbox's install confirmation, the other just shows the Toolbox.
+                GatewayNotice.OFFER_INSTALL ->
+                    BossPrimaryButton(
+                        text = if (isAsking) "Asking the Toolbox" else "Install AI Gateway",
+                        onClick = onRequest,
+                        enabled = !isAsking,
+                    )
+
+                GatewayNotice.OFFER_TOOLBOX ->
+                    BossSecondaryButton(
+                        text = if (isAsking) "Opening the Toolbox" else "Open the Toolbox",
+                        onClick = onRequest,
+                        enabled = !isAsking,
+                    )
+
+                // No route: say where to look rather than showing a button that cannot work.
+                GatewayNotice.DESCRIBE_ONLY, GatewayNotice.NONE ->
+                    Text(
+                        "Install it from the Toolbox to enable those.",
+                        color = BossThemeColors.TextMuted,
+                        style = SecretPanelType.caption,
+                    )
+            }
+        }
+    }
+}
+
+/**
  * One local CLI engine.
  *
  * Deliberately not a [ProviderRow]: there is no key field, no model list and no status dot
@@ -192,15 +278,15 @@ private fun CliEngineRow(
                     ),
         )
         Column(modifier = Modifier.weight(1f)) {
-            Text(engine.displayName, fontSize = 13.sp, color = BossThemeColors.TextPrimary)
+            Text(engine.displayName, style = SecretPanelType.body, color = BossThemeColors.TextPrimary)
             Text(
                 text = healthLine(engine, health),
-                fontSize = 11.sp,
+                style = SecretPanelType.caption,
                 color = BossThemeColors.TextSecondary,
             )
         }
         if (isActive) {
-            Text("Active", fontSize = 11.sp, color = BossThemeColors.AccentColor)
+            Text("Active", style = SecretPanelType.caption, color = BossThemeColors.AccentColor)
         }
     }
 }
@@ -250,20 +336,20 @@ private fun ProviderRow(
         StatusDot(connection.source)
         Text(
             text = descriptor.displayName,
-            fontSize = 13.sp,
+            style = SecretPanelType.body,
             color = BossThemeColors.TextPrimary,
             modifier = Modifier.weight(1f),
         )
         if (isActive) {
             Text(
                 text = "Active",
-                fontSize = 11.sp,
+                style = SecretPanelType.caption,
                 color = BossThemeColors.AccentColor,
             )
         }
         Text(
             text = statusLabel(connection),
-            fontSize = 11.sp,
+            style = SecretPanelType.caption,
             color = BossThemeColors.TextMuted,
         )
     }
@@ -319,7 +405,7 @@ private fun ProviderDetail(
                                 "Sign in to BOSS with an account that has access. This provider " +
                                     "has no API key to enter."
                             },
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
                     BossSecondaryButton(
@@ -333,7 +419,7 @@ private fun ProviderDetail(
                             "This key comes from the environment" +
                                 (connection.label?.let { " ($it)" } ?: "") +
                                 " and is read-only here. Unset it to manage the key in BOSS.",
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
                 } else {
@@ -381,7 +467,7 @@ private fun ProviderDetail(
                 if (descriptor.envVarNames.isNotEmpty() && !fromEnvironment && !brokered) {
                     Text(
                         text = "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
-                        fontSize = 11.sp,
+                        style = SecretPanelType.caption,
                         color = BossThemeColors.TextMuted,
                     )
                 }
@@ -433,7 +519,7 @@ private fun ModelSection(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = "Model",
-                    fontSize = 13.sp,
+                    style = SecretPanelType.body,
                     fontWeight = FontWeight.Medium,
                     color = BossThemeColors.TextPrimary,
                     modifier = Modifier.weight(1f),
@@ -469,7 +555,7 @@ private fun ModelSection(
                         text =
                             "${descriptor.displayName} has no model list to query — " +
                                 "enter the endpoint and the model id it expects.",
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
                     ManualEndpointAndModel(
@@ -483,14 +569,14 @@ private fun ModelSection(
                 catalog is CatalogState.NotConfigured ->
                     Text(
                         text = "Add an API key to load ${descriptor.displayName}'s models.",
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
 
                 catalog is CatalogState.Loading ->
                     Text(
                         text = "Loading models from ${descriptor.displayName}…",
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
 
@@ -505,7 +591,7 @@ private fun ModelSection(
                     if (catalog is CatalogState.Failed) {
                         Text(
                             text = catalog.message,
-                            fontSize = 12.sp,
+                            style = SecretPanelType.meta,
                             color = BossThemeColors.ErrorColor,
                         )
                     }
@@ -513,7 +599,7 @@ private fun ModelSection(
                     if (loaded == null) {
                         Text(
                             text = "No models available yet.",
-                            fontSize = 12.sp,
+                            style = SecretPanelType.meta,
                             color = BossThemeColors.TextSecondary,
                         )
                     } else {
@@ -566,7 +652,7 @@ private fun ModelPicker(
         ) {
             Text(
                 text = selected?.displayName ?: "Select a model",
-                fontSize = 13.sp,
+                style = SecretPanelType.body,
                 color = if (selected == null) BossThemeColors.TextMuted else BossThemeColors.TextPrimary,
                 modifier = Modifier.weight(1f),
             )
@@ -593,13 +679,13 @@ private fun ModelPicker(
                     Column {
                         Text(
                             text = model.displayName,
-                            fontSize = 13.sp,
+                            style = SecretPanelType.body,
                             color = BossThemeColors.TextPrimary,
                         )
                         if (model.displayName != model.id) {
                             Text(
                                 text = model.id,
-                                fontSize = 10.sp,
+                                style = SecretPanelType.micro,
                                 fontFamily = FontFamily.Monospace,
                                 color = BossThemeColors.TextMuted,
                             )
@@ -629,7 +715,7 @@ private fun FreshnessLine(loaded: CatalogState.Loaded) {
     val origin = if (loaded.fromCache) "cached" else "live"
     Text(
         text = "${loaded.models.size} models · $origin · updated $age",
-        fontSize = 11.sp,
+        style = SecretPanelType.caption,
         color = BossThemeColors.TextMuted,
     )
 }
@@ -646,7 +732,7 @@ private fun ModelFacts(model: AiModel) {
     if (facts.isEmpty()) return
     Text(
         text = facts.joinToString(" · "),
-        fontSize = 11.sp,
+        style = SecretPanelType.caption,
         color = BossThemeColors.TextSecondary,
     )
 }
@@ -671,7 +757,7 @@ private fun LegacyImportBanner(
         ) {
             Text(
                 text = "Import ${offer.providerIds.size} key(s) from previous settings",
-                fontSize = 13.sp,
+                style = SecretPanelType.body,
                 fontWeight = FontWeight.Medium,
                 color = BossThemeColors.TextPrimary,
             )
@@ -688,7 +774,7 @@ private fun LegacyImportBanner(
                         " yourself once you've confirmed everything works. " +
                         "Model choices are not imported — pick from each provider's current " +
                         "list instead. A custom provider's endpoint has to be re-entered too.",
-                fontSize = 12.sp,
+                style = SecretPanelType.meta,
                 color = BossThemeColors.TextSecondary,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -713,7 +799,7 @@ private fun MessageBanner(
                 .border(1.dp, tint.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
-        Text(text = text, fontSize = 12.sp, color = BossThemeColors.TextPrimary)
+        Text(text = text, style = SecretPanelType.meta, color = BossThemeColors.TextPrimary)
     }
 }
 
@@ -772,7 +858,7 @@ private fun ManualEndpointAndModel(
         )
         Text(
             text = "Saved when you click away from a field.",
-            fontSize = 11.sp,
+            style = SecretPanelType.caption,
             color = BossThemeColors.TextMuted,
         )
     }

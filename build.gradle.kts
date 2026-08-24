@@ -216,6 +216,48 @@ val verifyPackagedJar: (File, String) -> Unit = { jar, expectedVersion ->
     }
 }
 
+/**
+ * The two panel files must not grow a loose `fontSize` again.
+ *
+ * They carried **118** of them across nine sizes with no rule about which meant what; they are
+ * now at zero, and every size comes from `SecretPanelType`. Nothing renders in the test suite, so
+ * no test can see this erode - a contributor adding one `fontSize = 13.sp` gets a green build and
+ * the drift is invisible until it is 118 again. Same reasoning as the `javap` `$stable` guard and
+ * the plugin.json stamp assertion: the invariant nothing else can reach is the one worth pinning
+ * at build time.
+ *
+ * Scoped to the two files that were converted. `ai/AiProvidersPanel.kt` is in the same sweep now,
+ * so if it ever needs to be exempted again, add it here rather than dropping the check.
+ */
+fun verifyNoLooseFontSizes() {
+    val guarded =
+        listOf(
+            "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/SecretManagerContent.kt",
+            "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/SharedSecretsSection.kt",
+            "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/ai/AiProvidersPanel.kt"
+        ).map { file(it) }
+
+    // A missing file must fail, not silently pass: a rename would otherwise retire the guard.
+    val missing = guarded.filterNot { it.isFile }
+    require(missing.isEmpty()) {
+        "The fontSize guard names files that do not exist: " +
+            missing.joinToString { it.path } +
+            " — update verifyNoLooseFontSizes() after a rename rather than leaving it vacuous."
+    }
+
+    val offenders =
+        guarded.flatMap { f ->
+            f.readLines().withIndex()
+                .filter { (_, line) -> line.contains("fontSize") && !line.trimStart().startsWith("*") }
+                .map { (i, line) -> "${f.name}:${i + 1}: ${line.trim()}" }
+        }
+    require(offenders.isEmpty()) {
+        "Loose font sizes found. Use a SecretPanelType role instead - the panel is on the host's " +
+            "type scale and a literal here is how it drifts back off it.\n" +
+            offenders.joinToString("\n")
+    }
+}
+
 // Task to build plugin JAR with compiled classes only
 tasks.register<Jar>("buildPluginJar") {
     archiveFileName.set("boss-plugin-secret-manager-${version}.jar")
@@ -246,7 +288,10 @@ tasks.register<Jar>("buildPluginJar") {
     // Note what is NOT checked: the number of plugin.json entries. duplicatesStrategy =
     // EXCLUDE means the jar always contains exactly one, so counting can never fail —
     // verified. Asserting the *content* is what actually catches the reorder.
-    doLast { verifyPackagedJar(archiveFile.get().asFile, version.toString()) }
+    doLast {
+        verifyPackagedJar(archiveFile.get().asFile, version.toString())
+        verifyNoLooseFontSizes()
+    }
 }
 
 // Sync version from build.gradle.kts into plugin.json (single source of truth)
@@ -279,5 +324,8 @@ tasks.register<Jar>("shadowJar") {
 
     // Same assertions as buildPluginJar — this fat jar is a real shipping surface
     // (plugin.json declares isolationMode: out-of-process).
-    doLast { verifyPackagedJar(archiveFile.get().asFile, version.toString()) }
+    doLast {
+        verifyPackagedJar(archiveFile.get().asFile, version.toString())
+        verifyNoLooseFontSizes()
+    }
 }

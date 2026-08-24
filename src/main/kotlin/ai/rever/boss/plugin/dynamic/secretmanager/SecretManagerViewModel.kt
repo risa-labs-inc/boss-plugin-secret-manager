@@ -937,7 +937,7 @@ class SecretManagerViewModel(
             }.onFailure { exception ->
                 state = state.copy(
                     isLoadingApiKeys = false,
-                    errorMessage = exception.message ?: "Failed to load API keys"
+                    errorMessage = exception.message ?: "Failed to load publish keys"
                 )
             }
         }
@@ -963,12 +963,12 @@ class SecretManagerViewModel(
             val result = pluginStoreApiKeyProvider.createApiKey(name, scopes, expiresInDays)
 
             result.onSuccess { creationResult ->
-                // Automatically store the API key as a secret
+                // Automatically store the publish key as a secret
                 val secretRequest = CreateSecretRequestData(
                     website = "boss_plugin_store_api_key",
                     username = name,
                     password = creationResult.apiKey,
-                    notes = "Plugin Store API Key\nScopes: ${scopes.joinToString(", ")}" +
+                    notes = "Plugin Store publish key\nScopes: ${scopes.joinToString(", ")}" +
                             (expiresInDays?.let { "\nExpires in: $it days" } ?: ""),
                     tags = listOf("api_key")
                 )
@@ -989,7 +989,7 @@ class SecretManagerViewModel(
                         isOperationInProgress = false,
                         apiKeyCreatedSuccessfully = true,
                         apiKeys = state.apiKeys + creationResult.keyInfo,
-                        errorMessage = "API key created but failed to store as secret: ${secretException.message}"
+                        errorMessage = "Publish key created but not stored as a secret: ${secretException.message}"
                     )
                 }
 
@@ -1004,7 +1004,7 @@ class SecretManagerViewModel(
             }.onFailure { exception ->
                 state = state.copy(
                     isOperationInProgress = false,
-                    errorMessage = exception.message ?: "Failed to create API key"
+                    errorMessage = exception.message ?: "Failed to create the publish key"
                 )
             }
         }
@@ -1036,7 +1036,7 @@ class SecretManagerViewModel(
             }.onFailure { exception ->
                 state = state.copy(
                     isOperationInProgress = false,
-                    errorMessage = exception.message ?: "Failed to revoke API key"
+                    errorMessage = exception.message ?: "Failed to revoke the publish key"
                 )
             }
         }

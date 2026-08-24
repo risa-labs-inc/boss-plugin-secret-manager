@@ -148,6 +148,205 @@ call that reports how a secret was reached. `my_secret_get` shares `secret_get`'
 refusal through one function - see "Provider keys are withheld from `secret_get`" for why
 that matters.
 
+## The panel's design system
+
+The panel had **118 loose `fontSize = N.sp` literals** across nine sizes with no rule about which
+meant what, a hardcoded Material blue, and `SuccessColor` doing duty as the accent. It is now on
+the host's "Operator's Console" scale.
+
+**`SecretPanelType` is a local copy of the type scale, and it has to be.** `BossTypography` and
+`object BossTheme` live in the host's `plugin-ui-core` and are **not** on the plugin api - the api
+jar ships `BossThemeColors`, `BossColors`, the `BossTheme` wrapper and `BossComponents`, so a
+plugin cannot read `BossTheme.type`. The values come from `bossTypography()` and are cross-checked
+against what the plugin-facing `BossComponents` actually paint, since those render beside this
+panel's own text and any disagreement shows. Delete the object and point its call sites at
+`BossTheme.type` if the tokens ever reach the api.
+
+**Mono is confined to `label` and `data` on purpose.** The system's voice is mono for display and
+data, but the host injects **MesloLGS** into its own typography and a plugin cannot reach that
+`FontFamily` - so mono here resolves to the platform's, and using it for every heading would put a
+*different* mono beside the host's chrome.
+
+**`SuccessColor` is not the accent.** Twenty-nine sites used it for spinners, primary buttons,
+checkbox ticks, text cursors, tag chips and the `+` glyph. That looks correct only because this
+theme's accent happens to be green too: under Blueprint, where accent is amber, every control in
+the panel would have gone green while the chrome went amber. The seven remaining uses all mean
+"succeeded" - the copy confirmation, the "key created" panel, a 2FA-enabled badge, a passing key
+test, and a provider whose credential is already stored.
+
+**One row carries the sections and the actions.** Removing the duplicated in-panel title (the
+chrome prints it, and at a real sidebar width the second copy truncated to "Secret M...") left a
+56dp band holding two icons, so the refresh and `+` buttons moved onto the tab strip's baseline.
+
+**`IntrinsicSize.Max` on `SectionTab` is load-bearing.** The selected-tab indicator is
+`fillMaxWidth()`, which in an unweighted `Row` resolves to the whole *remaining* width - so the
+first tab ate the row, pushed the second one off the edge and took the actions with it. The tabs
+were `weight(1f)` each before, which bounded it by accident, which is why this only broke when
+they stopped being stretched. Per `compose-layout-bugs-need-a-screen` it was caught by looking at
+the panel, not by a test.
+
+**Colour is spent on one thing per card.** Share, Edit and Delete were a hardcoded blue,
+success-green and error-red on every row - a set of traffic lights repeated down the list, none of
+which meant anything. Only Delete is coloured now. Same reasoning retired the filled `Shared ·
+read` pill in the shared section for a 12% tinted chip carrying the access level alone: the tab
+above it already says everything in the list is a share, and a fill is the system's "signal",
+worth spending on something that changes between rows.
+
+The two "Create API Key" buttons still hardcode `Color.Black` labels on a `WarningColor` fill.
+`BossPrimaryButton` is the right answer and is present at the floor, but those buttons carry an
+inline spinner and enable logic, so converting them is its own change.
+
+**Adopting a host component can delete a control, silently.** `BossSearchBar` has no clear
+button and the field it replaced did, so the first pass removed the only pointer-driven way to
+reset a filter - inside a change that was supposed to be about type and colour. `PanelSearchField`
+wraps the component and puts the button back beside it (there is no slot inside its border, and an
+overlay would sit on the tail of a long query). It takes the space only when there is something to
+clear: reserving the slot permanently left the field ending 26dp short of the cards below it, a
+visible step in the panel's edge in the state the user looks at almost all the time. Both sections
+use it, which is what the two wrappers it replaced each claimed to be. **Read what a component
+does before swapping a hand-rolled one for it**, and diff the controls, not just the pixels.
+
+**`BossBadge` declines to draw a zero itself** (`if (count > 0)`). The tab strip carried a
+`hasLoadedShared` flag plus a local `badge > 0` check to keep a `0` off the tab before anything
+was fetched; both restated the component's own rule, so the flag decided nothing. The count goes
+straight through now.
+
+**The unselected tab renders the indicator at `alpha(0f)`**, rather than an `else` branch with a
+matching `height(3.dp)`. That constant was a second copy of the host component's height, so a host
+that changed it would have made the row jump when a tab was selected.
+
+**The tabs are `selectable(role = Role.Tab)` inside a `selectableGroup()`.** Material's `Tab`
+supplied the role and the selected state to the accessibility tree, and hand-building the strip
+dropped both - a screen reader otherwise announces two unlabelled buttons and never says which is
+current. Same reason `QuietCopyButton` and `SharedSecretBadge` pass `contentDescription = null`:
+a glyph beside its own label makes the label read twice.
+
+**Weight belongs to the token, not the call site.** `SecretPanelType.title` declares SemiBold and
+all seven call sites passed `fontWeight = FontWeight.Bold` straight after it, so the token's weight
+never reached the screen and the panel's headings sat a step heavier than the host's. Three more
+sites paired `bodyStrong` with `fontWeight = Medium`, which it already is. The four that wanted a
+genuinely heavier `meta` got a token (`metaStrong`) instead of an inline override - a scale with
+named sizes and hand-set weights is the same problem one field over.
+
+**`verifyNoLooseFontSizes()` in `build.gradle.kts` pins this at build time**, over the two panel
+files and `ai/AiProvidersPanel.kt`. Nothing here renders in the test suite, so no test can watch
+the scale erode: a contributor adding one `fontSize = 13.sp` gets a green build and the drift is
+invisible until it is 118 again. Same class of guard as the `javap` `$stable` check and the
+plugin.json stamp assertion. It fails on a **missing** file too, so a rename cannot quietly retire
+it. Mutation-verified: putting one literal back into `AiProvidersPanel` fails the build with that
+file and line. Note that a mutation has to *compile* to reach the guard - the first attempt put a
+literal into a file whose `sp` import the same pass had removed, so it failed at compile and proved
+nothing.
+
+`ai/AiProvidersPanel.kt` is on the scale too (24 literals). It is the one surface where a user sees
+this plugin's chrome inside the host's own Settings window, so it is where a disagreement with the
+host shows most.
+
+### The publish keys are not "API keys"
+
+The `+` menu's third item said **Create API Key**, which named the mechanism and not the job. This
+panel has *three* unrelated things called an API key - an AI provider's key, the "this is an API
+key" tag any secret can carry, and this - and only this one publishes a plugin to the store, with
+`publish` / `version` / `finalize` scopes against the Plugin Store API. A user who opened the menu
+to release a plugin could not tell which item to press, which is how it was reported.
+
+They are **Plugin Store publish keys** now, everywhere a person reads: the two menu items, both
+dialogs, the revoke confirmation, the error strings, the note written onto the stored secret, the
+manifest `description` and the README. The AI-provider strings and the `api_key` *tag* keep the
+generic name, because for those it is the right one.
+
+**`website = "boss_plugin_store_api_key"` is deliberately unchanged.** That is the identifier the
+stored secret is found by, not a label - renaming it would orphan every key already created. Same
+for the `api_key` tag and the `X-API-Key` header, which is what the server actually reads.
+
+While the menu was open it was also clear that its four items came from four different apps: two in
+Title Case and two in sentence case, over a white, a green, an orange and a second green glyph, none
+of which distinguished anything. One casing (sentence, as everywhere else in the panel now) and one
+muted glyph colour.
+
+**The menu was checked by opening it, not by reading the strings.** A `DropdownMenu` sizes to its
+content, and "Create Plugin Store publish key" is roughly twice the old label - worth seeing against
+a real sidebar width rather than assuming the popup would cope. `showAddDropdown`'s initial value was
+flipped to `true` for one build to get it on screen, the same trick as defaulting `selectedSection` to
+the shared tab; both are reverted, and `git diff` on those two lines is empty.
+
+## Three sections, and the AI one is not owned by the panel
+
+The panel is segmented into **Secrets**, **Shared with me** and **AI** - the last being the same
+`AiProvidersPanel` the host renders at Settings, AI Providers, from one definition rather than a
+second copy. It is there because this plugin owns every AI credential in BOSS while the panel
+holding them was reachable only through the host's Settings window: two clicks and a different
+window away from the vault the keys are stored in.
+
+Four things about it that are easy to get wrong:
+
+**The ViewModel arrives as a supplier, and the order forces that.** `AiProvidersViewModel` is built
+inside `registerAiProviderSettings`'s `LinkageError` guard - it starts a `catalog.states` collector,
+which on a host that cannot link `LlmProviderSettingsApiImpl` would be started and then orphaned -
+and that guard runs **after** `registerPanel`, so a *non*-linkage failure in it cannot cost the user
+their secrets panel. So the value does not exist when the panel factory is registered. A captured
+`var` read through `() -> AiProvidersViewModel?` closes the gap: Kotlin compiles it to a shared
+reference, `registerPanel` only stores a factory, and the host does not call that factory until
+after `register()` returns. Do not "simplify" it to a value.
+
+**The panel does not own it and must not dispose it.** Every other ViewModel on
+`SecretManagerComponent` is per panel instance and cancelled in `lifecycle.doOnDestroy`; this one is
+the plugin's single instance, shared with the host's Settings window through
+`LlmProviderSettingsApiImpl`. Disposing it with the sidebar panel would take the host's AI Providers
+section down too.
+
+**The tab is absent, not disabled, when there is no ViewModel.** On a host whose api predates
+`LlmProviderSettingsAPI` (1.0.71) the section cannot render at all, and a tab whose only content is
+"not available here" is worse than one tab fewer. `showAiSection` is that check.
+
+**Refresh means three things in this section.** `refreshConnections()`, `checkGateway()` and
+`refreshCliEngines()`, because all three can go stale while the panel sits open: a key edited in the
+Secrets section next door, a gateway installed in the Toolbox, a CLI signed into in a terminal.
+`refreshConnections` had to be added - `ensureConnectionsLoaded` is `compareAndSet(false, true)` and
+loads once per ViewModel, so it is not a refresh.
+
+### The AI Gateway is an optional dependency, and the section says so
+
+`AiProvidersUiState.cliEngines` is empty in three situations, and the panel used to treat all three
+alike on the stated grounds that "none of them gives the user anything to do here". That was wrong
+about one of them. The gateway being **absent** is fixable; the gateway predating `AiCliSessionAPI`
+and this host's api jar not linking the symbol are not. A user who had signed into `claude` in a
+terminal specifically to use it here saw no Local CLI sessions section, no explanation, and no way
+to discover that one plugin stood in the way.
+
+`GatewayPresence` asks about the **plugin**, not the engine list, precisely because an installed
+gateway serving no engines is a different fact from an absent one. It is ported from
+`user-secret-list`'s `SecretManagerLink` minus the part that does not apply: that plugin's floor is
+1.0.20, so it had to probe reflectively for `openPanel` (api 1.0.57). This plugin's floor is
+**1.0.73**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
+it and are called straight - a guard there would be dead code implying a risk that cannot occur.
+
+Two rules carried over from that port, both mutation-verified here:
+
+- **"Installed" is not `isPluginLoaded`.** `disablePlugin` flips the state and never unloads, so a
+  disabled gateway is still in `getLoadedPlugins()` - while answering no `getPluginAPI` and serving
+  no engines. Reporting it as present puts the section back to unexplained silence. `isEnabled`,
+  `healthy` and `!isIncompatible` are all required. Dropping them fails *a disabled gateway is not
+  installed*.
+- **The install deep link is gated on Toolbox 1.9.14**, the release that first carried the handler.
+  On an older one nothing is listening, so the link is not sent at all and the notice degrades to
+  "Open the Toolbox" - a link that silently goes nowhere reads as a broken button. Sending it
+  unconditionally fails *nothing is handed to the platform when the Toolbox is too old*.
+
+**`plugin.json` declares the gateway `"optional": true`.** That is not a hedge, it is what the
+manifest means: HTTP provider keys work without it, so it must not veto loading. The host still
+prompts - `PluginDependencyResolution.missingFor` deliberately returns optional dependencies, "worth
+telling someone about ... flagged so the prompt can be a suggestion rather than a warning" - and its
+own words at install time are "works without it, but some of its features need it". The in-panel
+notice is that sentence in the place it matters. All three of the gateway's other consumers declare
+it optional too, so this follows the established convention rather than inventing one.
+
+**The dependency entry carries no `version` key, on purpose.** `processResources` is line-based and
+rewrites *every* `"version": "..."` line in the file, so a `"version": "*"` inside a dependency block
+comes out of the built jar as this plugin's own version - "requires aigateway 1.2.17". The host
+ignores the field anyway (`missingFor` matches on id alone). This exact trap was hit once in
+`user-secret-list` and was invisible in the committed file.
+
 ## AI Providers (`ai/` package)
 
 This plugin owns **all** AI provider configuration. The host has none: its
@@ -404,12 +603,21 @@ guard - a member newer than the floor would throw `NoSuchMethodError` there and 
 *whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
 unconstrained.
 
-The audit also has to cover the UI kit, not just `PluginContext`: this feature added
+The audit also has to cover the UI kit, not just `PluginContext`: the AI section added
 first-time uses of `BossSection`, `BossCard`, `BossTextField`, `BossPrimaryButton` and
-`BossSecondaryButton` (only `BossTheme`/`BossThemeColors` were used before). Containment holds
+`BossSecondaryButton` (only `BossTheme`/`BossThemeColors` were used before). Containment held
 because `AiProvidersPanel` is reachable only from `LlmProviderSettingsApiImpl`, so those
-symbols never load on a pre-1.0.71 host - but that stops being true the moment the panel is
-rendered from `SecretManagerContent`, which is exactly why it is written down here.
+symbols never loaded on a pre-1.0.71 host - and the paragraph warned that this "stops being
+true the moment the panel is rendered from `SecretManagerContent`".
+
+**That has now happened, deliberately.** The design pass renders `BossCard`, `BossSearchBar`,
+`BossBadge`, `BossTabIndicator` and `BossEmptyState` from `SecretManagerContent` and
+`SharedSecretsSection`, i.e. on the always-taken path, so a host missing any of them throws
+`NoSuchMethodError` where nothing can catch it. All five were therefore checked **against the
+declared floor rather than the local jar** - `git show v1.0.73:.../BossComponents.kt` in the api
+checkout - along with `BossThemeColors.TextMuted`, `AccentColor` and `BorderColor`. Reading the
+sibling checkout's newest jar (1.0.84 at the time) would have proved nothing about 1.0.73. The
+rule for the next component: check the tag, not the jar, and add it here.
 
 `LlmProviderSettingsApiImpl`, `BrokeredCredentialBridge` and `GatewayCliEngineAccess` are the
 **only** files referencing api symbols added after this plugin's declared floor
@@ -655,7 +863,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 195 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 214 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

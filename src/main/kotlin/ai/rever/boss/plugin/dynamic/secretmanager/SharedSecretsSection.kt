@@ -4,7 +4,10 @@ import ai.rever.boss.plugin.api.SecretEntryWithSharingData
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
+import ai.rever.boss.plugin.ui.BossCard
+import ai.rever.boss.plugin.ui.BossEmptyState
 import ai.rever.boss.plugin.ui.BossThemeColors
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,14 +29,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
-import androidx.compose.material.Card
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Divider
 import androidx.compose.material.Icon
-import androidx.compose.material.MaterialTheme
+import androidx.compose.material.OutlinedButton
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -63,13 +64,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -94,16 +93,17 @@ internal fun SharedSecretsSection(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
-        SharedSecretSearchBar(
+        PanelSearchField(
             query = state.searchQuery,
             onQueryChange = onSearch,
+            placeholder = "Filter shared secrets",
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
         )
 
         Text(
             sharedSecretsSummary(state),
             color = BossThemeColors.TextSecondary,
-            fontSize = 12.sp,
+            style = SecretPanelType.meta,
             modifier = Modifier.padding(bottom = 8.dp),
         )
 
@@ -204,51 +204,6 @@ private fun sharedSecretsSummary(state: SharedSecretsState): String =
         found + scanned + fetch
     }
 
-@Composable
-private fun SharedSecretSearchBar(
-    query: String,
-    onQueryChange: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    BasicTextField(
-        value = query,
-        onValueChange = onQueryChange,
-        modifier =
-            modifier
-                .height(36.dp)
-                .background(BossThemeColors.BackgroundColor, RoundedCornerShape(6.dp))
-                .border(1.dp, BossThemeColors.BorderColor, RoundedCornerShape(6.dp))
-                .padding(horizontal = 12.dp),
-        singleLine = true,
-        textStyle = MaterialTheme.typography.body2.copy(color = BossThemeColors.TextPrimary),
-        cursorBrush = SolidColor(BossThemeColors.SuccessColor),
-        decorationBox = { innerTextField ->
-            Row(
-                modifier = Modifier.fillMaxSize(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    Icons.Default.Search,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = BossThemeColors.TextSecondary,
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Box(modifier = Modifier.weight(1f)) {
-                    if (query.isEmpty()) {
-                        Text(
-                            "Filter by website or username...",
-                            color = BossThemeColors.TextSecondary,
-                            fontSize = 13.sp,
-                        )
-                    }
-                    innerTextField()
-                }
-            }
-        },
-    )
-}
-
 /**
  * [listState] is hoisted, not remembered here, for the same reason `SecretsSection`'s is: this
  * composable leaves composition whenever the other section is on screen - and also on every
@@ -324,7 +279,7 @@ private fun SharedSecretList(
                     contentAlignment = Alignment.Center,
                 ) {
                     CircularProgressIndicator(
-                        color = BossThemeColors.SuccessColor,
+                        color = BossThemeColors.AccentColor,
                         modifier = Modifier.size(24.dp),
                     )
                 }
@@ -345,8 +300,8 @@ private fun SharedSecretList(
                     TextButton(onClick = onLoadMore) {
                         Text(
                             "Keep looking for more",
-                            color = BossThemeColors.SuccessColor,
-                            fontSize = 12.sp,
+                            color = BossThemeColors.AccentColor,
+                            style = SecretPanelType.meta,
                         )
                     }
                 }
@@ -358,7 +313,7 @@ private fun SharedSecretList(
                 Text(
                     "- End of list -",
                     color = BossThemeColors.TextSecondary,
-                    fontSize = 12.sp,
+                    style = SecretPanelType.meta,
                     modifier =
                         Modifier
                             .fillMaxWidth()
@@ -387,16 +342,8 @@ private fun SharedSecretCard(
     val scope = rememberCoroutineScope()
     val isApiKey = secret.tags.contains(ProviderCredentialStore.TAG_API_KEY)
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        backgroundColor = BossThemeColors.SurfaceColor,
-        elevation = 2.dp,
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
+    BossCard(modifier = Modifier.fillMaxWidth()) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -419,8 +366,7 @@ private fun SharedSecretCard(
                         Text(
                             text = secret.website,
                             color = BossThemeColors.TextPrimary,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
+                            style = SecretPanelType.bodyStrong,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -439,7 +385,7 @@ private fun SharedSecretCard(
                         Text(
                             text = secret.username,
                             color = BossThemeColors.TextSecondary,
-                            fontSize = 14.sp,
+                            style = SecretPanelType.meta,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -453,16 +399,19 @@ private fun SharedSecretCard(
                 ) {
                     if (isApiKey) {
                         SharedSecretBadge(
-                            label = "API Key",
+                            // Upper-cased like the access level directly below it: both are
+                            // `label`, and half a column in title case is not a second register.
+                            label = "API KEY",
                             icon = Icons.Default.Key,
                             color = BossThemeColors.WarningColor,
                         )
                     }
 
-                    // The access level, not an Owner/Shared distinction: every entry in this
-                    // section is a share, so the useful fact is what the share lets you do.
+                    // The access level alone. Every entry in this section is a share - the tab
+                    // it sits under says so - and the useful fact is what the share lets you
+                    // do. "Shared · read" spent the widest chip in the card restating the tab.
                     SharedSecretBadge(
-                        label = "Shared · ${secret.accessLevel}",
+                        label = secret.accessLevel.ifBlank { "shared" }.uppercase(),
                         icon = Icons.Default.Share,
                         color = BossThemeColors.AccentColor,
                     )
@@ -488,48 +437,22 @@ private fun SharedSecretCard(
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(8.dp),
                     ) {
-                        Icon(Icons.Default.Key, contentDescription = "Copy API Key", modifier = Modifier.size(14.dp))
+                        Icon(Icons.Default.Key, contentDescription = "Copy API key", modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Copy API Key", fontSize = 12.sp)
+                        Text("Copy API key", style = SecretPanelType.meta)
                     }
-                    Button(
+                    QuietCopyButton(
+                        label = "Copy key name",
                         onClick = { scope.launch { clipboardManager.setText(AnnotatedString(secret.username)) } },
-                        colors =
-                            ButtonDefaults.buttonColors(
-                                backgroundColor = BossThemeColors.BackgroundColor,
-                                contentColor = BossThemeColors.AccentColor,
-                            ),
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(8.dp),
-                    ) {
-                        Icon(
-                            Icons.Default.ContentCopy,
-                            contentDescription = "Copy Key Name",
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text("Copy Name", fontSize = 12.sp)
-                    }
+                    )
                 }
             } else {
-                Button(
+                QuietCopyButton(
+                    label = "Copy username",
                     onClick = { scope.launch { clipboardManager.setText(AnnotatedString(secret.username)) } },
-                    colors =
-                        ButtonDefaults.buttonColors(
-                            backgroundColor = BossThemeColors.BackgroundColor,
-                            contentColor = BossThemeColors.AccentColor,
-                        ),
                     modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(8.dp),
-                ) {
-                    Icon(
-                        Icons.Default.ContentCopy,
-                        contentDescription = "Copy Username",
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text("Copy Username", fontSize = 12.sp)
-                }
+                )
             }
 
             val sharedByEmail = secret.sharedByEmail
@@ -537,47 +460,44 @@ private fun SharedSecretCard(
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .background(BossThemeColors.BackgroundColor, RoundedCornerShape(4.dp))
-                            .padding(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(
                         Icons.Default.PersonAdd,
                         contentDescription = "Shared by",
-                        tint = BossThemeColors.AccentColor,
-                        modifier = Modifier.size(14.dp),
+                        tint = BossThemeColors.TextSecondary,
+                        modifier = Modifier.size(13.dp),
                     )
                     Text(
-                        "Shared by: $sharedByEmail",
+                        "Shared by $sharedByEmail",
                         color = BossThemeColors.TextSecondary,
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                     )
                 }
             }
 
             if (secret.tags.isNotEmpty() || secret.notes != null || secret.expirationDate != null) {
+                // Same treatment as the managed section's card, deliberately: the two lists
+                // sit one tab apart, so a disclosure that is green and full-width in one and
+                // quiet and left-aligned in the other reads as two different controls.
                 Row(
                     modifier =
                         Modifier
-                            .fillMaxWidth()
                             .clickable { onToggleMetadata() }
-                            .padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                            .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        if (isMetadataExpanded) "Hide Details" else "Show Details",
-                        color = BossThemeColors.SuccessColor,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
+                        if (isMetadataExpanded) "Hide details" else "Show details",
+                        color = BossThemeColors.TextSecondary,
+                        style = SecretPanelType.meta,
                     )
                     Icon(
                         if (isMetadataExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         contentDescription = if (isMetadataExpanded) "Hide" else "Show",
-                        tint = BossThemeColors.SuccessColor,
-                        modifier = Modifier.size(16.dp),
+                        tint = BossThemeColors.TextSecondary,
+                        modifier = Modifier.size(14.dp),
                     )
                 }
 
@@ -589,29 +509,74 @@ private fun SharedSecretCard(
     }
 }
 
+/**
+ * Copy-to-clipboard for a name, which is not a credential and should not look like one.
+ *
+ * This was a full-width `Button` with an accent label on a dark fill - the shape the eye reads
+ * as the card's primary action, repeated on every card, for the least consequential thing on it.
+ * An outline says "control" without competing with the API-key copy above it, which is the one
+ * button in this section that genuinely is primary: in a read-only list it is the only route to
+ * the value.
+ */
+@Composable
+private fun QuietCopyButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(4.dp),
+        border = BorderStroke(1.dp, BossThemeColors.BorderColor),
+        colors =
+            ButtonDefaults.outlinedButtonColors(
+                backgroundColor = Color.Transparent,
+                contentColor = BossThemeColors.TextSecondary,
+            ),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        // null, not `label`: the Text beside it already carries that, and a described icon
+        // makes a screen reader say it twice.
+        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(13.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = SecretPanelType.meta)
+    }
+}
+
+/**
+ * A tinted chip, not a filled pill.
+ *
+ * These were solid accent and solid warning at full strength, one on every card, so the loudest
+ * thing in the list was a label that said the same word on every row - louder than the name of
+ * the secret it belonged to. A fill is the design system's "signal", which is worth spending on
+ * something that changes between rows. The 12% wash keeps the colour as the category and gives
+ * the glyph and the text the readable weight.
+ */
 @Composable
 private fun SharedSecretBadge(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     color: androidx.compose.ui.graphics.Color,
 ) {
-    Surface(shape = RoundedCornerShape(4.dp), color = color) {
+    Surface(shape = RoundedCornerShape(4.dp), color = color.copy(alpha = 0.12f)) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            // Asymmetric on purpose: `label`'s 1.5sp tracking is applied after the final glyph
+            // as well, so 6dp on both sides renders as 6 left and 7.5 right.
+            modifier = Modifier.padding(start = 6.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 icon,
-                contentDescription = label,
-                tint = BossThemeColors.TextPrimary,
-                modifier = Modifier.size(12.dp),
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(11.dp),
             )
             Text(
                 text = label,
-                color = BossThemeColors.TextPrimary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
+                color = color,
+                style = SecretPanelType.label,
             )
         }
     }
@@ -635,10 +600,10 @@ private fun SharedSecretDetails(secret: SecretEntryWithSharingData) {
                 Icon(
                     Icons.Default.Label,
                     contentDescription = "Tags",
-                    tint = BossThemeColors.SuccessColor,
+                    tint = BossThemeColors.AccentColor,
                     modifier = Modifier.size(14.dp),
                 )
-                Text(secret.tags.joinToString(", "), color = BossThemeColors.TextPrimary, fontSize = 12.sp)
+                Text(secret.tags.joinToString(", "), color = BossThemeColors.TextPrimary, style = SecretPanelType.meta)
             }
         }
 
@@ -654,7 +619,7 @@ private fun SharedSecretDetails(secret: SecretEntryWithSharingData) {
                     tint = BossThemeColors.TextSecondary,
                     modifier = Modifier.size(14.dp).padding(top = 2.dp),
                 )
-                Text(notes, color = BossThemeColors.TextSecondary, fontSize = 12.sp)
+                Text(notes, color = BossThemeColors.TextSecondary, style = SecretPanelType.meta)
             }
         }
 
@@ -670,7 +635,7 @@ private fun SharedSecretDetails(secret: SecretEntryWithSharingData) {
                     tint = BossThemeColors.WarningColor,
                     modifier = Modifier.size(14.dp),
                 )
-                Text("Expires: $expirationDate", color = BossThemeColors.WarningColor, fontSize = 12.sp)
+                Text("Expires: $expirationDate", color = BossThemeColors.WarningColor, style = SecretPanelType.meta)
             }
         }
 
@@ -684,7 +649,7 @@ private fun SharedSecretDetails(secret: SecretEntryWithSharingData) {
                 tint = BossThemeColors.TextSecondary,
                 modifier = Modifier.size(14.dp),
             )
-            Text("Created: ${secret.createdAt}", color = BossThemeColors.TextSecondary, fontSize = 11.sp)
+            Text("Created: ${secret.createdAt}", color = BossThemeColors.TextSecondary, style = SecretPanelType.caption)
         }
     }
 }
@@ -703,7 +668,7 @@ private fun SharedSecretsLoadingView() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            CircularProgressIndicator(color = BossThemeColors.SuccessColor)
+            CircularProgressIndicator(color = BossThemeColors.AccentColor)
             Text(
                 if (elapsedSeconds < 3) {
                     "Looking for shared secrets..."
@@ -711,13 +676,13 @@ private fun SharedSecretsLoadingView() {
                     "Looking for shared secrets... ${elapsedSeconds}s"
                 },
                 color = BossThemeColors.TextSecondary,
-                fontSize = 14.sp,
+                style = SecretPanelType.bodyStrong,
             )
             if (elapsedSeconds >= 10) {
                 Text(
                     "Still waiting on the server - the network may be slow",
                     color = BossThemeColors.TextSecondary.copy(alpha = 0.6f),
-                    fontSize = 11.sp,
+                    style = SecretPanelType.caption,
                 )
             }
         }
@@ -743,11 +708,11 @@ private fun SharedSecretsErrorBanner(
         Text(
             message,
             color = BossThemeColors.ErrorColor,
-            fontSize = 12.sp,
+            style = SecretPanelType.meta,
             modifier = Modifier.weight(1f),
         )
         TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = BossThemeColors.TextSecondary, fontSize = 12.sp)
+            Text("Dismiss", color = BossThemeColors.TextSecondary, style = SecretPanelType.meta)
         }
     }
     Spacer(Modifier.height(8.dp))
@@ -765,12 +730,12 @@ private fun SharedSecretsErrorView(
             verticalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier.padding(32.dp),
         ) {
-            Text("Error", color = BossThemeColors.ErrorColor, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text(message, color = BossThemeColors.TextSecondary, fontSize = 14.sp)
+            Text("Error", color = BossThemeColors.ErrorColor, style = SecretPanelType.title)
+            Text(message, color = BossThemeColors.TextSecondary, style = SecretPanelType.bodyStrong)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onRetry,
-                    colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.SuccessColor),
+                    colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.AccentColor),
                 ) {
                     Text("Retry", color = BossThemeColors.TextPrimary)
                 }
@@ -783,71 +748,57 @@ private fun SharedSecretsErrorView(
 }
 
 /**
- * Empty state. Distinguishes "nothing is shared with you" from "nothing shared in the first
- * N secrets we scanned", because the second one has a next step and the first one does not.
+ * Empty state. Distinguishes "nothing is shared with you" from "nothing shared in the first N
+ * secrets we scanned", because the second one has a next step and the first one does not.
+ *
+ * `BossEmptyState` paints the icon, message and description, so this only supplies the words and
+ * the one control it needs. Its own empty state used to hand-roll the same three elements at
+ * different sizes to the one the rest of BOSS uses.
  */
 @Composable
 private fun SharedSecretsEmptyView(
     state: SharedSecretsState,
     onLoadMore: () -> Unit,
 ) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            modifier = Modifier.padding(32.dp),
-        ) {
-            if (state.searchQuery.isNotBlank()) {
-                Icon(
-                    Icons.Default.Search,
-                    contentDescription = "No results",
-                    tint = BossThemeColors.TextSecondary,
-                    modifier = Modifier.size(64.dp),
+    // The Box is what centres this in the section; `BossEmptyState` handles its own internal
+    // spacing but not that. The Column is only here for the one branch with a second child.
+    Box(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            state.searchQuery.isNotBlank() ->
+                BossEmptyState(
+                    icon = Icons.Default.Search,
+                    message = "No results",
+                    description = "Try a different filter",
                 )
-                Text(
-                    "No results found",
-                    color = BossThemeColors.TextPrimary,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text("Try a different filter", color = BossThemeColors.TextSecondary, fontSize = 14.sp)
-            } else {
-                Icon(
-                    Icons.Default.Share,
-                    contentDescription = "Nothing shared",
-                    tint = BossThemeColors.TextSecondary,
-                    modifier = Modifier.size(64.dp),
-                )
-                Text(
-                    "Nothing shared with you",
-                    color = BossThemeColors.TextPrimary,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                if (state.hasMore) {
-                    Text(
-                        "None in the ${state.rowsScanned} secrets scanned so far.",
-                        color = BossThemeColors.TextSecondary,
-                        fontSize = 14.sp,
+
+            state.hasMore ->
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    BossEmptyState(
+                        icon = Icons.Default.Share,
+                        message = "Nothing shared with you yet",
+                        description = "None in the ${state.rowsScanned} secrets scanned so far",
                     )
-                    Button(
-                        onClick = onLoadMore,
-                        enabled = !state.isLoadingMore,
-                        colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.SuccessColor),
-                    ) {
+                    TextButton(onClick = onLoadMore, enabled = !state.isLoadingMore) {
                         Text(
-                            if (state.isLoadingMore) "Scanning..." else "Keep looking",
-                            color = BossThemeColors.TextPrimary,
+                            if (state.isLoadingMore) "Scanning" else "Keep looking",
+                            color = BossThemeColors.AccentColor,
+                            style = SecretPanelType.body,
                         )
                     }
-                } else {
-                    Text(
-                        "Secrets other people share with you show up here.",
-                        color = BossThemeColors.TextSecondary,
-                        fontSize = 14.sp,
-                    )
                 }
-            }
+
+            else ->
+                BossEmptyState(
+                    icon = Icons.Default.Share,
+                    message = "Nothing shared with you",
+                    description = "Secrets other people share with you show up here",
+                )
         }
     }
 }

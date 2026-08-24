@@ -8,11 +8,17 @@
   "minBossVersion": "9.4.2",
   "mainClass": "ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin",
   "type": "panel",
-  "description": "Your credentials, secrets shared with you, Plugin Store API keys and AI provider settings",
+  "description": "Your credentials, secrets shared with you, Plugin Store publish keys and AI provider settings",
   "author": "Risa Labs",
   "url": "https://github.com/risa-labs-inc/boss-plugin-secret-manager",
   "requiresAdmin": false,
   "requiredPermissions": ["secret.read"],
+  "dependencies": [
+    {
+      "pluginId": "ai.rever.boss.plugin.dynamic.aigateway",
+      "optional": true
+    }
+  ],
   "panel": {
     "position": "right_top_bottom",
     "priority": 24
