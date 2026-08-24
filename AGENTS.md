@@ -242,6 +242,34 @@ nothing.
 this plugin's chrome inside the host's own Settings window, so it is where a disagreement with the
 host shows most.
 
+### The publish keys are not "API keys"
+
+The `+` menu's third item said **Create API Key**, which named the mechanism and not the job. This
+panel has *three* unrelated things called an API key - an AI provider's key, the "this is an API
+key" tag any secret can carry, and this - and only this one publishes a plugin to the store, with
+`publish` / `version` / `finalize` scopes against the Plugin Store API. A user who opened the menu
+to release a plugin could not tell which item to press, which is how it was reported.
+
+They are **Plugin Store publish keys** now, everywhere a person reads: the two menu items, both
+dialogs, the revoke confirmation, the error strings, the note written onto the stored secret, the
+manifest `description` and the README. The AI-provider strings and the `api_key` *tag* keep the
+generic name, because for those it is the right one.
+
+**`website = "boss_plugin_store_api_key"` is deliberately unchanged.** That is the identifier the
+stored secret is found by, not a label - renaming it would orphan every key already created. Same
+for the `api_key` tag and the `X-API-Key` header, which is what the server actually reads.
+
+While the menu was open it was also clear that its four items came from four different apps: two in
+Title Case and two in sentence case, over a white, a green, an orange and a second green glyph, none
+of which distinguished anything. One casing (sentence, as everywhere else in the panel now) and one
+muted glyph colour.
+
+**The menu was checked by opening it, not by reading the strings.** A `DropdownMenu` sizes to its
+content, and "Create Plugin Store publish key" is roughly twice the old label - worth seeing against
+a real sidebar width rather than assuming the popup would cope. `showAddDropdown`'s initial value was
+flipped to `true` for one build to get it on screen, the same trick as defaulting `selectedSection` to
+the shared tab; both are reverted, and `git diff` on those two lines is empty.
+
 ## AI Providers (`ai/` package)
 
 This plugin owns **all** AI provider configuration. The host has none: its

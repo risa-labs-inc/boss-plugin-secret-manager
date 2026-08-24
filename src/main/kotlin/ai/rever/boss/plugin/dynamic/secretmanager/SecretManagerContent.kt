@@ -249,10 +249,10 @@ private fun SecretManagerView(
                                 Icon(
                                     Icons.Default.Lock,
                                     contentDescription = null,
-                                    tint = BossThemeColors.TextPrimary,
+                                    tint = BossThemeColors.TextSecondary,
                                     modifier = Modifier.size(18.dp)
                                 )
-                                Text("Add Secret", color = BossThemeColors.TextPrimary, style = SecretPanelType.body)
+                                Text("Add secret", color = BossThemeColors.TextPrimary, style = SecretPanelType.body)
                             }
                         }
 
@@ -275,11 +275,11 @@ private fun SecretManagerView(
                                     Icon(
                                         Icons.Default.AutoAwesome,
                                         contentDescription = null,
-                                        tint = BossThemeColors.AccentColor,
+                                        tint = BossThemeColors.TextSecondary,
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Text(
-                                        "Add AI Provider Key",
+                                        "Add AI provider key",
                                         color = BossThemeColors.TextPrimary,
                                         style = SecretPanelType.body
                                     )
@@ -287,7 +287,12 @@ private fun SecretManagerView(
                             }
                         }
 
-                        // Create API Key option (visible for admin/plugin_admin)
+                        // Named for the job, not the mechanism. "Create API Key" was the third
+                        // unrelated thing in this panel called an API key - alongside an AI
+                        // provider's key and the "this is an API key" tag on an ordinary secret -
+                        // and the only one that publishes a plugin to the store. A user who came
+                        // here to release a plugin could not tell which item to press.
+                        // Visible for admin/plugin_admin.
                         if (state.canManageApiKeys) {
                             Divider(color = BossThemeColors.BorderColor)
 
@@ -304,10 +309,14 @@ private fun SecretManagerView(
                                     Icon(
                                         Icons.Default.VpnKey,
                                         contentDescription = null,
-                                        tint = BossThemeColors.WarningColor,
+                                        tint = BossThemeColors.TextSecondary,
                                         modifier = Modifier.size(18.dp)
                                     )
-                                    Text("Create API Key", color = BossThemeColors.TextPrimary, style = SecretPanelType.body)
+                                    Text(
+                                        "Create Plugin Store publish key",
+                                        color = BossThemeColors.TextPrimary,
+                                        style = SecretPanelType.body
+                                    )
                                 }
                             }
 
@@ -324,10 +333,14 @@ private fun SecretManagerView(
                                     Icon(
                                         Icons.Default.List,
                                         contentDescription = null,
-                                        tint = BossThemeColors.AccentColor,
+                                        tint = BossThemeColors.TextSecondary,
                                         modifier = Modifier.size(18.dp)
                                     )
-                                    Text("Manage API Keys", color = BossThemeColors.TextPrimary, style = SecretPanelType.body)
+                                    Text(
+                                        "Manage publish keys",
+                                        color = BossThemeColors.TextPrimary,
+                                        style = SecretPanelType.body
+                                    )
                                 }
                             }
                         }
@@ -1956,7 +1969,7 @@ private fun CreateApiKeyDialog(
                             modifier = Modifier.size(24.dp)
                         )
                         Text(
-                            if (isSuccess) "API Key Created" else "Create API Key",
+                            if (isSuccess) "Publish key created" else "Create publish key",
                             color = BossThemeColors.TextPrimary,
                             style = SecretPanelType.title
                         )
@@ -1983,12 +1996,12 @@ private fun CreateApiKeyDialog(
                             modifier = Modifier.size(48.dp)
                         )
                         Text(
-                            "API Key Securely Stored",
+                            "Publish key stored",
                             color = BossThemeColors.TextPrimary,
                             style = SecretPanelType.bodyStrong
                         )
                         Text(
-                            "Your API key has been automatically saved to your secrets.",
+                            "The key is saved to your secrets. This is the only time it is shown.",
                             color = BossThemeColors.TextSecondary,
                             style = SecretPanelType.meta
                         )
@@ -2040,7 +2053,7 @@ private fun CreateApiKeyDialog(
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Text(
-                                    "Password: Your API key",
+                                    "Password: the key itself",
                                     color = BossThemeColors.TextPrimary,
                                     style = SecretPanelType.caption
                                 )
@@ -2051,7 +2064,7 @@ private fun CreateApiKeyDialog(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        "Use the X-API-Key header with your key for CI/CD publishing.",
+                        "Send it as the X-API-Key header when publishing.",
                         color = BossThemeColors.TextSecondary,
                         style = SecretPanelType.caption
                     )
@@ -2072,7 +2085,8 @@ private fun CreateApiKeyDialog(
                 } else {
                     // Creation form
                     Text(
-                        "Create an API key for CI/CD publishing to the Plugin Store. The key will be securely stored in your secrets.",
+                        "Publishes plugins to the BOSS Plugin Store from CI or a script. The key is stored in your " +
+                            "secrets automatically.",
                         color = BossThemeColors.TextSecondary,
                         style = SecretPanelType.meta
                     )
@@ -2297,7 +2311,7 @@ private fun ApiKeysListDialog(
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            "Plugin Store API Keys",
+                            "Plugin Store publish keys",
                             color = BossThemeColors.TextPrimary,
                             style = SecretPanelType.title
                         )
@@ -2343,7 +2357,7 @@ private fun ApiKeysListDialog(
                                 modifier = Modifier.size(48.dp)
                             )
                             Text(
-                                "No API keys",
+                                "No publish keys",
                                 color = BossThemeColors.TextPrimary,
                                 style = SecretPanelType.bodyStrong
                             )
@@ -2362,7 +2376,7 @@ private fun ApiKeysListDialog(
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Create API Key", color = Color.Black, style = SecretPanelType.meta)
+                                Text("New publish key", color = Color.Black, style = SecretPanelType.meta)
                             }
                         }
                     }
@@ -2412,12 +2426,12 @@ private fun ApiKeysListDialog(
         BossAlertDialog(
             onDismissRequest = { keyToRevoke = null },
             title = {
-                Text("Revoke API Key?", color = BossThemeColors.TextPrimary, fontWeight = FontWeight.Bold)
+                Text("Revoke publish key?", color = BossThemeColors.TextPrimary, fontWeight = FontWeight.Bold)
             },
             text = {
                 Column {
                     Text(
-                        "Are you sure you want to revoke this API key?",
+                        "Are you sure you want to revoke this publish key?",
                         color = BossThemeColors.TextPrimary
                     )
                     Spacer(modifier = Modifier.height(8.dp))
@@ -2631,7 +2645,7 @@ private fun AiProviderKeyDialog(
         backgroundColor = BossThemeColors.SurfaceColor,
         title = {
             Text(
-                if (alreadyStored) "Change AI Provider Key" else "Add AI Provider Key",
+                if (alreadyStored) "Change AI provider key" else "Add AI provider key",
                 color = BossThemeColors.TextPrimary,
                 fontWeight = FontWeight.Bold
             )

@@ -1,6 +1,6 @@
 # BOSS Secret Manager
 
-Encrypted credentials, the secrets other people share with you, Plugin Store API keys, and
+Encrypted credentials, the secrets other people share with you, Plugin Store publish keys, and
 every AI provider setting in BOSS.
 
 A right-hand sidebar panel over the host's `SecretDataProvider`, plus the `Settings > AI
@@ -22,7 +22,7 @@ is retired, and its list is this panel's "Shared with me" section. See
   or re-share control exists anywhere in that section.
 - **Sharing**: share a secret with individual users (searched through Supabase) or with whole
   RBAC roles, each at an access level, and unshare again.
-- **Plugin Store API keys**: create, list and revoke them, with a `publish` scope checkbox. The
+- **Plugin Store publish keys**: create, list and revoke them, with a `publish` scope checkbox. The
   key is shown once at creation and never again.
 - **AI providers**: Anthropic, OpenAI, Google Gemini, xAI Grok, Moonshot (Kimi), Together AI,
   and any custom OpenAI-compatible endpoint.
@@ -122,7 +122,7 @@ Two surfaces inside the panel carry their own gate, because they reach past the 
 | Surface | Permission | Held by |
 |---|---|---|
 | Share with a role (the share dialog's Roles tab) | `secret.share.role` | admin, boss_admin |
-| Plugin Store API keys | `api_key.create` | admin, boss_admin |
+| Plugin Store publish keys | `api_key.create` | admin, boss_admin |
 
 The role-share gate exists because a role share reaches every holder of that role, and `user`
 is a descendant of every role - so a role target is the one control here that can publish a
