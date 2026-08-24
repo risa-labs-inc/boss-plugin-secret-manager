@@ -8,6 +8,7 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.BrokeredCredentialBridge
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.EnvResolver
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.GatewayCliEngineAccess
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.GatewayPresence
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.LegacySettingsImport
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.LlmProviderSettingsApiImpl
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ModelCatalog
@@ -89,6 +90,17 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         val envResolver = EnvResolver()
         val credentialStore = ProviderCredentialStore(secretDataProvider, envResolver)
 
+        // Assigned by registerAiProviderSettings below, read when the panel is first composed.
+        //
+        // The order is forced and this is what makes it safe: the ViewModel has to be built inside
+        // the LinkageError guard (it starts a catalog collector, which on a host that cannot link
+        // the api impl would be started and then orphaned), and the guard has to run after the
+        // panel is registered so that a *non*-linkage failure in it cannot cost the user their
+        // secrets panel. A captured `var` read through a lambda closes that gap: Kotlin compiles it
+        // to a shared reference, `registerPanel` only stores a factory, and the host does not call
+        // that factory until after `register()` has returned.
+        var aiProvidersViewModel: AiProvidersViewModel? = null
+
         context.panelRegistry.registerPanel(SecretManagerInfo) { ctx, panelInfo ->
             SecretManagerComponent(
                 ctx = ctx,
@@ -101,7 +113,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 settingsProvider = context.settingsProvider,
                 windowId = context.windowId,
                 splitViewOperations = context.splitViewOperations,
-                authDataProvider = context.authDataProvider
+                authDataProvider = context.authDataProvider,
+                aiProvidersViewModel = { aiProvidersViewModel }
             )
         }
 
@@ -110,7 +123,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
             SecretManagerMcpToolProvider(pluginId, secretDataProvider, credentialStore),
         )
 
-        registerAiProviderSettings(context, credentialStore, envResolver, pluginScope)
+        aiProvidersViewModel =
+            registerAiProviderSettings(context, credentialStore, envResolver, pluginScope)
     }
 
     /**
@@ -129,7 +143,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         credentialStore: ProviderCredentialStore,
         envResolver: EnvResolver,
         pluginScope: CoroutineScope,
-    ) {
+    ): AiProvidersViewModel? {
         try {
             // Constructed inside the guard: the ViewModel starts a catalog.states
             // collector, and on a host that can't link the impl below that coroutine
@@ -159,6 +173,10 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     // must not happen on an older host. Null there, which costs the Local CLI
                     // section and nothing else.
                     cliEngines = GatewayCliEngineAccess.orNull(context),
+                    // Not guarded by anything: every symbol it touches (PluginLoaderDelegate,
+                    // PanelEventProvider, PanelId, openPanel) predates this plugin's 1.0.73 floor.
+                    // It lives inside the guard only because the ViewModel that holds it does.
+                    gateway = GatewayPresence.from(context),
                 )
 
             context.registerPluginAPI(LlmProviderSettingsApiImpl(viewModel))
@@ -167,6 +185,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
             // the load. Network-free — model lists are still fetched lazily, when the
             // panel is opened or refreshed, so this costs nothing at startup.
             viewModel.ensureConnectionsLoaded()
+            return viewModel
         } catch (_: LinkageError) {
             // Host predates LlmProviderSettingsAPI — skip; everything else works.
             // Logged rather than swallowed: without this, "the AI Providers section is
@@ -176,6 +195,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 "AI provider settings not served — host api predates LlmProviderSettingsAPI",
                 mapOf("requiredApiVersion" to REQUIRED_API_VERSION),
             )
+            return null
         }
     }
 }

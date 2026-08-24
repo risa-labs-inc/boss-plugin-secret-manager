@@ -270,6 +270,83 @@ a real sidebar width rather than assuming the popup would cope. `showAddDropdown
 flipped to `true` for one build to get it on screen, the same trick as defaulting `selectedSection` to
 the shared tab; both are reverted, and `git diff` on those two lines is empty.
 
+## Three sections, and the AI one is not owned by the panel
+
+The panel is segmented into **Secrets**, **Shared with me** and **AI** - the last being the same
+`AiProvidersPanel` the host renders at Settings, AI Providers, from one definition rather than a
+second copy. It is there because this plugin owns every AI credential in BOSS while the panel
+holding them was reachable only through the host's Settings window: two clicks and a different
+window away from the vault the keys are stored in.
+
+Four things about it that are easy to get wrong:
+
+**The ViewModel arrives as a supplier, and the order forces that.** `AiProvidersViewModel` is built
+inside `registerAiProviderSettings`'s `LinkageError` guard - it starts a `catalog.states` collector,
+which on a host that cannot link `LlmProviderSettingsApiImpl` would be started and then orphaned -
+and that guard runs **after** `registerPanel`, so a *non*-linkage failure in it cannot cost the user
+their secrets panel. So the value does not exist when the panel factory is registered. A captured
+`var` read through `() -> AiProvidersViewModel?` closes the gap: Kotlin compiles it to a shared
+reference, `registerPanel` only stores a factory, and the host does not call that factory until
+after `register()` returns. Do not "simplify" it to a value.
+
+**The panel does not own it and must not dispose it.** Every other ViewModel on
+`SecretManagerComponent` is per panel instance and cancelled in `lifecycle.doOnDestroy`; this one is
+the plugin's single instance, shared with the host's Settings window through
+`LlmProviderSettingsApiImpl`. Disposing it with the sidebar panel would take the host's AI Providers
+section down too.
+
+**The tab is absent, not disabled, when there is no ViewModel.** On a host whose api predates
+`LlmProviderSettingsAPI` (1.0.71) the section cannot render at all, and a tab whose only content is
+"not available here" is worse than one tab fewer. `showAiSection` is that check.
+
+**Refresh means three things in this section.** `refreshConnections()`, `checkGateway()` and
+`refreshCliEngines()`, because all three can go stale while the panel sits open: a key edited in the
+Secrets section next door, a gateway installed in the Toolbox, a CLI signed into in a terminal.
+`refreshConnections` had to be added - `ensureConnectionsLoaded` is `compareAndSet(false, true)` and
+loads once per ViewModel, so it is not a refresh.
+
+### The AI Gateway is an optional dependency, and the section says so
+
+`AiProvidersUiState.cliEngines` is empty in three situations, and the panel used to treat all three
+alike on the stated grounds that "none of them gives the user anything to do here". That was wrong
+about one of them. The gateway being **absent** is fixable; the gateway predating `AiCliSessionAPI`
+and this host's api jar not linking the symbol are not. A user who had signed into `claude` in a
+terminal specifically to use it here saw no Local CLI sessions section, no explanation, and no way
+to discover that one plugin stood in the way.
+
+`GatewayPresence` asks about the **plugin**, not the engine list, precisely because an installed
+gateway serving no engines is a different fact from an absent one. It is ported from
+`user-secret-list`'s `SecretManagerLink` minus the part that does not apply: that plugin's floor is
+1.0.20, so it had to probe reflectively for `openPanel` (api 1.0.57). This plugin's floor is
+**1.0.73**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
+it and are called straight - a guard there would be dead code implying a risk that cannot occur.
+
+Two rules carried over from that port, both mutation-verified here:
+
+- **"Installed" is not `isPluginLoaded`.** `disablePlugin` flips the state and never unloads, so a
+  disabled gateway is still in `getLoadedPlugins()` - while answering no `getPluginAPI` and serving
+  no engines. Reporting it as present puts the section back to unexplained silence. `isEnabled`,
+  `healthy` and `!isIncompatible` are all required. Dropping them fails *a disabled gateway is not
+  installed*.
+- **The install deep link is gated on Toolbox 1.9.14**, the release that first carried the handler.
+  On an older one nothing is listening, so the link is not sent at all and the notice degrades to
+  "Open the Toolbox" - a link that silently goes nowhere reads as a broken button. Sending it
+  unconditionally fails *nothing is handed to the platform when the Toolbox is too old*.
+
+**`plugin.json` declares the gateway `"optional": true`.** That is not a hedge, it is what the
+manifest means: HTTP provider keys work without it, so it must not veto loading. The host still
+prompts - `PluginDependencyResolution.missingFor` deliberately returns optional dependencies, "worth
+telling someone about ... flagged so the prompt can be a suggestion rather than a warning" - and its
+own words at install time are "works without it, but some of its features need it". The in-panel
+notice is that sentence in the place it matters. All three of the gateway's other consumers declare
+it optional too, so this follows the established convention rather than inventing one.
+
+**The dependency entry carries no `version` key, on purpose.** `processResources` is line-based and
+rewrites *every* `"version": "..."` line in the file, so a `"version": "*"` inside a dependency block
+comes out of the built jar as this plugin's own version - "requires aigateway 1.2.17". The host
+ignores the field anyway (`missingFor` matches on id alone). This exact trap was hit once in
+`user-secret-list` and was invisible in the committed file.
+
 ## AI Providers (`ai/` package)
 
 This plugin owns **all** AI provider configuration. The host has none: its
@@ -786,7 +863,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 195 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 214 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

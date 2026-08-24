@@ -29,9 +29,10 @@ data class AiProvidersUiState(
     /**
      * Local CLI engines the gateway can drive, or empty when it serves none.
      *
-     * Empty covers three cases the panel treats alike, because none of them gives the user
-     * anything to do here: the gateway is not installed, it predates `AiCliSessionAPI`, or
-     * this host's api jar does not link the symbol.
+     * Empty covers three cases: the gateway is not installed, it predates `AiCliSessionAPI`, or
+     * this host's api jar does not link the symbol. The panel used to treat all three alike on
+     * the grounds that none gave the user anything to do - which was wrong about the first one,
+     * and is what [gatewayNotice] now separates out. The other two still leave nothing to do.
      */
     val cliEngines: List<CliEngineInfo> = emptyList(),
     /** Per-engine readiness, filled in as the probes answer. */
@@ -46,6 +47,16 @@ data class AiProvidersUiState(
      * showing two things as active is not harmless to a user.
      */
     val activeCliEngineId: String? = null,
+    /**
+     * What to say about the AI Gateway, or [GatewayNotice.NONE] when there is nothing to say.
+     *
+     * Starts at NONE rather than at a "checking" state on purpose: a section that flashes
+     * "install the gateway" for one frame on every open, for the many users who have it, is a
+     * worse lie than a notice that appears a beat late for the few who do not.
+     */
+    val gatewayNotice: GatewayNotice = GatewayNotice.NONE,
+    /** True while the Toolbox is being asked, so the button cannot be pressed twice. */
+    val isAskingForGateway: Boolean = false,
     val connections: Map<String, ProviderConnection> = emptyMap(),
     val catalogs: Map<String, CatalogState> = emptyMap(),
     /** In-progress key edits, keyed by provider id. Never persisted until saved. */
@@ -90,6 +101,13 @@ class AiProvidersViewModel(
      * and so every new-api reference stays inside the one adapter that implements it.
      */
     private val cliEngines: CliEngineAccess? = null,
+    /**
+     * Whether the AI Gateway is installed, and how to offer it. Null on a host that cannot be
+     * asked, which reads the same as "installed": no notice.
+     *
+     * Injected for the same reason [cliEngines] is - so the decision is testable without a host.
+     */
+    private val gateway: GatewayPresence? = null,
     /**
      * Floor on how often a brokered refresh may run.
      *
@@ -144,6 +162,11 @@ class AiProvidersViewModel(
         // The engine list is cheap; the probes it kicks off are not, which is why this runs
         // once here rather than per composition.
         refreshCliEngines()
+
+        // Cheap enough to do on construction, and it has to happen before the section is first
+        // looked at: the notice's absence is what a user with the gateway should see, and its
+        // presence is the only thing that tells a user without it why there is no CLI section.
+        checkGateway()
 
         // Re-read credentials whenever the store is invalidated — which is what the secret
         // list's own create/update/delete does. Clearing the store cache alone was not
@@ -381,6 +404,50 @@ class AiProvidersViewModel(
      * binary delays its own row rather than the section. Each spawns a process, which is why
      * this is called on load and from Refresh rather than per composition.
      */
+    /**
+     * Re-read whether the gateway is here.
+     *
+     * Never cached, for the same reason `GatewayCliEngineAccess` resolves the api per call: the
+     * gateway can be installed, enabled or hot-reloaded while this panel is open, and that is
+     * exactly the moment a settings page has to notice. Cheap - one list read, no process spawn.
+     */
+    fun checkGateway() {
+        val presence = gateway ?: return
+        val notice = runCatching { presence.notice() }.getOrDefault(GatewayNotice.NONE)
+        _state.update { it.copy(gatewayNotice = notice) }
+    }
+
+    /**
+     * Ask the Toolbox to install the gateway, then re-check.
+     *
+     * The re-check is why this does not simply fire and forget: the Toolbox's dialog is modal and
+     * the install happens after the user answers it, so the notice has to be re-read afterwards or
+     * it sits there telling the user to install something they just installed. `refreshCliEngines`
+     * follows, since a fresh gateway has engines this panel has never asked about.
+     */
+    fun requestGateway() {
+        val presence = gateway ?: return
+        if (_state.value.isAskingForGateway) return
+        _state.update { it.copy(isAskingForGateway = true) }
+        scope.launch {
+            val asked =
+                runCatching {
+                    if (presence.canAskToolboxToInstall()) {
+                        presence.askToolboxToInstall()
+                    } else {
+                        presence.openToolbox()
+                    }
+                }.getOrDefault(false)
+            _state.update { it.copy(isAskingForGateway = false) }
+            if (!asked) {
+                _state.update { it.copy(error = "Could not open the Toolbox. Install AI Gateway from there.") }
+                return@launch
+            }
+            checkGateway()
+            refreshCliEngines()
+        }
+    }
+
     fun refreshCliEngines() {
         val access = cliEngines ?: return
         scope.launch {
@@ -711,6 +778,23 @@ class AiProvidersViewModel(
                 lastBrokeredRefreshNanos.set(System.nanoTime())
                 brokeredRefreshInFlight.set(false)
             }
+    }
+
+    /**
+     * Re-read the stored credentials on demand, for the panel's Refresh action.
+     *
+     * `ensureConnectionsLoaded` is not this: it is `compareAndSet(false, true)`, so it loads once
+     * per ViewModel and a second call is a no-op. Refresh has to actually re-read - a key added or
+     * revoked in the Secrets section next door is the case it exists for, and the invalidation
+     * collector only covers changes made through this plugin's own store.
+     *
+     * On `Dispatchers.IO`, and `runCatching` around the body, for the same reasons the brokered
+     * refresh path documents: `pluginScope` falls back to `Dispatchers.Main`, and a host
+     * `listSecrets` that throws instead of returning a failed `Result` would escape and cancel a
+     * scope that is not a supervisor, silently killing every later launch in the plugin.
+     */
+    fun refreshConnections() {
+        scope.launch(Dispatchers.IO) { runCatching { reloadConnections() } }
     }
 
     private suspend fun reloadConnections() {

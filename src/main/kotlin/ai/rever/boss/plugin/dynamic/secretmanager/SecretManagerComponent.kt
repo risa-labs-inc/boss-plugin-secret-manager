@@ -8,6 +8,7 @@ import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SettingsProvider
 import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.api.SupabaseDataProvider
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -34,7 +35,21 @@ class SecretManagerComponent(
     private val settingsProvider: SettingsProvider? = null,
     private val windowId: String? = null,
     private val splitViewOperations: SplitViewOperations? = null,
-    private val authDataProvider: AuthDataProvider? = null
+    private val authDataProvider: AuthDataProvider? = null,
+    /**
+     * The AI providers ViewModel, as a supplier.
+     *
+     * Not the value, because of the order things happen in `register()`: the ViewModel is built
+     * inside `registerAiProviderSettings`'s `LinkageError` guard, which runs *after*
+     * `registerPanel`, so a value captured at registration would be null forever. The supplier is
+     * read when the panel is first composed, by which time `register()` has returned.
+     *
+     * Also **not owned here.** Every other ViewModel on this component is per panel instance and
+     * disposed with it; this one is the plugin's single instance, shared with the host's Settings
+     * window through `LlmProviderSettingsApiImpl`. Disposing it in `doOnDestroy` would take the
+     * host's AI Providers section down with the sidebar panel.
+     */
+    private val aiProvidersViewModel: () -> AiProvidersViewModel? = { null }
 ) : PanelComponentWithUI, ComponentContext by ctx {
 
     // Created once per panel instance (not per composition), so secrets stay
@@ -95,6 +110,7 @@ class SecretManagerComponent(
             sharedSecretsViewModel = sharedSecretsViewModel,
             selectedSection = selectedSection,
             onSelectSection = { selectedSection = it },
+            aiProvidersViewModel = aiProvidersViewModel,
         )
     }
 }

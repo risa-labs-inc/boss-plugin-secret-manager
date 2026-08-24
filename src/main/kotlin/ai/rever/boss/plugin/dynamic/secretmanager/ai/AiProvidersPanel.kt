@@ -31,6 +31,7 @@ import androidx.compose.material.Icon
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -94,6 +95,16 @@ fun AiProvidersPanel(
         state.error?.let { MessageBanner(it, BossThemeColors.ErrorColor) }
         state.notice?.let { MessageBanner(it, BossThemeColors.SuccessColor) }
 
+        // Where the CLI section would be. The gateway serving no engines is still silence, but
+        // the gateway being *absent* is a thing the user can fix, and telling them costs one row.
+        if (state.gatewayNotice != GatewayNotice.NONE) {
+            GatewayMissingNotice(
+                notice = state.gatewayNotice,
+                isAsking = state.isAskingForGateway,
+                onRequest = viewModel::requestGateway,
+            )
+        }
+
         // Above the providers on purpose: for a user who already has a `claude` or `codex`
         // login, this is the whole setup, and burying it under a key-entry form would have
         // them paste a key they never needed. Absent entirely when the gateway serves none,
@@ -148,6 +159,80 @@ fun AiProvidersPanel(
             state = state,
             viewModel = viewModel,
         )
+    }
+}
+
+/**
+ * "AI Gateway is not installed", with the button that fixes it.
+ *
+ * This is the section's answer to a silence. Local CLI sessions, brokered organisation providers
+ * and the common completion API all come from the gateway, so without it this panel stores keys
+ * that only the plugins reading `PluginContext.llmProvider` directly can use - and nothing said
+ * so. A user who had signed into `claude` in a terminal specifically to use it here had no way to
+ * discover that one plugin stood in the way.
+ *
+ * Deliberately **not** an error colour. Nothing is broken: HTTP provider keys work without the
+ * gateway, which is exactly why this plugin declares the dependency `optional` rather than
+ * required. The host says the same thing in its own words at install time - "works without it,
+ * but some of its features need it" - and this is that sentence in the place it matters.
+ */
+@Composable
+private fun GatewayMissingNotice(
+    notice: GatewayNotice,
+    isAsking: Boolean,
+    onRequest: () -> Unit,
+) {
+    BossCard(modifier = Modifier.fillMaxWidth()) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Default.Extension,
+                    contentDescription = null,
+                    tint = BossThemeColors.TextSecondary,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    "AI Gateway is not installed",
+                    color = BossThemeColors.TextPrimary,
+                    style = SecretPanelType.bodyStrong,
+                )
+            }
+            Text(
+                "Provider keys below still work. The gateway adds local CLI sessions - a " +
+                    "claude or codex login you already have - and serves one AI interface to " +
+                    "every plugin.",
+                color = BossThemeColors.TextSecondary,
+                style = SecretPanelType.meta,
+            )
+            when (notice) {
+                // The label names what the press does, and the two routes really do differ: one
+                // raises the Toolbox's install confirmation, the other just shows the Toolbox.
+                GatewayNotice.OFFER_INSTALL ->
+                    BossPrimaryButton(
+                        text = if (isAsking) "Asking the Toolbox" else "Install AI Gateway",
+                        onClick = onRequest,
+                        enabled = !isAsking,
+                    )
+
+                GatewayNotice.OFFER_TOOLBOX ->
+                    BossSecondaryButton(
+                        text = if (isAsking) "Opening the Toolbox" else "Open the Toolbox",
+                        onClick = onRequest,
+                        enabled = !isAsking,
+                    )
+
+                // No route: say where to look rather than showing a button that cannot work.
+                GatewayNotice.DESCRIBE_ONLY, GatewayNotice.NONE ->
+                    Text(
+                        "Install it from the Toolbox to enable those.",
+                        color = BossThemeColors.TextMuted,
+                        style = SecretPanelType.caption,
+                    )
+            }
+        }
     }
 }
 

@@ -1,6 +1,8 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.*
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersPanel
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
@@ -60,6 +62,16 @@ import kotlinx.coroutines.launch
 enum class SecretPanelSection {
     SECRETS,
     SHARED_WITH_ME,
+
+    /**
+     * AI provider configuration: the same panel the host serves at Settings, AI Providers.
+     *
+     * One definition rendered in two places rather than a second copy. It is here because this
+     * plugin owns every AI credential in BOSS and the panel that holds them was reachable only
+     * through the host's Settings window - two clicks and a different window away from the vault
+     * the keys are actually stored in.
+     */
+    AI_PROVIDERS,
 }
 
 /**
@@ -79,6 +91,16 @@ fun SecretManagerContent(
     sharedSecretsViewModel: SharedSecretsViewModel,
     selectedSection: SecretPanelSection,
     onSelectSection: (SecretPanelSection) -> Unit,
+    /**
+     * The AI providers ViewModel, or null on a host that cannot serve one.
+     *
+     * A **supplier**, not the value: it is built inside `registerAiProviderSettings`'s
+     * `LinkageError` guard, which runs after `registerPanel`, so anything reading it at
+     * registration time would read null forever. Resolved when the section is first shown
+     * instead. Null means the host's api predates `LlmProviderSettingsAPI` (1.0.71), and the tab
+     * is not offered at all - a tab whose only content is "not available here" is noise.
+     */
+    aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
 ) {
     BossTheme {
         if (!viewModel.isAvailable()) {
@@ -87,6 +109,7 @@ fun SecretManagerContent(
             SecretManagerView(
                 viewModel = viewModel,
                 sharedSecretsViewModel = sharedSecretsViewModel,
+                aiProvidersViewModel = aiProvidersViewModel,
                 selectedSection = selectedSection,
                 onSelectSection = onSelectSection,
             )
@@ -141,6 +164,7 @@ private fun SecretManagerView(
     sharedSecretsViewModel: SharedSecretsViewModel,
     selectedSection: SecretPanelSection,
     onSelectSection: (SecretPanelSection) -> Unit,
+    aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
 ) {
     val state = viewModel.state
     val sharedState by sharedSecretsViewModel.state.collectAsState()
@@ -150,6 +174,9 @@ private fun SecretManagerView(
     // the scroll position every time the user looks at the other tab and comes back.
     val sharedListState = rememberLazyListState()
     val clipboardManager = LocalClipboardManager.current
+    // Resolved here rather than at registration: see the parameter's own note. `remember` with no
+    // key is right - the supplier reads a field that is set once, before any panel is created.
+    val aiViewModel = remember { aiProvidersViewModel() }
     var showAddDropdown by remember { mutableStateOf(false) }
 
     // Fetch on first entry into the section, not on panel open: this is a second secrets RPC
@@ -177,6 +204,7 @@ private fun SecretManagerView(
                 // allShared, not the filtered view: typing in the shared section's filter
                 // would otherwise make the tab report "(1)" while forty are loaded.
                 sharedCount = sharedState.allShared.size,
+                showAiSection = aiViewModel != null,
                 onSelectSection = onSelectSection,
             ) {
                 // Refresh button. Refetches whichever section is on screen - the two read
@@ -185,12 +213,25 @@ private fun SecretManagerView(
                     when (selectedSection) {
                         SecretPanelSection.SECRETS -> state.isLoading
                         SecretPanelSection.SHARED_WITH_ME -> sharedState.isLoading
+                        // The AI section's own rows carry their spinners, and its refresh is
+                        // several independent fetches rather than one load, so there is no single
+                        // flag to disable the button on.
+                        SecretPanelSection.AI_PROVIDERS -> false
                     }
                 IconButton(
                     onClick = {
                         when (selectedSection) {
                             SecretPanelSection.SECRETS -> viewModel.loadSecrets()
                             SecretPanelSection.SHARED_WITH_ME -> sharedSecretsViewModel.refresh()
+                            SecretPanelSection.AI_PROVIDERS ->
+                                aiViewModel?.let {
+                                    // All three, because all three can go stale while the panel
+                                    // sits open: a key edited elsewhere, a gateway installed in
+                                    // the Toolbox, a CLI signed into in a terminal.
+                                    it.refreshConnections()
+                                    it.checkGateway()
+                                    it.refreshCliEngines()
+                                }
                         }
                     },
                     enabled = !isRefreshing,
@@ -369,6 +410,19 @@ private fun SecretManagerView(
                         onDismissError = { sharedSecretsViewModel.clearError() },
                         modifier = Modifier.weight(1f),
                     )
+
+                SecretPanelSection.AI_PROVIDERS ->
+                    // The same composable the host renders at Settings, AI Providers, from one
+                    // definition. It scrolls itself, so it takes the remaining height and no
+                    // scroll container of its own - nesting two would measure with infinite
+                    // height and crash.
+                    //
+                    // `aiViewModel` cannot be null here: the tab is only offered when it is not.
+                    // Guarded anyway rather than asserted, because the day the tab is offered
+                    // some other way, a blank section beats a crash inside a credentials panel.
+                    aiViewModel?.let { model ->
+                        AiProvidersPanel(viewModel = model, modifier = Modifier.weight(1f))
+                    }
             }
         }
     }
@@ -593,6 +647,7 @@ private fun SecretsSection(
 private fun SectionTabs(
     selectedSection: SecretPanelSection,
     sharedCount: Int,
+    showAiSection: Boolean,
     onSelectSection: (SecretPanelSection) -> Unit,
     actions: @Composable () -> Unit,
 ) {
@@ -608,7 +663,6 @@ private fun SectionTabs(
                 label = "SECRETS",
                 selected = selectedSection == SecretPanelSection.SECRETS,
                 onClick = { onSelectSection(SecretPanelSection.SECRETS) },
-                modifier = Modifier.padding(end = 20.dp),
             )
             SectionTab(
                 label = "SHARED",
@@ -619,7 +673,19 @@ private fun SectionTabs(
                 // zero itself (`if (count > 0)`), so the flag decided nothing and the local
                 // `badge > 0` check restated the component's own rule.
                 badge = sharedCount,
+                modifier = Modifier.padding(start = 20.dp),
             )
+            // Absent, not disabled, on a host whose api predates LlmProviderSettingsAPI: the
+            // section cannot render there at all, and a tab that only ever says "not available"
+            // is worse than one tab fewer.
+            if (showAiSection) {
+                SectionTab(
+                    label = "AI",
+                    selected = selectedSection == SecretPanelSection.AI_PROVIDERS,
+                    onClick = { onSelectSection(SecretPanelSection.AI_PROVIDERS) },
+                    modifier = Modifier.padding(start = 20.dp),
+                )
+            }
             Spacer(Modifier.weight(1f))
             Row(
                 modifier = Modifier.padding(bottom = 4.dp),

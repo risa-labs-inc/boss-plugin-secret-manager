@@ -13,6 +13,12 @@
   "url": "https://github.com/risa-labs-inc/boss-plugin-secret-manager",
   "requiresAdmin": false,
   "requiredPermissions": ["secret.read"],
+  "dependencies": [
+    {
+      "pluginId": "ai.rever.boss.plugin.dynamic.aigateway",
+      "optional": true
+    }
+  ],
   "panel": {
     "position": "right_top_bottom",
     "priority": 24
