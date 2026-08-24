@@ -148,6 +148,54 @@ call that reports how a secret was reached. `my_secret_get` shares `secret_get`'
 refusal through one function - see "Provider keys are withheld from `secret_get`" for why
 that matters.
 
+## The panel's design system
+
+The panel had **118 loose `fontSize = N.sp` literals** across nine sizes with no rule about which
+meant what, a hardcoded Material blue, and `SuccessColor` doing duty as the accent. It is now on
+the host's "Operator's Console" scale.
+
+**`SecretPanelType` is a local copy of the type scale, and it has to be.** `BossTypography` and
+`object BossTheme` live in the host's `plugin-ui-core` and are **not** on the plugin api - the api
+jar ships `BossThemeColors`, `BossColors`, the `BossTheme` wrapper and `BossComponents`, so a
+plugin cannot read `BossTheme.type`. The values come from `bossTypography()` and are cross-checked
+against what the plugin-facing `BossComponents` actually paint, since those render beside this
+panel's own text and any disagreement shows. Delete the object and point its call sites at
+`BossTheme.type` if the tokens ever reach the api.
+
+**Mono is confined to `label` and `data` on purpose.** The system's voice is mono for display and
+data, but the host injects **MesloLGS** into its own typography and a plugin cannot reach that
+`FontFamily` - so mono here resolves to the platform's, and using it for every heading would put a
+*different* mono beside the host's chrome.
+
+**`SuccessColor` is not the accent.** Twenty-nine sites used it for spinners, primary buttons,
+checkbox ticks, text cursors, tag chips and the `+` glyph. That looks correct only because this
+theme's accent happens to be green too: under Blueprint, where accent is amber, every control in
+the panel would have gone green while the chrome went amber. The seven remaining uses all mean
+"succeeded" - the copy confirmation, the "key created" panel, a 2FA-enabled badge, a passing key
+test, and a provider whose credential is already stored.
+
+**One row carries the sections and the actions.** Removing the duplicated in-panel title (the
+chrome prints it, and at a real sidebar width the second copy truncated to "Secret M...") left a
+56dp band holding two icons, so the refresh and `+` buttons moved onto the tab strip's baseline.
+
+**`IntrinsicSize.Max` on `SectionTab` is load-bearing.** The selected-tab indicator is
+`fillMaxWidth()`, which in an unweighted `Row` resolves to the whole *remaining* width - so the
+first tab ate the row, pushed the second one off the edge and took the actions with it. The tabs
+were `weight(1f)` each before, which bounded it by accident, which is why this only broke when
+they stopped being stretched. Per `compose-layout-bugs-need-a-screen` it was caught by looking at
+the panel, not by a test.
+
+**Colour is spent on one thing per card.** Share, Edit and Delete were a hardcoded blue,
+success-green and error-red on every row - a set of traffic lights repeated down the list, none of
+which meant anything. Only Delete is coloured now. Same reasoning retired the filled `Shared ·
+read` pill in the shared section for a 12% tinted chip carrying the access level alone: the tab
+above it already says everything in the list is a share, and a fill is the system's "signal",
+worth spending on something that changes between rows.
+
+The two "Create API Key" buttons still hardcode `Color.Black` labels on a `WarningColor` fill.
+`BossPrimaryButton` is the right answer and is present at the floor, but those buttons carry an
+inline spinner and enable logic, so converting them is its own change.
+
 ## AI Providers (`ai/` package)
 
 This plugin owns **all** AI provider configuration. The host has none: its
@@ -404,12 +452,21 @@ guard - a member newer than the floor would throw `NoSuchMethodError` there and 
 *whole* plugin down, not just the AI section. `cacheProvider` is inside the guard and so is
 unconstrained.
 
-The audit also has to cover the UI kit, not just `PluginContext`: this feature added
+The audit also has to cover the UI kit, not just `PluginContext`: the AI section added
 first-time uses of `BossSection`, `BossCard`, `BossTextField`, `BossPrimaryButton` and
-`BossSecondaryButton` (only `BossTheme`/`BossThemeColors` were used before). Containment holds
+`BossSecondaryButton` (only `BossTheme`/`BossThemeColors` were used before). Containment held
 because `AiProvidersPanel` is reachable only from `LlmProviderSettingsApiImpl`, so those
-symbols never load on a pre-1.0.71 host - but that stops being true the moment the panel is
-rendered from `SecretManagerContent`, which is exactly why it is written down here.
+symbols never loaded on a pre-1.0.71 host - and the paragraph warned that this "stops being
+true the moment the panel is rendered from `SecretManagerContent`".
+
+**That has now happened, deliberately.** The design pass renders `BossCard`, `BossSearchBar`,
+`BossBadge`, `BossTabIndicator` and `BossEmptyState` from `SecretManagerContent` and
+`SharedSecretsSection`, i.e. on the always-taken path, so a host missing any of them throws
+`NoSuchMethodError` where nothing can catch it. All five were therefore checked **against the
+declared floor rather than the local jar** - `git show v1.0.73:.../BossComponents.kt` in the api
+checkout - along with `BossThemeColors.TextMuted`, `AccentColor` and `BorderColor`. Reading the
+sibling checkout's newest jar (1.0.84 at the time) would have proved nothing about 1.0.73. The
+rule for the next component: check the tag, not the jar, and add it here.
 
 `LlmProviderSettingsApiImpl`, `BrokeredCredentialBridge` and `GatewayCliEngineAccess` are the
 **only** files referencing api symbols added after this plugin's declared floor
