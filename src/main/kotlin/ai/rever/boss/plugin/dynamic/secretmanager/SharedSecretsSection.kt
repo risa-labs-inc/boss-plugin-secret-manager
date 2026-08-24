@@ -2,11 +2,10 @@ package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.SecretEntryWithSharingData
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
-import ai.rever.boss.plugin.ui.BossCard
-import ai.rever.boss.plugin.ui.BossEmptyState
-import ai.rever.boss.plugin.ui.BossSearchBar
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
+import ai.rever.boss.plugin.ui.BossCard
+import ai.rever.boss.plugin.ui.BossEmptyState
 import ai.rever.boss.plugin.ui.BossThemeColors
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -30,14 +29,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
-import androidx.compose.material.Card
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Divider
 import androidx.compose.material.Icon
-import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedButton
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
@@ -68,13 +64,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -99,9 +93,10 @@ internal fun SharedSecretsSection(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
-        SharedSecretSearchBar(
+        PanelSearchField(
             query = state.searchQuery,
             onQueryChange = onSearch,
+            placeholder = "Filter shared secrets",
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
         )
 
@@ -208,22 +203,6 @@ private fun sharedSecretsSummary(state: SharedSecretsState): String =
         val fetch = state.lastLoadDurationMs?.let { " · last fetch ${formatFetchDuration(it)}" } ?: ""
         found + scanned + fetch
     }
-
-@Composable
-private fun SharedSecretSearchBar(
-    query: String,
-    onQueryChange: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    // The same shared field the managed section uses. These were two hand-rolled copies of one
-    // control, already differing in padding and placeholder colour.
-    BossSearchBar(
-        query = query,
-        onQueryChange = onQueryChange,
-        modifier = modifier.height(32.dp),
-        placeholder = "Filter shared secrets",
-    )
-}
 
 /**
  * [listState] is hoisted, not remembered here, for the same reason `SecretsSection`'s is: this
@@ -420,7 +399,9 @@ private fun SharedSecretCard(
                 ) {
                     if (isApiKey) {
                         SharedSecretBadge(
-                            label = "API Key",
+                            // Upper-cased like the access level directly below it: both are
+                            // `label`, and half a column in title case is not a second register.
+                            label = "API KEY",
                             icon = Icons.Default.Key,
                             color = BossThemeColors.WarningColor,
                         )
@@ -550,12 +531,14 @@ private fun QuietCopyButton(
         border = BorderStroke(1.dp, BossThemeColors.BorderColor),
         colors =
             ButtonDefaults.outlinedButtonColors(
-                backgroundColor = androidx.compose.ui.graphics.Color.Transparent,
+                backgroundColor = Color.Transparent,
                 contentColor = BossThemeColors.TextSecondary,
             ),
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
     ) {
-        Icon(Icons.Default.ContentCopy, contentDescription = label, modifier = Modifier.size(13.dp))
+        // null, not `label`: the Text beside it already carries that, and a described icon
+        // makes a screen reader say it twice.
+        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(13.dp))
         Spacer(Modifier.width(6.dp))
         Text(label, style = SecretPanelType.meta)
     }
@@ -578,13 +561,15 @@ private fun SharedSecretBadge(
 ) {
     Surface(shape = RoundedCornerShape(4.dp), color = color.copy(alpha = 0.12f)) {
         Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+            // Asymmetric on purpose: `label`'s 1.5sp tracking is applied after the final glyph
+            // as well, so 6dp on both sides renders as 6 left and 7.5 right.
+            modifier = Modifier.padding(start = 6.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 icon,
-                contentDescription = label,
+                contentDescription = null,
                 tint = color,
                 modifier = Modifier.size(11.dp),
             )
@@ -745,7 +730,7 @@ private fun SharedSecretsErrorView(
             verticalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier.padding(32.dp),
         ) {
-            Text("Error", color = BossThemeColors.ErrorColor, style = SecretPanelType.title, fontWeight = FontWeight.Bold)
+            Text("Error", color = BossThemeColors.ErrorColor, style = SecretPanelType.title)
             Text(message, color = BossThemeColors.TextSecondary, style = SecretPanelType.bodyStrong)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -775,38 +760,45 @@ private fun SharedSecretsEmptyView(
     state: SharedSecretsState,
     onLoadMore: () -> Unit,
 ) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(24.dp),
-        ) {
-            if (state.searchQuery.isNotBlank()) {
+    // The Box is what centres this in the section; `BossEmptyState` handles its own internal
+    // spacing but not that. The Column is only here for the one branch with a second child.
+    Box(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            state.searchQuery.isNotBlank() ->
                 BossEmptyState(
                     icon = Icons.Default.Search,
                     message = "No results",
                     description = "Try a different filter",
                 )
-            } else if (state.hasMore) {
-                BossEmptyState(
-                    icon = Icons.Default.Share,
-                    message = "Nothing shared with you yet",
-                    description = "None in the ${state.rowsScanned} secrets scanned so far",
-                )
-                TextButton(onClick = onLoadMore, enabled = !state.isLoadingMore) {
-                    Text(
-                        if (state.isLoadingMore) "Scanning" else "Keep looking",
-                        color = BossThemeColors.AccentColor,
-                        style = SecretPanelType.body,
+
+            state.hasMore ->
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    BossEmptyState(
+                        icon = Icons.Default.Share,
+                        message = "Nothing shared with you yet",
+                        description = "None in the ${state.rowsScanned} secrets scanned so far",
                     )
+                    TextButton(onClick = onLoadMore, enabled = !state.isLoadingMore) {
+                        Text(
+                            if (state.isLoadingMore) "Scanning" else "Keep looking",
+                            color = BossThemeColors.AccentColor,
+                            style = SecretPanelType.body,
+                        )
+                    }
                 }
-            } else {
+
+            else ->
                 BossEmptyState(
                     icon = Icons.Default.Share,
                     message = "Nothing shared with you",
                     description = "Secrets other people share with you show up here",
                 )
-            }
         }
     }
 }

@@ -1,16 +1,20 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
-import ai.rever.boss.plugin.ui.BossAlertDialog
-import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.api.*
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
-import ai.rever.boss.plugin.ui.BossCard
+import ai.rever.boss.plugin.ui.BossAlertDialog
 import ai.rever.boss.plugin.ui.BossBadge
+import ai.rever.boss.plugin.ui.BossCard
+import ai.rever.boss.plugin.ui.BossDialog
+import ai.rever.boss.plugin.ui.BossEmptyState
 import ai.rever.boss.plugin.ui.BossSearchBar
 import ai.rever.boss.plugin.ui.BossTabIndicator
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.ui.BossThemeColors
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +24,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.*
@@ -28,22 +34,20 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.BorderStroke
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
 
 /**
  * The two halves of the panel.
@@ -112,8 +116,7 @@ private fun NoProviderMessage() {
             Text(
                 "Secret Manager",
                 color = BossThemeColors.TextPrimary,
-                style = SecretPanelType.title,
-                fontWeight = FontWeight.Bold
+                style = SecretPanelType.title
             )
             Text(
                 "Secret provider not available",
@@ -174,7 +177,6 @@ private fun SecretManagerView(
                 // allShared, not the filtered view: typing in the shared section's filter
                 // would otherwise make the tab report "(1)" while forty are loaded.
                 sharedCount = sharedState.allShared.size,
-                hasLoadedShared = sharedState.hasLoadedOnce,
                 onSelectSection = onSelectSection,
             ) {
                 // Refresh button. Refetches whichever section is on screen - the two read
@@ -468,9 +470,10 @@ private fun SecretsSection(
 
     Column(modifier = modifier.fillMaxSize()) {
         // Search bar
-        SearchBar(
+        PanelSearchField(
             query = state.searchQuery,
             onQueryChange = { viewModel.searchSecrets(it) },
+            placeholder = "Search secrets",
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
         )
 
@@ -577,7 +580,6 @@ private fun SecretsSection(
 private fun SectionTabs(
     selectedSection: SecretPanelSection,
     sharedCount: Int,
-    hasLoadedShared: Boolean,
     onSelectSection: (SecretPanelSection) -> Unit,
     actions: @Composable () -> Unit,
 ) {
@@ -586,7 +588,7 @@ private fun SectionTabs(
         // tabs take their natural width rather than half each: an underline stretched across
         // half a sidebar stops reading as "this word is selected".
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().selectableGroup(),
             verticalAlignment = Alignment.Bottom,
         ) {
             SectionTab(
@@ -599,7 +601,11 @@ private fun SectionTabs(
                 label = "SHARED",
                 selected = selectedSection == SecretPanelSection.SHARED_WITH_ME,
                 onClick = { onSelectSection(SecretPanelSection.SHARED_WITH_ME) },
-                badge = if (hasLoadedShared) sharedCount else null,
+                // Straight through. There was a `hasLoadedShared` guard here to keep a `0` off
+                // the tab before anything had been fetched, but `BossBadge` declines to draw a
+                // zero itself (`if (count > 0)`), so the flag decided nothing and the local
+                // `badge > 0` check restated the component's own rule.
+                badge = sharedCount,
             )
             Spacer(Modifier.weight(1f))
             Row(
@@ -626,15 +632,21 @@ private fun SectionTab(
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    badge: Int? = null,
+    badge: Int = 0,
 ) {
     // `IntrinsicSize.Max` is load-bearing, not tidying. The indicator is `fillMaxWidth()`, and
     // in an unweighted Row that resolves to the whole *remaining* width - so the first tab ate
     // the row, pushed the second one off the edge and took the actions with it. Constraining the
     // Column to its content's natural width makes the underline measure the label. (The tabs used
     // to be `weight(1f)` each, which bounded it by accident and is why this only broke now.)
+    // `selectable` rather than `clickable`: Material's `Tab` supplied the role and the selected
+    // state to the accessibility tree, and hand-building the strip dropped both. A screen reader
+    // otherwise announces two unlabelled buttons and never says which one is current.
     Column(
-        modifier = modifier.width(IntrinsicSize.Max).clickable(onClick = onClick),
+        modifier =
+            modifier
+                .width(IntrinsicSize.Max)
+                .selectable(selected = selected, onClick = onClick, role = Role.Tab),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(
@@ -649,33 +661,69 @@ private fun SectionTab(
                 color = if (selected) BossThemeColors.AccentColor else BossThemeColors.TextSecondary,
                 maxLines = 1,
             )
-            if (badge != null && badge > 0) BossBadge(count = badge)
+            BossBadge(count = badge)
         }
-        // Reserve the indicator's height either way, so selecting a tab does not shift the row.
-        if (selected) {
-            BossTabIndicator(modifier = Modifier.fillMaxWidth())
-        } else {
-            Box(modifier = Modifier.fillMaxWidth().height(3.dp))
-        }
+        // Always rendered, transparent when unselected: selecting a tab must not shift the row,
+        // and the previous `else Box(height(3.dp))` hardcoded a second copy of the indicator's
+        // height - so a host that changed it would have made this row jump.
+        BossTabIndicator(
+            modifier = Modifier.fillMaxWidth().alpha(if (selected) 1f else 0f),
+        )
     }
 }
 
+/**
+ * The panel's search field: `BossSearchBar` plus the clear button it does not carry.
+ *
+ * `BossSearchBar` is the same field the rest of BOSS paints (surface fill, hairline border, 14dp
+ * muted magnifier, accent caret), and this panel had **two** hand-rolled copies of it that had
+ * already drifted apart in padding and placeholder colour. Now there is one, used by both
+ * sections, which is what the two wrappers this replaced each claimed to be.
+ *
+ * **The clear button is not decoration.** The managed section's hand-rolled field had one and
+ * `BossSearchBar` does not, so adopting the component on its own silently removed the only
+ * pointer-driven way to reset a filter - a control lost inside a change that was supposed to be
+ * about type and colour. It goes beside the field rather than inside it, because the component
+ * gives no slot within its border and overlaying one would put the button on top of the tail of
+ * a long query.
+ *
+ * **It takes the space only when there is something to clear.** Reserving the slot permanently
+ * was the first version and left the field ending 26dp short of the cards below it - a visible
+ * step in the panel's left-to-right edge, in the state the user is looking at almost all the
+ * time. Trading that for a one-off narrowing on the first keystroke is the right way round: the
+ * resting state is the one that has to line up, and while typing the eye is on the text.
+ *
+ * The shared section gains the button it never had, since two search fields one tab apart
+ * behaving differently is the same incoherence in a different place.
+ */
 @Composable
-private fun SearchBar(
+internal fun PanelSearchField(
     query: String,
     onQueryChange: (String) -> Unit,
+    placeholder: String,
     modifier: Modifier = Modifier,
 ) {
-    // BossSearchBar, not a local BasicTextField: it is the same search field the rest of BOSS
-    // paints (surface fill, hairline border, 14dp muted magnifier, accent caret), and the panel
-    // had two hand-rolled copies of it that had already drifted apart in padding and placeholder
-    // colour. It sizes to its parent, so the height belongs here.
-    BossSearchBar(
-        query = query,
-        onQueryChange = onQueryChange,
-        modifier = modifier.height(32.dp),
-        placeholder = "Search secrets",
-    )
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BossSearchBar(
+            query = query,
+            onQueryChange = onQueryChange,
+            modifier = Modifier.weight(1f).height(32.dp),
+            placeholder = placeholder,
+        )
+        if (query.isNotEmpty()) {
+            IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(26.dp)) {
+                Icon(
+                    Icons.Default.Clear,
+                    contentDescription = "Clear search",
+                    tint = BossThemeColors.TextSecondary,
+                    modifier = Modifier.size(15.dp),
+                )
+            }
+        }
+    }
 }
 
 private fun formatLoadDuration(ms: Long): String = when {
@@ -759,32 +807,27 @@ private fun EmptyView(
     searchQuery: String,
     onAddSecret: () -> Unit
 ) {
+    // `BossEmptyState` here too, not just in the shared section. Half-converting it left the two
+    // sections hand-rolling and importing the same empty state one tab apart, with the copy for
+    // the identical situation already drifting ("No results found" against "No results").
+    // `BossEmptyState` has no action slot, so the button sits under it in the same Column.
     Box(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.padding(24.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Icon(
-                Icons.Default.Lock,
-                contentDescription = null,
-                tint = BossThemeColors.TextSecondary,
-                modifier = Modifier.size(48.dp)
-            )
-            Text(
-                if (searchQuery.isBlank()) "No secrets yet" else "No results found",
-                color = BossThemeColors.TextPrimary,
-                style = SecretPanelType.bodyStrong,
-                fontWeight = FontWeight.Medium
-            )
-            Text(
-                if (searchQuery.isBlank()) "Add your first secret to get started"
-                else "Try a different search term",
-                color = BossThemeColors.TextSecondary,
-                style = SecretPanelType.meta
+            BossEmptyState(
+                icon = if (searchQuery.isBlank()) Icons.Default.Lock else Icons.Default.Search,
+                message = if (searchQuery.isBlank()) "No secrets yet" else "No results",
+                // Each description names its own control: this section searches the server,
+                // the shared one filters what it already has, and telling the user to change
+                // a "filter" when the box says Search sends them looking for one.
+                description =
+                    if (searchQuery.isBlank()) "Add your first secret to get started"
+                    else "Try a different search term"
             )
             if (searchQuery.isBlank()) {
                 Button(
@@ -793,7 +836,7 @@ private fun EmptyView(
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Add Secret", color = BossThemeColors.TextPrimary, style = SecretPanelType.meta)
+                    Text("Add secret", color = BossThemeColors.TextPrimary, style = SecretPanelType.meta)
                 }
             }
         }
@@ -848,8 +891,7 @@ private fun SecretCard(
                     Text(
                         text = "AI provider${if (aiProviderLabel.isNotBlank()) " · $aiProviderLabel" else ""}",
                         color = BossThemeColors.TextPrimary,
-                        style = SecretPanelType.meta,
-                        fontWeight = FontWeight.Medium,
+                        style = SecretPanelType.metaStrong,
                         modifier = Modifier.weight(1f)
                     )
                     Text(
@@ -1116,8 +1158,7 @@ private fun SecretCard(
                                 Text(
                                     text = "Recovery Codes:",
                                     color = BossThemeColors.TextSecondary,
-                                    style = SecretPanelType.meta,
-                                    fontWeight = FontWeight.Bold
+                                    style = SecretPanelType.metaStrong
                                 )
                                 metadata.recoveryCodes.forEach { code ->
                                     Text(
@@ -1197,8 +1238,7 @@ private fun CreateSecretDialog(
                 Text(
                     "Add New Secret",
                     color = BossThemeColors.TextPrimary,
-                    style = SecretPanelType.title,
-                    fontWeight = FontWeight.Bold
+                    style = SecretPanelType.title
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1332,8 +1372,7 @@ private fun EditSecretDialog(
                 Text(
                     "Edit Secret",
                     color = BossThemeColors.TextPrimary,
-                    style = SecretPanelType.title,
-                    fontWeight = FontWeight.Bold
+                    style = SecretPanelType.title
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1538,8 +1577,7 @@ private fun ShareSecretDialog(
                 Text(
                     "Share Secret",
                     color = BossThemeColors.TextPrimary,
-                    style = SecretPanelType.title,
-                    fontWeight = FontWeight.Bold
+                    style = SecretPanelType.title
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -1557,8 +1595,7 @@ private fun ShareSecretDialog(
                     Text(
                         "Currently shared with:",
                         color = BossThemeColors.TextPrimary,
-                        style = SecretPanelType.meta,
-                        fontWeight = FontWeight.Medium
+                        style = SecretPanelType.metaStrong
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -1921,8 +1958,7 @@ private fun CreateApiKeyDialog(
                         Text(
                             if (isSuccess) "API Key Created" else "Create API Key",
                             color = BossThemeColors.TextPrimary,
-                            style = SecretPanelType.title,
-                            fontWeight = FontWeight.Bold
+                            style = SecretPanelType.title
                         )
                     }
                 }
@@ -1949,8 +1985,7 @@ private fun CreateApiKeyDialog(
                         Text(
                             "API Key Securely Stored",
                             color = BossThemeColors.TextPrimary,
-                            style = SecretPanelType.bodyStrong,
-                            fontWeight = FontWeight.Medium
+                            style = SecretPanelType.bodyStrong
                         )
                         Text(
                             "Your API key has been automatically saved to your secrets.",
@@ -2214,8 +2249,7 @@ private fun ScopeCheckbox(
             Text(
                 label,
                 color = BossThemeColors.TextPrimary,
-                style = SecretPanelType.meta,
-                fontWeight = FontWeight.Medium
+                style = SecretPanelType.metaStrong
             )
             Text(
                 description,
@@ -2265,8 +2299,7 @@ private fun ApiKeysListDialog(
                         Text(
                             "Plugin Store API Keys",
                             color = BossThemeColors.TextPrimary,
-                            style = SecretPanelType.title,
-                            fontWeight = FontWeight.Bold
+                            style = SecretPanelType.title
                         )
                     }
                     IconButton(
@@ -2448,8 +2481,7 @@ private fun ApiKeyCard(
                     Text(
                         apiKey.name,
                         color = BossThemeColors.TextPrimary,
-                        style = SecretPanelType.bodyStrong,
-                        fontWeight = FontWeight.Medium
+                        style = SecretPanelType.bodyStrong
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(

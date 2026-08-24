@@ -33,7 +33,14 @@ import androidx.compose.ui.unit.sp
  * pointed at `BossTheme.type`.
  */
 internal object SecretPanelType {
-    /** Section headings. Matches `BossSection`'s own title so the two can sit together. */
+    /**
+     * Section and dialog headings. Matches `BossSection`'s own title so the two can sit together.
+     *
+     * Every call site used to pass `fontWeight = FontWeight.Bold` straight after this, so the
+     * weight declared here never reached the screen and the panel's headings were a step heavier
+     * than the host's. The overrides are gone; if a heading needs to be heavier than the system's,
+     * that is a change to this token, not to one `Text`.
+     */
     val title = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
 
     /** The primary line of a card - the thing being named. */
@@ -47,6 +54,16 @@ internal object SecretPanelType {
 
     /** Supporting text: a second line, a hint, a dialog's explanation. */
     val meta = TextStyle(fontSize = 12.sp)
+
+    /**
+     * [meta] where it labels something rather than saying it - "Recovery codes:", "Currently
+     * shared with:", a field's name above its value.
+     *
+     * It exists so those four sites stop carrying an inline `fontWeight`. Weight is part of a
+     * type scale, and a scale with a named size but a hand-set weight at every call site is the
+     * 118-loose-`fontSize` problem again in a slower form.
+     */
+    val metaStrong = TextStyle(fontWeight = FontWeight.Medium, fontSize = 12.sp)
 
     /**
      * The quietest sans register: a timestamp, a field hint, a warning under a form. Matches

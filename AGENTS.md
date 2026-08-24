@@ -196,6 +196,52 @@ The two "Create API Key" buttons still hardcode `Color.Black` labels on a `Warni
 `BossPrimaryButton` is the right answer and is present at the floor, but those buttons carry an
 inline spinner and enable logic, so converting them is its own change.
 
+**Adopting a host component can delete a control, silently.** `BossSearchBar` has no clear
+button and the field it replaced did, so the first pass removed the only pointer-driven way to
+reset a filter - inside a change that was supposed to be about type and colour. `PanelSearchField`
+wraps the component and puts the button back beside it (there is no slot inside its border, and an
+overlay would sit on the tail of a long query). It takes the space only when there is something to
+clear: reserving the slot permanently left the field ending 26dp short of the cards below it, a
+visible step in the panel's edge in the state the user looks at almost all the time. Both sections
+use it, which is what the two wrappers it replaced each claimed to be. **Read what a component
+does before swapping a hand-rolled one for it**, and diff the controls, not just the pixels.
+
+**`BossBadge` declines to draw a zero itself** (`if (count > 0)`). The tab strip carried a
+`hasLoadedShared` flag plus a local `badge > 0` check to keep a `0` off the tab before anything
+was fetched; both restated the component's own rule, so the flag decided nothing. The count goes
+straight through now.
+
+**The unselected tab renders the indicator at `alpha(0f)`**, rather than an `else` branch with a
+matching `height(3.dp)`. That constant was a second copy of the host component's height, so a host
+that changed it would have made the row jump when a tab was selected.
+
+**The tabs are `selectable(role = Role.Tab)` inside a `selectableGroup()`.** Material's `Tab`
+supplied the role and the selected state to the accessibility tree, and hand-building the strip
+dropped both - a screen reader otherwise announces two unlabelled buttons and never says which is
+current. Same reason `QuietCopyButton` and `SharedSecretBadge` pass `contentDescription = null`:
+a glyph beside its own label makes the label read twice.
+
+**Weight belongs to the token, not the call site.** `SecretPanelType.title` declares SemiBold and
+all seven call sites passed `fontWeight = FontWeight.Bold` straight after it, so the token's weight
+never reached the screen and the panel's headings sat a step heavier than the host's. Three more
+sites paired `bodyStrong` with `fontWeight = Medium`, which it already is. The four that wanted a
+genuinely heavier `meta` got a token (`metaStrong`) instead of an inline override - a scale with
+named sizes and hand-set weights is the same problem one field over.
+
+**`verifyNoLooseFontSizes()` in `build.gradle.kts` pins this at build time**, over the two panel
+files and `ai/AiProvidersPanel.kt`. Nothing here renders in the test suite, so no test can watch
+the scale erode: a contributor adding one `fontSize = 13.sp` gets a green build and the drift is
+invisible until it is 118 again. Same class of guard as the `javap` `$stable` check and the
+plugin.json stamp assertion. It fails on a **missing** file too, so a rename cannot quietly retire
+it. Mutation-verified: putting one literal back into `AiProvidersPanel` fails the build with that
+file and line. Note that a mutation has to *compile* to reach the guard - the first attempt put a
+literal into a file whose `sp` import the same pass had removed, so it failed at compile and proved
+nothing.
+
+`ai/AiProvidersPanel.kt` is on the scale too (24 literals). It is the one surface where a user sees
+this plugin's chrome inside the host's own Settings window, so it is where a disagreement with the
+host shows most.
+
 ## AI Providers (`ai/` package)
 
 This plugin owns **all** AI provider configuration. The host has none: its

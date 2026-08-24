@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
+import ai.rever.boss.plugin.dynamic.secretmanager.SecretPanelType
 import ai.rever.boss.plugin.ui.BossCard
 import ai.rever.boss.plugin.ui.BossPrimaryButton
 import ai.rever.boss.plugin.ui.BossSecondaryButton
@@ -192,15 +193,15 @@ private fun CliEngineRow(
                     ),
         )
         Column(modifier = Modifier.weight(1f)) {
-            Text(engine.displayName, fontSize = 13.sp, color = BossThemeColors.TextPrimary)
+            Text(engine.displayName, style = SecretPanelType.body, color = BossThemeColors.TextPrimary)
             Text(
                 text = healthLine(engine, health),
-                fontSize = 11.sp,
+                style = SecretPanelType.caption,
                 color = BossThemeColors.TextSecondary,
             )
         }
         if (isActive) {
-            Text("Active", fontSize = 11.sp, color = BossThemeColors.AccentColor)
+            Text("Active", style = SecretPanelType.caption, color = BossThemeColors.AccentColor)
         }
     }
 }
@@ -250,20 +251,20 @@ private fun ProviderRow(
         StatusDot(connection.source)
         Text(
             text = descriptor.displayName,
-            fontSize = 13.sp,
+            style = SecretPanelType.body,
             color = BossThemeColors.TextPrimary,
             modifier = Modifier.weight(1f),
         )
         if (isActive) {
             Text(
                 text = "Active",
-                fontSize = 11.sp,
+                style = SecretPanelType.caption,
                 color = BossThemeColors.AccentColor,
             )
         }
         Text(
             text = statusLabel(connection),
-            fontSize = 11.sp,
+            style = SecretPanelType.caption,
             color = BossThemeColors.TextMuted,
         )
     }
@@ -319,7 +320,7 @@ private fun ProviderDetail(
                                 "Sign in to BOSS with an account that has access. This provider " +
                                     "has no API key to enter."
                             },
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
                     BossSecondaryButton(
@@ -333,7 +334,7 @@ private fun ProviderDetail(
                             "This key comes from the environment" +
                                 (connection.label?.let { " ($it)" } ?: "") +
                                 " and is read-only here. Unset it to manage the key in BOSS.",
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
                 } else {
@@ -381,7 +382,7 @@ private fun ProviderDetail(
                 if (descriptor.envVarNames.isNotEmpty() && !fromEnvironment && !brokered) {
                     Text(
                         text = "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
-                        fontSize = 11.sp,
+                        style = SecretPanelType.caption,
                         color = BossThemeColors.TextMuted,
                     )
                 }
@@ -433,7 +434,7 @@ private fun ModelSection(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = "Model",
-                    fontSize = 13.sp,
+                    style = SecretPanelType.body,
                     fontWeight = FontWeight.Medium,
                     color = BossThemeColors.TextPrimary,
                     modifier = Modifier.weight(1f),
@@ -469,7 +470,7 @@ private fun ModelSection(
                         text =
                             "${descriptor.displayName} has no model list to query — " +
                                 "enter the endpoint and the model id it expects.",
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
                     ManualEndpointAndModel(
@@ -483,14 +484,14 @@ private fun ModelSection(
                 catalog is CatalogState.NotConfigured ->
                     Text(
                         text = "Add an API key to load ${descriptor.displayName}'s models.",
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
 
                 catalog is CatalogState.Loading ->
                     Text(
                         text = "Loading models from ${descriptor.displayName}…",
-                        fontSize = 12.sp,
+                        style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )
 
@@ -505,7 +506,7 @@ private fun ModelSection(
                     if (catalog is CatalogState.Failed) {
                         Text(
                             text = catalog.message,
-                            fontSize = 12.sp,
+                            style = SecretPanelType.meta,
                             color = BossThemeColors.ErrorColor,
                         )
                     }
@@ -513,7 +514,7 @@ private fun ModelSection(
                     if (loaded == null) {
                         Text(
                             text = "No models available yet.",
-                            fontSize = 12.sp,
+                            style = SecretPanelType.meta,
                             color = BossThemeColors.TextSecondary,
                         )
                     } else {
@@ -566,7 +567,7 @@ private fun ModelPicker(
         ) {
             Text(
                 text = selected?.displayName ?: "Select a model",
-                fontSize = 13.sp,
+                style = SecretPanelType.body,
                 color = if (selected == null) BossThemeColors.TextMuted else BossThemeColors.TextPrimary,
                 modifier = Modifier.weight(1f),
             )
@@ -593,13 +594,13 @@ private fun ModelPicker(
                     Column {
                         Text(
                             text = model.displayName,
-                            fontSize = 13.sp,
+                            style = SecretPanelType.body,
                             color = BossThemeColors.TextPrimary,
                         )
                         if (model.displayName != model.id) {
                             Text(
                                 text = model.id,
-                                fontSize = 10.sp,
+                                style = SecretPanelType.micro,
                                 fontFamily = FontFamily.Monospace,
                                 color = BossThemeColors.TextMuted,
                             )
@@ -629,7 +630,7 @@ private fun FreshnessLine(loaded: CatalogState.Loaded) {
     val origin = if (loaded.fromCache) "cached" else "live"
     Text(
         text = "${loaded.models.size} models · $origin · updated $age",
-        fontSize = 11.sp,
+        style = SecretPanelType.caption,
         color = BossThemeColors.TextMuted,
     )
 }
@@ -646,7 +647,7 @@ private fun ModelFacts(model: AiModel) {
     if (facts.isEmpty()) return
     Text(
         text = facts.joinToString(" · "),
-        fontSize = 11.sp,
+        style = SecretPanelType.caption,
         color = BossThemeColors.TextSecondary,
     )
 }
@@ -671,7 +672,7 @@ private fun LegacyImportBanner(
         ) {
             Text(
                 text = "Import ${offer.providerIds.size} key(s) from previous settings",
-                fontSize = 13.sp,
+                style = SecretPanelType.body,
                 fontWeight = FontWeight.Medium,
                 color = BossThemeColors.TextPrimary,
             )
@@ -688,7 +689,7 @@ private fun LegacyImportBanner(
                         " yourself once you've confirmed everything works. " +
                         "Model choices are not imported — pick from each provider's current " +
                         "list instead. A custom provider's endpoint has to be re-entered too.",
-                fontSize = 12.sp,
+                style = SecretPanelType.meta,
                 color = BossThemeColors.TextSecondary,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -713,7 +714,7 @@ private fun MessageBanner(
                 .border(1.dp, tint.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
-        Text(text = text, fontSize = 12.sp, color = BossThemeColors.TextPrimary)
+        Text(text = text, style = SecretPanelType.meta, color = BossThemeColors.TextPrimary)
     }
 }
 
@@ -772,7 +773,7 @@ private fun ManualEndpointAndModel(
         )
         Text(
             text = "Saved when you click away from a field.",
-            fontSize = 11.sp,
+            style = SecretPanelType.caption,
             color = BossThemeColors.TextMuted,
         )
     }
