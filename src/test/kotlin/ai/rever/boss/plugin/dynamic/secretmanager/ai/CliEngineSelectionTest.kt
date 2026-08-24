@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,6 +44,11 @@ class CliEngineSelectionTest {
             mapOf("claude" to CliEngineHealth.Ready("2.1.0"), "codex" to CliEngineHealth.NotInstalled("brew install codex")),
         /** Engines this fake will refuse, mirroring a gateway that does not have one. */
         private val refuse: Set<String> = emptySet(),
+        /**
+         * Held until the test releases it, so "the probe has not answered yet" is a state a test
+         * can be in rather than a race it has to win.
+         */
+        private val healthGate: CompletableDeferred<Unit>? = null,
     ) : CliEngineAccess {
         val selections = mutableListOf<String?>()
         var selected: String? = null
@@ -50,8 +56,10 @@ class CliEngineSelectionTest {
 
         override fun engines(): List<CliEngineInfo> = engines
 
-        override suspend fun health(engineId: String): CliEngineHealth =
-            health[engineId] ?: CliEngineHealth.Unknown
+        override suspend fun health(engineId: String): CliEngineHealth {
+            healthGate?.await()
+            return health[engineId] ?: CliEngineHealth.Unknown
+        }
 
         override fun selectedEngineId(): String? = selected
 
@@ -110,12 +118,27 @@ class CliEngineSelectionTest {
 
     @Test
     fun anUnprobedEngineReadsAsCheckingRatherThanMissing() = runBlocking {
-        // The row renders before its probe answers, and "not installed" would be a claim
-        // rather than a wait - the difference between a user waiting a moment and a user
-        // going to install something they already have.
-        val vm = viewModelWith(FakeCliEngines())
+        // The row renders before its probe answers, and "not installed" would be a claim rather
+        // than a wait - the difference between a user waiting a moment and a user going to
+        // install something they already have.
+        //
+        // The probe is **held** rather than merely read quickly. This test used to construct the
+        // ViewModel and read `state.value` on the next line, which raced `init`'s
+        // `refreshCliEngines()` launch on `Dispatchers.Default`: it passed only while the test
+        // thread happened to win, and it eventually lost on CI and failed a release. Gating the
+        // fake's `health()` makes the window the assertion needs the one thing the test controls.
+        val gate = CompletableDeferred<Unit>()
+        val vm = viewModelWith(FakeCliEngines(healthGate = gate))
 
+        // The list is in - so the probes have definitely started - and none can have answered.
+        vm.loadedEngines()
         assertEquals(CliEngineHealth.Unknown, vm.state.value.cliHealthOf("claude"))
+
+        // And once a probe does answer, the row stops saying Unknown. Without this the test
+        // would still pass against a ViewModel that never probed at all.
+        gate.complete(Unit)
+        withTimeout(TIMEOUT_MS) { vm.state.first { it.cliHealth.containsKey("claude") } }
+        assertEquals(CliEngineHealth.Ready("2.1.0"), vm.state.value.cliHealthOf("claude"))
     }
 
     @Test

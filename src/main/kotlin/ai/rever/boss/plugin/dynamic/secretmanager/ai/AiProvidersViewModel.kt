@@ -163,9 +163,16 @@ class AiProvidersViewModel(
         // once here rather than per composition.
         refreshCliEngines()
 
-        // Cheap enough to do on construction, and it has to happen before the section is first
-        // looked at: the notice's absence is what a user with the gateway should see, and its
-        // presence is the only thing that tells a user without it why there is no CLI section.
+        // Has to happen before the section is first looked at: the notice's absence is what a
+        // user with the gateway should see, and its presence is the only thing that tells a user
+        // without it why there is no CLI section.
+        //
+        // Launched, not called inline, even though the work is one in-memory list read. This
+        // ViewModel is constructed from inside `register()`, and `getLoadedPlugins()` asks the
+        // plugin loader about its own registry while that loader is part-way through loading this
+        // plugin. Doing it synchronously on the registration thread is the shape that deadlocks if
+        // the host ever holds a lock across `register()`, for a notice that is allowed to arrive a
+        // beat late anyway.
         checkGateway()
 
         // Re-read credentials whenever the store is invalidated — which is what the secret
@@ -413,8 +420,10 @@ class AiProvidersViewModel(
      */
     fun checkGateway() {
         val presence = gateway ?: return
-        val notice = runCatching { presence.notice() }.getOrDefault(GatewayNotice.NONE)
-        _state.update { it.copy(gatewayNotice = notice) }
+        scope.launch {
+            val notice = runCatching { presence.notice() }.getOrDefault(GatewayNotice.NONE)
+            _state.update { it.copy(gatewayNotice = notice) }
+        }
     }
 
     /**

@@ -299,6 +299,14 @@ section down too.
 `LlmProviderSettingsAPI` (1.0.71) the section cannot render at all, and a tab whose only content is
 "not available here" is worse than one tab fewer. `showAiSection` is that check.
 
+**`checkGateway()` launches; it does not read the registry on the registration thread.** The work
+is one in-memory list read, but `getLoadedPlugins()` asks the plugin loader about its own registry
+while that loader is part-way through loading *this* plugin - the shape that deadlocks if the host
+ever holds a lock across `register()`. The notice is allowed to arrive a beat late, which is also
+why `gatewayNotice` starts at `NONE` rather than at a "checking" state: a section that flashes
+"install the gateway" for one frame on every open, for the many users who have it, is a worse lie
+than a notice that appears late for the few who do not.
+
 **Refresh means three things in this section.** `refreshConnections()`, `checkGateway()` and
 `refreshCliEngines()`, because all three can go stale while the panel sits open: a key edited in the
 Secrets section next door, a gateway installed in the Toolbox, a CLI signed into in a terminal.
@@ -880,6 +888,20 @@ an env-supplied key back to disk, updating rather than duplicating a provider en
 past the first page, and the cache honouring `invalidate()`. `ModelCatalogClientPagingTest`
 uses a response *queue* rather than one fixed body, which is what makes cursor-following, the
 `MAX_PAGES` bound and the xAI primary-then-fallback path reachable at all.
+
+**A test that races the ViewModel's own `init` is a test that eventually fails a release.**
+`anUnprobedEngineReadsAsCheckingRatherThanMissing` constructed the ViewModel and read
+`state.value` on the next line, racing `init`'s `refreshCliEngines()` launch on
+`Dispatchers.Default`. It passed for as long as the test thread happened to win - then adding one
+more call to `init` widened the window, CI lost the race, and it failed **after** the merge, in the
+Release workflow, where the version had already been bumped. Measured rather than guessed: the old
+form fails about 2 runs in 20 locally, the gated form 0 in 20.
+
+The fix is a fake whose `health()` awaits a `CompletableDeferred` the test controls, so "the probe
+has not answered yet" is a state the test is *in* rather than a window it has to hit. It then
+releases the gate and asserts the row updates - without that second half the test would pass
+against a ViewModel that never probed at all. Any new test here that asserts on a value `init`
+fills in asynchronously needs the same treatment; `loadedEngines()` exists for the other direction.
 
 Two suites were validated against deliberate mutations, because a test that passes
 unconditionally is indistinguishable from no test:
