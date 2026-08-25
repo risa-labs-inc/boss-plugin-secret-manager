@@ -64,8 +64,6 @@ class SecretManagerComponent(
         pluginStoreApiKeyProvider = pluginStoreApiKeyProvider,
         scope = scope,
         aiProviderStore = aiProviderStore,
-        settingsProvider = settingsProvider,
-        windowId = windowId,
         splitViewOperations = splitViewOperations,
         authDataProvider = authDataProvider,
     ).also { it.initialize() }

@@ -126,6 +126,9 @@ class AiProvidersViewModel(
     private val _state = MutableStateFlow(AiProvidersUiState(storeAvailable = store != null))
     val state: StateFlow<AiProvidersUiState> = _state.asStateFlow()
 
+    /** Guards [ensureSectionLoaded] so entering the section twice does not re-probe. */
+    private val sectionLoadStarted = AtomicBoolean(false)
+
     /** Guards [ensureConnectionsLoaded] so concurrent callers load credentials once. */
     private val connectionsLoadStarted = AtomicBoolean(false)
 
@@ -159,21 +162,9 @@ class AiProvidersViewModel(
     init {
         scope.launch { catalog.states.collect { states -> _state.update { it.copy(catalogs = states) } } }
 
-        // The engine list is cheap; the probes it kicks off are not, which is why this runs
-        // once here rather than per composition.
-        refreshCliEngines()
-
-        // Has to happen before the section is first looked at: the notice's absence is what a
-        // user with the gateway should see, and its presence is the only thing that tells a user
-        // without it why there is no CLI section.
-        //
-        // Launched, not called inline, even though the work is one in-memory list read. This
-        // ViewModel is constructed from inside `register()`, and `getLoadedPlugins()` asks the
-        // plugin loader about its own registry while that loader is part-way through loading this
-        // plugin. Doing it synchronously on the registration thread is the shape that deadlocks if
-        // the host ever holds a lock across `register()`, for a notice that is allowed to arrive a
-        // beat late anyway.
-        checkGateway()
+        // Nothing that costs a process or a plugin-registry read happens here. See
+        // [ensureSectionLoaded]: this object is built during `register()`, on every launch,
+        // for a section most launches never open.
 
         // Re-read credentials whenever the store is invalidated — which is what the secret
         // list's own create/update/delete does. Clearing the store cache alone was not
@@ -202,6 +193,31 @@ class AiProvidersViewModel(
      * cannot (it is a non-suspend api member), so a null from it may mean "not loaded
      * yet" rather than "nothing configured".
      */
+    /**
+     * Do the work that only the panel needs, once, when the section is first shown.
+     *
+     * **The CLI probes are the reason this exists.** `refreshCliEngines()` runs
+     * `<engine> --version` for every engine the gateway serves, and it used to run from `init` -
+     * which is `register()`, on every launch, for a section most launches never open. Two engines
+     * is two processes spawned during startup to fill in a row nobody asked to see.
+     *
+     * `checkGateway()` moves for a second reason as well as cost: it asks the plugin loader about
+     * its own registry, and during `register()` that loader is part-way through loading *this*
+     * plugin.
+     *
+     * `ensureConnectionsLoaded()` deliberately does **not** move. It is network-free and other
+     * plugins read `PluginContext.llmProvider` without this panel ever being opened, so it stays
+     * eager - the warm-up exists so the first AI action after a restart does not race the load.
+     *
+     * Idempotent: the section calls it on every entry, and the flag makes all but the first a
+     * no-op. Refresh is the deliberate re-read.
+     */
+    fun ensureSectionLoaded() {
+        if (!sectionLoadStarted.compareAndSet(false, true)) return
+        refreshCliEngines()
+        checkGateway()
+    }
+
     fun ensureConnectionsLoaded() {
         if (!connectionsLoadStarted.compareAndSet(false, true)) return
         scope.launch { loadConnections() }
