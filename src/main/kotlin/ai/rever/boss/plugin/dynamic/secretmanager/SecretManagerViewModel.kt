@@ -31,11 +31,6 @@ private const val CLIPBOARD_CLEAR_DELAY_MS = 45_000L
 // (migration 20260809000000). Held by admin and boss_admin, not by `user`.
 internal const val PERMISSION_SHARE_WITH_ROLE = "secret.share.role"
 
-// The host's SettingsSection enum entry for AI provider settings. Matched
-// case-insensitively by the host, and still named LLM_PROVIDERS for compatibility
-// even though the section now displays as "AI Providers".
-private const val AI_PROVIDERS_SETTINGS_SECTION = "LLM_PROVIDERS"
-
 @Serializable
 data class ShareUserRow(val id: String, val email: String)
 
@@ -55,9 +50,6 @@ class SecretManagerViewModel(
     private val scope: CoroutineScope,
     /** Writes AI provider keys through the same store the AI Providers panel uses. */
     private val aiProviderStore: ProviderCredentialStore? = null,
-    /** Used to jump to Settings → AI Providers from an AI provider entry. */
-    private val settingsProvider: SettingsProvider? = null,
-    private val windowId: String? = null,
     /** Opens a provider's key console, same affordance as the AI Providers panel. */
     private val splitViewOperations: SplitViewOperations? = null,
     /** Read-only: decides whether the share dialog offers role targets at all. */
@@ -519,32 +511,6 @@ class SecretManagerViewModel(
         }.onFailure {
             state = state.copy(errorMessage = "Open $url to create a key.")
         }
-    }
-
-    /**
-     * Open Settings → AI Providers, where the key can be tested and a model chosen.
-     *
-     * The section name is the host's `SettingsSection` enum entry; the host matches it
-     * case-insensitively.
-     */
-    fun openAiProviderSettings() {
-        val provider = settingsProvider
-        val window = windowId
-        if (provider == null || window == null) {
-            state = state.copy(
-                errorMessage = "Open Settings → AI Providers to manage this key."
-            )
-            return
-        }
-        runCatching { provider.openSettings(window, AI_PROVIDERS_SETTINGS_SECTION) }
-            .onFailure {
-                logger.warn(
-                    LogCategory.GENERAL,
-                    "Could not open AI provider settings",
-                    mapOf("exception" to (it::class.simpleName ?: "Exception"))
-                )
-                state = state.copy(errorMessage = "Open Settings → AI Providers to manage this key.")
-            }
     }
 
     fun showShareDialog(secret: SecretEntryData) {

@@ -357,6 +357,50 @@ ignores the field anyway (`missingFor` matches on id alone). This exact trap was
 
 ## AI Providers (`ai/` package)
 
+This plugin owns AI provider configuration **and is now the only place it is edited**. The host's
+`Settings > AI Providers` section is gone, along with the `LlmProviderAPIAccess` singleton that
+served it: the credentials live in this panel's vault, so the page that manages them belongs beside
+them rather than two clicks away in another window. `LlmProviderSettingsAPI` is still registered -
+that is what `PluginContext.llmProvider` relays to other plugins, which is the part they consume.
+
+**The AI-provider secret cards jump into the AI section, not into Settings.** A card's chip used to
+call `SettingsProvider.openSettings(window, "LLM_PROVIDERS")`; it now selects that provider and
+switches the panel's section. `secret.website` holds the provider id, which is what makes it land on
+the right row rather than at the top of the list. `settingsProvider` and `windowId` were removed
+from `SecretManagerViewModel` with it - that jump was their only reader.
+
+### The section loads lazily, because `init` is `register()`
+
+`ensureSectionLoaded()` runs the CLI probes and the gateway check on first entry, not from the
+ViewModel's `init`. This object is constructed during `register()`, on **every launch**, for a
+section most launches never open - and `refreshCliEngines()` runs `<engine> --version`, so two
+engines meant two processes spawned during startup to fill in rows nobody had asked to see.
+
+`ensureConnectionsLoaded()` deliberately did **not** move. It is network-free, and other plugins read
+`PluginContext.llmProvider` without this panel ever being opened, so the warm-up stays eager - it
+exists so the first AI action after a restart does not race the load.
+
+Mutation-verified: putting the two calls back in `init` fails *nothing is probed until the section is
+opened*, which counts engine-list reads rather than watching state, so a probe that merely starts
+slowly still fails it. `openingTheSectionTwiceProbesOnce` pins the idempotence the panel relies on,
+since it calls `ensureSectionLoaded()` from a `LaunchedEffect` on every entry.
+
+### The provider list is an accordion
+
+The selected provider's detail renders **under its own row**, inside the same section. It used to be
+a separate titled section below the whole eight-row list, which was fine in the host's Settings
+window where it was all on screen at once - and wrong in a sidebar one row wide, where tapping the
+fourth provider put the response off the bottom of the panel and the tap read as doing nothing.
+
+Expanding in place also retired the detail's own `BossSection(title = descriptor.displayName)`: the
+row directly above it is that name, and repeating it was the loudest thing in the expanded state.
+
+Section descriptions are one short line. `BossSection`'s description is set for the width of the
+Settings window; at sidebar width, two sentences of guidance is three lines of text above content
+that explains itself. Keep the fact a first-time reader cannot infer (a CLI login overrides the
+providers below) and drop the instructions.
+
+
 This plugin owns **all** AI provider configuration. The host has none: its
 `Settings → AI Providers` section renders `LlmProviderSettingsPanel` through
 `LlmProviderSettingsAPI`, and `PluginContext.llmProvider` is relayed from the same

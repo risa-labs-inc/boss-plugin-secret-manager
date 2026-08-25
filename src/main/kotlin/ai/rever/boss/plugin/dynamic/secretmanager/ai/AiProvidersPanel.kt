@@ -112,9 +112,10 @@ fun AiProvidersPanel(
         if (state.cliEngines.isNotEmpty()) {
             BossSection(
                 title = "Local CLI sessions",
-                description =
-                    "Use a CLI you have already signed into. No API key, billed to that " +
-                        "subscription. Selecting one replaces the provider below for every plugin.",
+                // The one fact that is not visible from the rows: picking one takes over from
+                // the providers below, for every plugin. "Use a CLI you have already signed
+                // into" was three lines restating the section's own title.
+                description = "A login you already have. Overrides the provider below.",
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     state.cliEngines.forEach { engine ->
@@ -137,10 +138,15 @@ fun AiProvidersPanel(
             }
         }
 
-        BossSection(
-            title = "Providers",
-            description = "Choose a provider, add its API key, then pick a model from its live list.",
-        ) {
+        // An accordion, not a list plus a detached detail pane.
+        //
+        // The detail used to render *below the whole list* as its own titled section. In the
+        // host's Settings window that was fine - it was all on screen at once. In a sidebar
+        // roughly one row wide it meant tapping the fourth of eight providers and having the
+        // thing that responded appear off the bottom of the panel: the tap read as doing
+        // nothing. Expanding under the row that was tapped puts the response where the finger
+        // is, and drops the duplicate provider name the detail's own heading used to repeat.
+        BossSection(title = "Providers") {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 state.providers.forEach { descriptor ->
                     ProviderRow(
@@ -150,15 +156,16 @@ fun AiProvidersPanel(
                         isActive = descriptor.id == state.activeProviderId,
                         onClick = { viewModel.selectProvider(descriptor.id) },
                     )
+                    if (descriptor.id == selected.id) {
+                        ProviderDetail(
+                            descriptor = descriptor,
+                            state = state,
+                            viewModel = viewModel,
+                        )
+                    }
                 }
             }
         }
-
-        ProviderDetail(
-            descriptor = selected,
-            state = state,
-            viewModel = viewModel,
-        )
     }
 }
 
@@ -386,91 +393,91 @@ private fun ProviderDetail(
     val fromEnvironment = connection.source == CredentialSource.ENVIRONMENT
     val brokered = descriptor.brokerId != null
 
-    BossSection(title = descriptor.displayName) {
-        BossCard {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                if (brokered) {
-                    // No key field at all: there is nothing for the user to paste, and
-                    // offering one would invite them to store a credential that this
-                    // provider mints for itself and that expires within hours.
-                    Text(
-                        text =
-                            if (connection.source == CredentialSource.BROKERED) {
-                                "Authorised by your BOSS sign-in. A short-lived key is fetched " +
-                                    "when needed and never stored."
-                            } else {
-                                "Sign in to BOSS with an account that has access. This provider " +
-                                    "has no API key to enter."
-                            },
-                        style = SecretPanelType.meta,
-                        color = BossThemeColors.TextSecondary,
-                    )
-                    BossSecondaryButton(
-                        text = "Check access",
-                        onClick = { viewModel.refreshBrokeredCredential(descriptor.id) },
-                        enabled = !busy,
-                    )
-                } else if (fromEnvironment) {
-                    Text(
-                        text =
-                            "This key comes from the environment" +
-                                (connection.label?.let { " ($it)" } ?: "") +
-                                " and is read-only here. Unset it to manage the key in BOSS.",
-                        style = SecretPanelType.meta,
-                        color = BossThemeColors.TextSecondary,
-                    )
-                } else {
-                    // A stored key is never rendered back — the field is for replacing
-                    // it. Settings has no business displaying credential material.
-                    BossTextField(
-                        value = state.keyDrafts[descriptor.id].orEmpty(),
-                        onValueChange = { viewModel.updateKeyDraft(descriptor.id, it) },
-                        label = "API key",
-                        placeholder =
-                            if (connection.source == CredentialSource.STORED) {
-                                "A key is stored — enter a new one to replace it"
-                            } else {
-                                descriptor.keyPlaceholder
-                            },
-                        enabled = state.storeAvailable && !busy,
-                        singleLine = true,
-                    )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        BossPrimaryButton(
-                            text = "Save key",
-                            onClick = { viewModel.saveKey(descriptor.id) },
-                            enabled = state.storeAvailable && !busy &&
-                                state.keyDrafts[descriptor.id]?.isNotBlank() == true,
-                        )
+    // No section heading of its own: the row directly above is the provider's name, and
+    // repeating it was the loudest thing in the expanded state.
+    BossCard {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (brokered) {
+                // No key field at all: there is nothing for the user to paste, and
+                // offering one would invite them to store a credential that this
+                // provider mints for itself and that expires within hours.
+                Text(
+                    text =
+                        if (connection.source == CredentialSource.BROKERED) {
+                            "Authorised by your BOSS sign-in. A short-lived key is fetched " +
+                                "when needed and never stored."
+                        } else {
+                            "Sign in to BOSS with an account that has access. This provider " +
+                                "has no API key to enter."
+                        },
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextSecondary,
+                )
+                BossSecondaryButton(
+                    text = "Check access",
+                    onClick = { viewModel.refreshBrokeredCredential(descriptor.id) },
+                    enabled = !busy,
+                )
+            } else if (fromEnvironment) {
+                Text(
+                    text =
+                        "This key comes from the environment" +
+                            (connection.label?.let { " ($it)" } ?: "") +
+                            " and is read-only here. Unset it to manage the key in BOSS.",
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextSecondary,
+                )
+            } else {
+                // A stored key is never rendered back — the field is for replacing
+                // it. Settings has no business displaying credential material.
+                BossTextField(
+                    value = state.keyDrafts[descriptor.id].orEmpty(),
+                    onValueChange = { viewModel.updateKeyDraft(descriptor.id, it) },
+                    label = "API key",
+                    placeholder =
                         if (connection.source == CredentialSource.STORED) {
-                            BossSecondaryButton(
-                                text = "Remove",
-                                onClick = { viewModel.clearKey(descriptor.id) },
-                                enabled = !busy,
-                                isDestructive = true,
-                            )
-                        }
-                        if (descriptor.consoleUrl != null) {
-                            BossSecondaryButton(
-                                text = "Get API key",
-                                onClick = { viewModel.openProviderConsole(descriptor.id) },
-                                enabled = !busy,
-                            )
-                        }
+                            "A key is stored — enter a new one to replace it"
+                        } else {
+                            descriptor.keyPlaceholder
+                        },
+                    enabled = state.storeAvailable && !busy,
+                    singleLine = true,
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    BossPrimaryButton(
+                        text = "Save key",
+                        onClick = { viewModel.saveKey(descriptor.id) },
+                        enabled = state.storeAvailable && !busy &&
+                            state.keyDrafts[descriptor.id]?.isNotBlank() == true,
+                    )
+                    if (connection.source == CredentialSource.STORED) {
+                        BossSecondaryButton(
+                            text = "Remove",
+                            onClick = { viewModel.clearKey(descriptor.id) },
+                            enabled = !busy,
+                            isDestructive = true,
+                        )
+                    }
+                    if (descriptor.consoleUrl != null) {
+                        BossSecondaryButton(
+                            text = "Get API key",
+                            onClick = { viewModel.openProviderConsole(descriptor.id) },
+                            enabled = !busy,
+                        )
                     }
                 }
+            }
 
-                if (descriptor.envVarNames.isNotEmpty() && !fromEnvironment && !brokered) {
-                    Text(
-                        text = "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
-                        style = SecretPanelType.caption,
-                        color = BossThemeColors.TextMuted,
-                    )
-                }
+            if (descriptor.envVarNames.isNotEmpty() && !fromEnvironment && !brokered) {
+                Text(
+                    text = "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
+                    style = SecretPanelType.caption,
+                    color = BossThemeColors.TextMuted,
+                )
             }
         }
 

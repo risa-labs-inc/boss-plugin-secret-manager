@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -54,7 +55,15 @@ class CliEngineSelectionTest {
         var selected: String? = null
             private set
 
-        override fun engines(): List<CliEngineInfo> = engines
+        /** Counted so a test can assert the probes have *not* run yet. */
+        @Volatile
+        var engineListReads: Int = 0
+            private set
+
+        override fun engines(): List<CliEngineInfo> {
+            engineListReads++
+            return engines
+        }
 
         override suspend fun health(engineId: String): CliEngineHealth {
             healthGate?.await()
@@ -98,10 +107,50 @@ class CliEngineSelectionTest {
         )
     }
 
-    /** The engine list and its probes are loaded from `init`; this waits for them. */
+    /**
+     * Enter the section and wait for the engine list.
+     *
+     * `ensureSectionLoaded()` is what the panel calls on first entry, and it is what starts the
+     * probes - they no longer run from `init`, because that is `register()` on every launch for a
+     * section most launches never open. Calling it here keeps these tests on the real path
+     * rather than on a shortcut that no longer exists.
+     */
     private suspend fun AiProvidersViewModel.loadedEngines(): List<CliEngineInfo> {
+        ensureSectionLoaded()
         withTimeout(TIMEOUT_MS) { state.first { it.cliEngines.isNotEmpty() } }
         return state.value.cliEngines
+    }
+
+    @Test
+    fun nothingIsProbedUntilTheSectionIsOpened() = runBlocking {
+        // The point of the change: constructing this object must not spawn a process. It is
+        // built during register(), on every launch, whether or not anyone opens the AI section.
+        // Asserted by waiting a beat rather than reading once, so a probe that merely starts
+        // slowly still fails it.
+        val cli = FakeCliEngines()
+        val vm = viewModelWith(cli)
+
+        delay(QUIET_MS)
+
+        assertEquals(0, cli.engineListReads, "the engine list was read before the section opened")
+        assertTrue(vm.state.value.cliEngines.isEmpty())
+
+        // And entering the section is what pays for it.
+        vm.loadedEngines()
+        assertTrue(cli.engineListReads > 0)
+    }
+
+    @Test
+    fun openingTheSectionTwiceProbesOnce() = runBlocking {
+        val cli = FakeCliEngines()
+        val vm = viewModelWith(cli)
+
+        vm.loadedEngines()
+        val afterFirst = cli.engineListReads
+        vm.ensureSectionLoaded()
+        delay(QUIET_MS)
+
+        assertEquals(afterFirst, cli.engineListReads, "re-entering the section re-probed")
     }
 
     @Test
@@ -255,6 +304,9 @@ class CliEngineSelectionTest {
     }
 
     private companion object {
+        /** Long enough for a launch that was going to run to have run. */
+        const val QUIET_MS = 250L
+
         const val TIMEOUT_MS = 5_000L
     }
 }
