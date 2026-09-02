@@ -283,6 +283,7 @@ class ModelCatalogClient(
                     descriptor.id == ProviderRegistry.MOONSHOT -> moonshotModel(obj)
                     descriptor.id == ProviderRegistry.TOGETHER -> togetherModel(obj)
                     descriptor.id == ProviderRegistry.XAI -> xaiModel(obj)
+                    descriptor.id == ProviderRegistry.OPENROUTER -> openRouterModel(obj)
                     else -> openAiModel(obj)
                 }
             }
@@ -412,6 +413,20 @@ class ModelCatalogClient(
             displayName = id,
             capabilities = capabilities,
             ownedBy = obj.str("owned_by"),
+        )
+    }
+
+    /**
+     * OpenRouter documents `data[].context_length` directly on each model, unlike
+     * OpenAI's bare `id` — worth its own parser rather than the generic
+     * [openAiModel] so the picker can show a context length and a readable name.
+     */
+    private fun openRouterModel(obj: JsonObject): AiModel? {
+        val id = obj.str("id") ?: return null
+        return AiModel(
+            id = id,
+            displayName = obj.str("name") ?: id,
+            contextLength = obj.int("context_length"),
         )
     }
 

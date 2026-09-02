@@ -333,7 +333,7 @@ private fun ProviderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        StatusDot(connection.source)
+        StatusDot(connection.source, noKeyNeeded = !descriptor.requiresApiKey)
         Text(
             text = descriptor.displayName,
             style = SecretPanelType.body,
@@ -348,7 +348,7 @@ private fun ProviderRow(
             )
         }
         Text(
-            text = statusLabel(connection),
+            text = statusLabel(connection, noKeyNeeded = !descriptor.requiresApiKey),
             style = SecretPanelType.caption,
             color = BossThemeColors.TextMuted,
         )
@@ -356,23 +356,34 @@ private fun ProviderRow(
 }
 
 @Composable
-private fun StatusDot(source: CredentialSource) {
+private fun StatusDot(source: CredentialSource, noKeyNeeded: Boolean) {
     val color =
-        when (source) {
-            CredentialSource.STORED -> BossThemeColors.SuccessColor
-            CredentialSource.BROKERED -> BossThemeColors.SuccessColor
-            CredentialSource.ENVIRONMENT -> BossThemeColors.SecondaryColor
-            CredentialSource.NONE -> BossThemeColors.TextMuted
+        if (noKeyNeeded) {
+            // A local daemon with no credential is either reachable or it isn't; there
+            // is no "not configured" state for it to sit in, so it reads as ready
+            // rather than piggybacking on a CredentialSource it will never earn.
+            BossThemeColors.SuccessColor
+        } else {
+            when (source) {
+                CredentialSource.STORED -> BossThemeColors.SuccessColor
+                CredentialSource.BROKERED -> BossThemeColors.SuccessColor
+                CredentialSource.ENVIRONMENT -> BossThemeColors.SecondaryColor
+                CredentialSource.NONE -> BossThemeColors.TextMuted
+            }
         }
     Box(modifier = Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(color))
 }
 
-private fun statusLabel(connection: ProviderConnection): String =
-    when (connection.source) {
-        CredentialSource.STORED -> "Stored"
-        CredentialSource.ENVIRONMENT -> connection.label?.let { "From $it" } ?: "From environment"
-        CredentialSource.BROKERED -> "Signed in"
-        CredentialSource.NONE -> "Not configured"
+private fun statusLabel(connection: ProviderConnection, noKeyNeeded: Boolean): String =
+    if (noKeyNeeded) {
+        "No key needed"
+    } else {
+        when (connection.source) {
+            CredentialSource.STORED -> "Stored"
+            CredentialSource.ENVIRONMENT -> connection.label?.let { "From $it" } ?: "From environment"
+            CredentialSource.BROKERED -> "Signed in"
+            CredentialSource.NONE -> "Not configured"
+        }
     }
 
 @Composable
@@ -385,6 +396,7 @@ private fun ProviderDetail(
     val busy = descriptor.id in state.busyProviderIds
     val fromEnvironment = connection.source == CredentialSource.ENVIRONMENT
     val brokered = descriptor.brokerId != null
+    val noKeyNeeded = !descriptor.requiresApiKey
 
     BossSection(title = descriptor.displayName) {
         BossCard {
@@ -419,6 +431,15 @@ private fun ProviderDetail(
                             "This key comes from the environment" +
                                 (connection.label?.let { " ($it)" } ?: "") +
                                 " and is read-only here. Unset it to manage the key in BOSS.",
+                        style = SecretPanelType.meta,
+                        color = BossThemeColors.TextSecondary,
+                    )
+                } else if (noKeyNeeded) {
+                    // Ollama takes no credential on the wire, so there is nothing to
+                    // paste and no "Save key" flow to offer — offering one would just
+                    // invite a dummy value nobody needs.
+                    Text(
+                        text = "A local Ollama daemon needs no API key. Pick a model below once it's running.",
                         style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )

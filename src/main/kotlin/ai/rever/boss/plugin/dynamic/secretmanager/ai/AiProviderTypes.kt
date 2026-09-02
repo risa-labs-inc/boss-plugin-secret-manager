@@ -108,6 +108,15 @@ data class ProviderDescriptor(
     /** How [modelsEndpoint] pages, so a long list isn't silently clipped. */
     val pagingStyle: PagingStyle = PagingStyle.NONE,
     /**
+     * Whether this provider needs a credential at all before it can be used.
+     *
+     * True for every hosted provider. False only for a local daemon (Ollama) that
+     * takes no key on the wire: [ProviderConnection.isConfigured] does not wait on
+     * one, and [ModelCatalog] fetches its model list with a blank key rather than
+     * reporting [CatalogState.NotConfigured] forever.
+     */
+    val requiresApiKey: Boolean = true,
+    /**
      * Broker that mints this provider's credential from the signed-in BOSS session,
      * or null for a provider the user supplies a key for.
      *
@@ -231,14 +240,17 @@ data class ProviderConnection(
     val label: String? = null,
 ) {
     /**
-     * A local runtime (Ollama, vLLM, llama.cpp) needs no credential, so for [CUSTOM] an
-     * endpoint alone counts. Requiring a key there forced users to invent a dummy one to
-     * make `activeConfig()` resolve at all.
+     * A local runtime needs no credential. For [ProviderRegistry.CUSTOM] an endpoint
+     * alone counts — requiring a key there forced users to invent a dummy one to make
+     * `activeConfig()` resolve at all. For any provider whose descriptor declares
+     * [ProviderDescriptor.requiresApiKey] false (Ollama, at a fixed endpoint it never
+     * needs to be told), no further input is needed at all.
      */
     val isConfigured: Boolean
         get() =
             apiKey.isNotBlank() ||
-                (providerId == ProviderRegistry.CUSTOM && !customEndpoint.isNullOrBlank())
+                (providerId == ProviderRegistry.CUSTOM && !customEndpoint.isNullOrBlank()) ||
+                ProviderRegistry.find(providerId)?.requiresApiKey == false
 
     companion object {
         const val DEFAULT_TEMPERATURE: Float = 0.7f

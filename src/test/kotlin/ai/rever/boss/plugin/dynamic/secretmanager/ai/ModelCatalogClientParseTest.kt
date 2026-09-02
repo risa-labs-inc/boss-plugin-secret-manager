@@ -178,6 +178,59 @@ class ModelCatalogClientParseTest {
             assertNull(model.contextLength)
         }
 
+    // ==================== OpenRouter ====================
+
+    @Test
+    fun `openrouter reports its readable name and context length`() =
+        runTest {
+            val body = """
+                {"data":[{"id":"anthropic/claude-opus-5","name":"Anthropic: Claude Opus 5",
+                "context_length":200000,"pricing":{"prompt":"0.000015","completion":"0.000075"}}]}
+            """.trimIndent()
+
+            val model =
+                clientReturning(body).fetch(descriptor(ProviderRegistry.OPENROUTER), "k").getOrThrow().single()
+
+            assertEquals("anthropic/claude-opus-5", model.id)
+            assertEquals("Anthropic: Claude Opus 5", model.displayName)
+            assertEquals(200_000, model.contextLength)
+        }
+
+    // ==================== Ollama ====================
+
+    @Test
+    fun `ollama's openai-compatible list needs no special parser`() =
+        runTest {
+            // Ollama's /v1/models mirrors OpenAI's own envelope, so it falls through to
+            // openAiModel — this pins that assumption rather than the OpenAI test alone,
+            // since a future Ollama release changing that shape would not otherwise be
+            // caught here.
+            val body = """{"object":"list","data":[{"id":"llama3.2:latest","object":"model"}]}"""
+
+            val model =
+                clientReturning(body).fetch(descriptor(ProviderRegistry.OLLAMA), "").getOrThrow().single()
+
+            assertEquals("llama3.2:latest", model.id)
+        }
+
+    @Test
+    fun `a provider that requires no key is still fetched with a blank one`() =
+        runTest {
+            // ModelCatalog.refresh short-circuits to NotConfigured on a blank key for
+            // every ordinary provider (see ModelCatalogStateTest) — Ollama is the one
+            // exception, gated on ProviderDescriptor.requiresApiKey rather than on the
+            // key itself, and only an end-to-end ModelCatalog.refresh call exercises
+            // that branch; ModelCatalogClient.fetch alone never sees the short-circuit.
+            val body = """{"data":[{"id":"llama3.2:latest","object":"model"}]}"""
+            val catalog = ModelCatalog(client = clientReturning(body), cacheDir = null)
+
+            catalog.refresh(descriptor(ProviderRegistry.OLLAMA), apiKey = "", force = true)
+
+            val state = catalog.stateOf(ProviderRegistry.OLLAMA)
+            assertTrue(state is CatalogState.Loaded, "expected Loaded, was $state")
+            assertEquals(listOf("llama3.2:latest"), (state as CatalogState.Loaded).models.map { it.id })
+        }
+
     // ==================== failure shapes ====================
 
     @Test
