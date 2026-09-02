@@ -1,5 +1,7 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
+import ai.rever.boss.plugin.api.AiAvailableModel
+import ai.rever.boss.plugin.api.AiProviderModels
 import ai.rever.boss.plugin.api.LlmApiFormat
 import ai.rever.boss.plugin.api.LlmConfig
 import ai.rever.boss.plugin.api.LlmProviderSettingsAPI
@@ -17,6 +19,10 @@ import androidx.compose.ui.Modifier
  * to link, registration is skipped, and everything else in the plugin still works.
  * Referencing those symbols from the registry or the panel would instead take the
  * whole plugin down on such a host.
+ *
+ * [availableModels] additionally references [AiProviderModels]/[AiAvailableModel],
+ * which post-date 1.0.87 — every host currently released predates them, so this
+ * override is exactly the case the guard above exists for, not a new one.
  *
  * Reads state from [AiProvidersViewModel] rather than the store directly, so the
  * panel and API can never disagree about which provider is active.
@@ -56,6 +62,41 @@ class LlmProviderSettingsApiImpl(
         viewModel.ensureConnectionsLoaded()
         val state = viewModel.state.value
         return state.providers.mapNotNull { descriptor -> configFor(descriptor.id) }
+    }
+
+    /**
+     * Every configured provider's models, credential-free — see the api doc on
+     * [LlmProviderSettingsAPI.availableModels] for why this exists separately from
+     * [configuredProviders].
+     *
+     * Sourced from whatever this plugin already fetched into its live model catalog
+     * ([AiProvidersUiState.catalogs]), the same data the settings panel's picker reads.
+     * A provider needing manual entry (only [ProviderRegistry.CUSTOM] today) has no
+     * catalog to ask, so its one model comes from whatever the user typed instead.
+     */
+    override fun availableModels(): List<AiProviderModels> {
+        viewModel.ensureConnectionsLoaded()
+        val state = viewModel.state.value
+        return state.providers.mapNotNull { descriptor ->
+            val connection = state.connectionOf(descriptor.id)
+            if (!connection.isConfigured) return@mapNotNull null
+
+            val models =
+                if (ProviderRegistry.needsManualModel(descriptor)) {
+                    connection.selectedModelId
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { listOf(AiAvailableModel(id = it, displayName = it)) }
+                        .orEmpty()
+                } else {
+                    (state.catalogOf(descriptor.id) as? CatalogState.Loaded)
+                        ?.models
+                        ?.map { AiAvailableModel(id = it.id, displayName = it.displayName, contextLength = it.contextLength) }
+                        .orEmpty()
+                }
+            if (models.isEmpty()) return@mapNotNull null
+
+            AiProviderModels(providerId = descriptor.id, providerName = descriptor.displayName, models = models)
+        }
     }
 
     private fun configFor(providerId: String): LlmConfig? {
