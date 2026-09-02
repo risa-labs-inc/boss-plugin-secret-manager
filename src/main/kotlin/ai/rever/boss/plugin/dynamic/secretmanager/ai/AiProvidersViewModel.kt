@@ -66,6 +66,13 @@ data class AiProvidersUiState(
     val gatewayNotice: GatewayNotice = GatewayNotice.NONE,
     /** True while the Toolbox is being asked, so the button cannot be pressed twice. */
     val isAskingForGateway: Boolean = false,
+    /**
+     * What this machine can tell us about running Ollama: installed or not, and how much RAM
+     * there is. Defaults to "assume it's fine" (unknown RAM reads as meeting the minimum, see
+     * [OllamaSystemInfo.meetsMinimum]) rather than blocking the provider for the one frame
+     * before the real check lands.
+     */
+    val ollamaSystemInfo: OllamaSystemInfo = OllamaSystemInfo(binaryFound = false, totalRamGb = null),
     val connections: Map<String, ProviderConnection> = emptyMap(),
     val catalogs: Map<String, CatalogState> = emptyMap(),
     /** In-progress key edits, keyed by provider id. Never persisted until saved. */
@@ -129,6 +136,11 @@ class AiProvidersViewModel(
     // observe a renewal is a test nobody runs.
     private val brokeredRenewalLeadMs: Long = BROKERED_RENEWAL_LEAD_MS,
     private val minBrokeredRenewalDelayMs: Long = MIN_BROKERED_RENEWAL_DELAY_MS,
+    /**
+     * How this machine's Ollama facts are read. Injected for the same reason [cliEngines] and
+     * [gateway] are — so it's fakeable without touching the real filesystem or `Desktop`.
+     */
+    private val ollamaSystemCheck: OllamaSystemCheck = OllamaSystemCheck(),
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -183,6 +195,7 @@ class AiProvidersViewModel(
         // the host ever holds a lock across `register()`, for a notice that is allowed to arrive a
         // beat late anyway.
         checkGateway()
+        refreshOllamaSystemInfo()
 
         // Re-read credentials whenever the store is invalidated — which is what the secret
         // list's own create/update/delete does. Clearing the store cache alone was not
@@ -280,6 +293,10 @@ class AiProvidersViewModel(
             // resolver memoises misses as well as hits — so without this that instruction
             // was only true after an app restart.
             envResolver.invalidate()
+            // Same reasoning applies to whether Ollama is installed: a user who left this
+            // panel to go run the installer this "Install Ollama" button just sent them to
+            // should not have to restart BOSS to see that it landed.
+            refreshOllamaSystemInfo()
             val connections = loadConnections()
 
             _state.update { current ->
@@ -440,6 +457,29 @@ class AiProvidersViewModel(
         scope.launch {
             val notice = runCatching { presence.notice() }.getOrDefault(GatewayNotice.NONE)
             _state.update { it.copy(gatewayNotice = notice) }
+        }
+    }
+
+    /**
+     * Re-read whether Ollama is installed and how much RAM this machine has.
+     *
+     * On IO, not the caller's dispatcher: this touches the filesystem (a handful of `File`
+     * stats) and a JMX bean, and `pluginScope` falls back to `Dispatchers.Main` — neither
+     * should ever be a reason a panel entry blocks on disk access.
+     */
+    fun refreshOllamaSystemInfo() {
+        scope.launch(Dispatchers.IO) {
+            val info =
+                runCatching { ollamaSystemCheck.current() }
+                    .getOrElse { OllamaSystemInfo(binaryFound = false, totalRamGb = null) }
+            _state.update { it.copy(ollamaSystemInfo = info) }
+        }
+    }
+
+    /** Send the user to Ollama's installer. Falls back to naming the URL when no browser answers. */
+    fun openOllamaInstallPage() {
+        if (!ollamaSystemCheck.openInstallPage()) {
+            _state.update { it.copy(notice = "Open ${OllamaSystemCheck.INSTALL_URL} to install Ollama.") }
         }
     }
 

@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 
 /**
  * Settings surface for AI providers: credentials, and a model picker driven by each
@@ -184,8 +185,14 @@ fun AiProvidersPanel(
                 val listedIds = listed.mapTo(mutableSetOf()) { it.id }
                 AddProviderRow(
                     addable =
-                        state.providers.filter {
-                            it.id != ProviderRegistry.CUSTOM && it.id !in listedIds
+                        state.providers.filter { descriptor ->
+                            descriptor.id != ProviderRegistry.CUSTOM &&
+                                descriptor.id !in listedIds &&
+                                // A machine that cannot usefully run any model through Ollama
+                                // is not offered it as something to add — see ProviderDetail's
+                                // own blocked-state card for the one already-configured
+                                // exception this does not cover.
+                                !(descriptor.id == ProviderRegistry.OLLAMA && !state.ollamaSystemInfo.meetsMinimum)
                         },
                     onPick = viewModel::selectProvider,
                     onPickCustom = { viewModel.selectProvider(ProviderRegistry.CUSTOM) },
@@ -514,6 +521,12 @@ private fun ProviderDetail(
     val fromEnvironment = connection.source == CredentialSource.ENVIRONMENT
     val brokered = descriptor.brokerId != null
     val noKeyNeeded = !descriptor.requiresApiKey
+    // A machine below Ollama's own published RAM floor cannot run anything through it, so
+    // there is nothing here worth a key field, a model list or an activate button — only an
+    // explanation. Any other keyless provider added later would need its own such check;
+    // this one is Ollama-specific on purpose rather than folded into requiresApiKey, since
+    // requiresApiKey is about the wire protocol and this is about the hardware.
+    val ollamaBlocked = descriptor.id == ProviderRegistry.OLLAMA && !state.ollamaSystemInfo.meetsMinimum
 
     Column(modifier = Modifier.fillMaxWidth()) {
         // A manual header rather than BossSection's, so Cancel can sit beside the title —
@@ -528,6 +541,13 @@ private fun ProviderDetail(
             BossSecondaryButton(text = "Cancel", onClick = onCancel, enabled = !busy)
         }
         Spacer(modifier = Modifier.height(12.dp))
+
+        if (ollamaBlocked) {
+            // Nothing below this is reachable: no key to enter, no model list worth
+            // fetching, no activate button that could ever resolve a credential.
+            OllamaUnavailableCard(info = state.ollamaSystemInfo)
+            return@Column
+        }
 
         BossCard {
             Column(
@@ -568,10 +588,9 @@ private fun ProviderDetail(
                     // Ollama takes no credential on the wire, so there is nothing to
                     // paste and no "Save key" flow to offer — offering one would just
                     // invite a dummy value nobody needs.
-                    Text(
-                        text = "A local Ollama daemon needs no API key. Pick a model below once it's running.",
-                        style = SecretPanelType.meta,
-                        color = BossThemeColors.TextSecondary,
+                    OllamaSetupNotice(
+                        info = state.ollamaSystemInfo,
+                        onInstall = viewModel::openOllamaInstallPage,
                     )
                 } else {
                     // A stored key is never rendered back — the field is for replacing
@@ -646,6 +665,81 @@ private fun ProviderDetail(
                 onClick = { viewModel.setActiveProvider(descriptor.id) },
                 enabled = !busy,
             )
+        }
+    }
+}
+
+/** What replaces the whole editor body when [OllamaSystemInfo.meetsMinimum] is false. */
+@Composable
+private fun OllamaUnavailableCard(info: OllamaSystemInfo) {
+    BossCard {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Not available on this machine",
+                style = SecretPanelType.bodyStrong,
+                color = BossThemeColors.TextPrimary,
+            )
+            Text(
+                text =
+                    "This machine reports " +
+                        (info.totalRamGb?.let { "about ${it.roundToInt()} GB" } ?: "an unreadable amount") +
+                        " of RAM. Ollama needs at least ${OllamaSystemCheck.MIN_USABLE_RAM_GB.roundToInt()} GB " +
+                        "to run any model usefully, so this provider isn't offered here.",
+                style = SecretPanelType.meta,
+                color = BossThemeColors.TextSecondary,
+            )
+        }
+    }
+}
+
+/**
+ * What the key section shows for Ollama once it's confirmed to be worth offering at all:
+ * whether the binary is here yet, and — either way — a short, RAM-sized shortlist of what to
+ * pull once it is running. The live model picker below this only ever shows models already
+ * pulled, so naming a few worth pulling is the whole point of this over the generic message
+ * every other keyless provider would get.
+ */
+@Composable
+private fun OllamaSetupNotice(
+    info: OllamaSystemInfo,
+    onInstall: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!info.binaryFound) {
+            Text(
+                text = "Ollama doesn't appear to be installed on this machine.",
+                style = SecretPanelType.meta,
+                color = BossThemeColors.TextSecondary,
+            )
+            BossSecondaryButton(text = "Install Ollama", onClick = onInstall)
+        } else {
+            Text(
+                text = "A local Ollama daemon needs no API key. Pick a model below once it's running.",
+                style = SecretPanelType.meta,
+                color = BossThemeColors.TextSecondary,
+            )
+        }
+
+        if (info.suggestedModels.isNotEmpty()) {
+            Text(
+                text =
+                    "Suggested for this machine" +
+                        (info.totalRamGb?.let { " (~${it.roundToInt()} GB RAM)" } ?: "") +
+                        " — run in a terminal, then click Refresh above:",
+                style = SecretPanelType.caption,
+                color = BossThemeColors.TextMuted,
+            )
+            info.suggestedModels.forEach { model ->
+                Text(
+                    text = "ollama pull ${model.tag}   —   ${model.note}",
+                    style = SecretPanelType.caption,
+                    fontFamily = FontFamily.Monospace,
+                    color = BossThemeColors.TextSecondary,
+                )
+            }
         }
     }
 }
