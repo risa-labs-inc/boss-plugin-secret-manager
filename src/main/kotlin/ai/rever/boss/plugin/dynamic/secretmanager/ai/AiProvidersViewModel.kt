@@ -24,6 +24,15 @@ data class AiProvidersUiState(
     val providers: List<ProviderDescriptor> = ProviderRegistry.all,
     /** Provider whose detail is expanded in the panel. */
     val selectedProviderId: String = ProviderRegistry.default.id,
+    /**
+     * Whether the provider editor card is open at all.
+     *
+     * Separate from [selectedProviderId] on purpose: that field is remembered across a
+     * reload so reopening the section returns to the same provider, but the *card* should
+     * not reopen uninvited just because a previous visit left one expanded. Always false on
+     * a fresh load; set true only by picking a row or one of the two Add actions.
+     */
+    val isEditorOpen: Boolean = false,
     /** Provider served to other plugins as the active config. */
     val activeProviderId: String? = null,
     /**
@@ -345,8 +354,16 @@ class AiProvidersViewModel(
             Unit
         }
 
+    /** Select [providerId] and open its editor card — picking a row or an Add action. */
     fun selectProvider(providerId: String) {
-        _state.update { it.copy(selectedProviderId = providerId, notice = null, error = null) }
+        _state.update {
+            it.copy(selectedProviderId = providerId, isEditorOpen = true, notice = null, error = null)
+        }
+    }
+
+    /** Close the editor card without discarding anything already saved through it. */
+    fun closeEditor() {
+        _state.update { it.copy(isEditorOpen = false) }
     }
 
     /**

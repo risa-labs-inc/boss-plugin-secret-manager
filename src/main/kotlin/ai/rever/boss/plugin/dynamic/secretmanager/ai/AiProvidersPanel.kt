@@ -95,27 +95,44 @@ fun AiProvidersPanel(
         state.error?.let { MessageBanner(it, BossThemeColors.ErrorColor) }
         state.notice?.let { MessageBanner(it, BossThemeColors.SuccessColor) }
 
-        // Where the CLI section would be. The gateway serving no engines is still silence, but
-        // the gateway being *absent* is a thing the user can fix, and telling them costs one row.
-        if (state.gatewayNotice != GatewayNotice.NONE) {
-            GatewayMissingNotice(
-                notice = state.gatewayNotice,
-                isAsking = state.isAskingForGateway,
-                onRequest = viewModel::requestGateway,
-            )
-        }
+        // One heading for the whole surface: a CLI session and an HTTP provider are both
+        // just "a way to answer AI requests", and two section titles over what is really
+        // one list read as more structure than is here.
+        BossSection(
+            title = "Available Providers",
+            description = "Providers available for AI features across every plugin.",
+        ) {
+            // Where the CLI subsection would be. The gateway serving no engines is still
+            // silence, but the gateway being *absent* is a thing the user can fix, and
+            // telling them costs one row.
+            if (state.gatewayNotice != GatewayNotice.NONE) {
+                GatewayMissingNotice(
+                    notice = state.gatewayNotice,
+                    isAsking = state.isAskingForGateway,
+                    onRequest = viewModel::requestGateway,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
-        // Above the providers on purpose: for a user who already has a `claude` or `codex`
-        // login, this is the whole setup, and burying it under a key-entry form would have
-        // them paste a key they never needed. Absent entirely when the gateway serves none,
-        // rather than showing an empty section nobody can act on.
-        if (state.cliEngines.isNotEmpty()) {
-            BossSection(
-                title = "Local CLI sessions",
-                description =
-                    "Use a CLI you have already signed into. No API key, billed to that " +
-                        "subscription. Selecting one replaces the provider below for every plugin.",
-            ) {
+            // Above the providers on purpose: for a user who already has a `claude` or
+            // `codex` login, this is the whole setup, and burying it under a key-entry
+            // form would have them paste a key they never needed. Absent entirely when
+            // the gateway serves none, rather than showing an empty subsection nobody can
+            // act on.
+            if (state.cliEngines.isNotEmpty()) {
+                Text(
+                    text = "Local CLI sessions",
+                    style = SecretPanelType.bodyStrong,
+                    color = BossThemeColors.TextPrimary,
+                )
+                Text(
+                    text =
+                        "Use a CLI you have already signed into. No API key, billed to that " +
+                            "subscription. Selecting one replaces the provider below for every plugin.",
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextSecondary,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
+                )
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     state.cliEngines.forEach { engine ->
                         CliEngineRow(
@@ -134,13 +151,9 @@ fun AiProvidersPanel(
                         )
                     }
                 }
+                Spacer(modifier = Modifier.height(16.dp))
             }
-        }
 
-        BossSection(
-            title = "Providers",
-            description = "Providers you've added. Add another, or declare a custom endpoint.",
-        ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 val listed =
                     state.providers.filter {
@@ -158,7 +171,10 @@ fun AiProvidersPanel(
                         ProviderRow(
                             descriptor = descriptor,
                             connection = state.connectionOf(descriptor.id),
-                            isSelected = descriptor.id == state.selectedProviderId,
+                            // Only the row whose editor is actually open reads as selected —
+                            // a stale selectedProviderId from a previous visit must not paint
+                            // a row as open when the card below it is closed.
+                            isSelected = state.isEditorOpen && descriptor.id == state.selectedProviderId,
                             isActive = descriptor.id == state.activeProviderId,
                             onClick = { viewModel.selectProvider(descriptor.id) },
                         )
@@ -177,11 +193,18 @@ fun AiProvidersPanel(
             }
         }
 
-        ProviderDetail(
-            descriptor = selected,
-            state = state,
-            viewModel = viewModel,
-        )
+        // The editor: closed by default on every fresh visit, and opened only by picking a
+        // row above or one of the two Add buttons. Never rendered unconditionally — a form
+        // that is always open, whether or not anyone asked for it, is exactly what made an
+        // "Available Providers" list read as cluttered before this.
+        if (state.isEditorOpen) {
+            ProviderDetail(
+                descriptor = selected,
+                state = state,
+                viewModel = viewModel,
+                onCancel = viewModel::closeEditor,
+            )
+        }
     }
 }
 
@@ -484,6 +507,7 @@ private fun ProviderDetail(
     descriptor: ProviderDescriptor,
     state: AiProvidersUiState,
     viewModel: AiProvidersViewModel,
+    onCancel: () -> Unit,
 ) {
     val connection = state.connectionOf(descriptor.id)
     val busy = descriptor.id in state.busyProviderIds
@@ -491,7 +515,20 @@ private fun ProviderDetail(
     val brokered = descriptor.brokerId != null
     val noKeyNeeded = !descriptor.requiresApiKey
 
-    BossSection(title = descriptor.displayName) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // A manual header rather than BossSection's, so Cancel can sit beside the title —
+        // BossSection's title slot is plain text with no room for a trailing action.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = descriptor.displayName,
+                style = SecretPanelType.bodyStrong,
+                color = BossThemeColors.TextPrimary,
+                modifier = Modifier.weight(1f),
+            )
+            BossSecondaryButton(text = "Cancel", onClick = onCancel, enabled = !busy)
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+
         BossCard {
             Column(
                 modifier = Modifier.padding(14.dp),
