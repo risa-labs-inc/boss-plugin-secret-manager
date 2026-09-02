@@ -139,18 +139,41 @@ fun AiProvidersPanel(
 
         BossSection(
             title = "Providers",
-            description = "Choose a provider, add its API key, then pick a model from its live list.",
+            description = "Providers you've added. Add another, or declare a custom endpoint.",
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                state.providers.forEach { descriptor ->
-                    ProviderRow(
-                        descriptor = descriptor,
-                        connection = state.connectionOf(descriptor.id),
-                        isSelected = descriptor.id == state.selectedProviderId,
-                        isActive = descriptor.id == state.activeProviderId,
-                        onClick = { viewModel.selectProvider(descriptor.id) },
+                val listed =
+                    state.providers.filter {
+                        isProviderListed(it, state.connectionOf(it.id), state.catalogOf(it.id))
+                    }
+
+                if (listed.isEmpty()) {
+                    Text(
+                        text = "No providers added yet.",
+                        style = SecretPanelType.meta,
+                        color = BossThemeColors.TextSecondary,
                     )
+                } else {
+                    listed.forEach { descriptor ->
+                        ProviderRow(
+                            descriptor = descriptor,
+                            connection = state.connectionOf(descriptor.id),
+                            isSelected = descriptor.id == state.selectedProviderId,
+                            isActive = descriptor.id == state.activeProviderId,
+                            onClick = { viewModel.selectProvider(descriptor.id) },
+                        )
+                    }
                 }
+
+                val listedIds = listed.mapTo(mutableSetOf()) { it.id }
+                AddProviderRow(
+                    addable =
+                        state.providers.filter {
+                            it.id != ProviderRegistry.CUSTOM && it.id !in listedIds
+                        },
+                    onPick = viewModel::selectProvider,
+                    onPickCustom = { viewModel.selectProvider(ProviderRegistry.CUSTOM) },
+                )
             }
         }
 
@@ -311,6 +334,76 @@ private fun healthLine(
         is CliEngineHealth.Failed -> "Installed but would not run: ${health.message}"
         CliEngineHealth.Unknown -> "Checking…"
     }
+
+/**
+ * Whether [descriptor] belongs in the compact "your providers" list, as opposed to only
+ * being reachable through [AddProviderRow].
+ *
+ * For an ordinary provider this is just [ProviderConnection.isConfigured] — it has a real
+ * credential. A keyless local daemon (Ollama today) declares itself configured
+ * unconditionally, since there is no credential to wait on — so for one of those, listing
+ * instead waits for its catalog to have actually loaded. Without that, every user would see
+ * it in their list from first launch whether or not they had ever run it: the plugin being
+ * installed is not the same as Ollama being reachable.
+ */
+internal fun isProviderListed(
+    descriptor: ProviderDescriptor,
+    connection: ProviderConnection,
+    catalog: CatalogState,
+): Boolean =
+    if (descriptor.requiresApiKey) {
+        connection.isConfigured
+    } else {
+        catalog is CatalogState.Loaded
+    }
+
+/**
+ * Two equal-weight ways to gain a provider, not a search box: the catalog is small enough
+ * that a plain list beats a filter, and "add one of these" versus "declare a custom
+ * endpoint" are different enough flows to deserve their own buttons rather than one menu
+ * that mixes both.
+ *
+ * Picking either just selects the provider — [ProviderDetail] below already renders
+ * whatever is selected, configured or not, so there is no separate "add" form to build.
+ */
+@Composable
+private fun AddProviderRow(
+    addable: List<ProviderDescriptor>,
+    onPick: (String) -> Unit,
+    onPickCustom: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box {
+            BossSecondaryButton(
+                text = "Add provider",
+                onClick = { expanded = true },
+                enabled = addable.isNotEmpty(),
+            )
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier.heightIn(max = 320.dp).background(BossThemeColors.SurfaceColor),
+            ) {
+                addable.forEach { descriptor ->
+                    DropdownMenuItem(
+                        onClick = {
+                            expanded = false
+                            onPick(descriptor.id)
+                        },
+                    ) {
+                        Text(
+                            text = descriptor.displayName,
+                            style = SecretPanelType.body,
+                            color = BossThemeColors.TextPrimary,
+                        )
+                    }
+                }
+            }
+        }
+        BossSecondaryButton(text = "Add custom provider", onClick = onPickCustom)
+    }
+}
 
 @Composable
 private fun ProviderRow(
