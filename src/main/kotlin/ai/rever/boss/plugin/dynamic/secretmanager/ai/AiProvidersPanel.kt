@@ -32,6 +32,7 @@ import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -475,6 +476,14 @@ private fun ProviderRow(
             style = SecretPanelType.caption,
             color = BossThemeColors.TextMuted,
         )
+        // The row itself is already clickable, same target — this is for discoverability:
+        // "tap anywhere to edit" is not obvious from a row that otherwise reads as static.
+        Icon(
+            imageVector = Icons.Outlined.Edit,
+            contentDescription = "Edit ${descriptor.displayName}",
+            tint = BossThemeColors.TextSecondary,
+            modifier = Modifier.size(16.dp).clickable(onClick = onClick),
+        )
     }
 }
 
@@ -528,184 +537,180 @@ private fun ProviderDetail(
     // requiresApiKey is about the wire protocol and this is about the hardware.
     val ollamaBlocked = descriptor.id == ProviderRegistry.OLLAMA && !state.ollamaSystemInfo.meetsMinimum
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        // A manual header rather than BossSection's, so Cancel can sit beside the title —
-        // BossSection's title slot is plain text with no room for a trailing action.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = descriptor.displayName,
-                style = SecretPanelType.bodyStrong,
-                color = BossThemeColors.TextPrimary,
-                modifier = Modifier.weight(1f),
-            )
-            BossSecondaryButton(text = "Cancel", onClick = onCancel, enabled = !busy)
-        }
-        Spacer(modifier = Modifier.height(12.dp))
+    // One card for the whole editor — title through the activate button — rather than two
+    // separate cards (key section, model section) with a header floating above both. Add and
+    // edit are the same form, so there is exactly one boundary to open and close.
+    BossCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = descriptor.displayName,
+                    style = SecretPanelType.bodyStrong,
+                    color = BossThemeColors.TextPrimary,
+                    modifier = Modifier.weight(1f),
+                )
+                BossSecondaryButton(text = "Cancel", onClick = onCancel, enabled = !busy)
+            }
 
-        if (ollamaBlocked) {
-            // Nothing below this is reachable: no key to enter, no model list worth
-            // fetching, no activate button that could ever resolve a credential.
-            OllamaUnavailableCard(info = state.ollamaSystemInfo)
-            return@Column
-        }
-
-        BossCard {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                if (brokered) {
-                    // No key field at all: there is nothing for the user to paste, and
-                    // offering one would invite them to store a credential that this
-                    // provider mints for itself and that expires within hours.
-                    Text(
-                        text =
-                            if (connection.source == CredentialSource.BROKERED) {
-                                "Authorised by your BOSS sign-in. A short-lived key is fetched " +
-                                    "when needed and never stored."
-                            } else {
-                                "Sign in to BOSS with an account that has access. This provider " +
-                                    "has no API key to enter."
-                            },
-                        style = SecretPanelType.meta,
-                        color = BossThemeColors.TextSecondary,
-                    )
-                    BossSecondaryButton(
-                        text = "Check access",
-                        onClick = { viewModel.refreshBrokeredCredential(descriptor.id) },
-                        enabled = !busy,
-                    )
-                } else if (fromEnvironment) {
-                    Text(
-                        text =
-                            "This key comes from the environment" +
-                                (connection.label?.let { " ($it)" } ?: "") +
-                                " and is read-only here. Unset it to manage the key in BOSS.",
-                        style = SecretPanelType.meta,
-                        color = BossThemeColors.TextSecondary,
-                    )
-                } else if (noKeyNeeded) {
-                    // Ollama takes no credential on the wire, so there is nothing to
-                    // paste and no "Save key" flow to offer — offering one would just
-                    // invite a dummy value nobody needs.
-                    OllamaSetupNotice(
-                        info = state.ollamaSystemInfo,
-                        onInstall = viewModel::openOllamaInstallPage,
-                    )
-                } else {
-                    // A stored key is never rendered back — the field is for replacing
-                    // it. Settings has no business displaying credential material.
-                    BossTextField(
-                        value = state.keyDrafts[descriptor.id].orEmpty(),
-                        onValueChange = { viewModel.updateKeyDraft(descriptor.id, it) },
-                        label = "API key",
-                        placeholder =
-                            if (connection.source == CredentialSource.STORED) {
-                                "A key is stored — enter a new one to replace it"
-                            } else {
-                                descriptor.keyPlaceholder
-                            },
-                        enabled = state.storeAvailable && !busy,
-                        singleLine = true,
-                    )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        BossPrimaryButton(
-                            text = "Save key",
-                            onClick = { viewModel.saveKey(descriptor.id) },
-                            enabled = state.storeAvailable && !busy &&
-                                state.keyDrafts[descriptor.id]?.isNotBlank() == true,
+            if (ollamaBlocked) {
+                // Nothing below this is reachable: no key to enter, no model list worth
+                // fetching, no activate button that could ever resolve a credential.
+                OllamaUnavailableContent(info = state.ollamaSystemInfo)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (brokered) {
+                        // No key field at all: there is nothing for the user to paste, and
+                        // offering one would invite them to store a credential that this
+                        // provider mints for itself and that expires within hours.
+                        Text(
+                            text =
+                                if (connection.source == CredentialSource.BROKERED) {
+                                    "Authorised by your BOSS sign-in. A short-lived key is fetched " +
+                                        "when needed and never stored."
+                                } else {
+                                    "Sign in to BOSS with an account that has access. This provider " +
+                                        "has no API key to enter."
+                                },
+                            style = SecretPanelType.meta,
+                            color = BossThemeColors.TextSecondary,
                         )
-                        if (connection.source == CredentialSource.STORED) {
-                            BossSecondaryButton(
-                                text = "Remove",
-                                onClick = { viewModel.clearKey(descriptor.id) },
-                                enabled = !busy,
-                                isDestructive = true,
+                        BossSecondaryButton(
+                            text = "Check access",
+                            onClick = { viewModel.refreshBrokeredCredential(descriptor.id) },
+                            enabled = !busy,
+                        )
+                    } else if (fromEnvironment) {
+                        Text(
+                            text =
+                                "This key comes from the environment" +
+                                    (connection.label?.let { " ($it)" } ?: "") +
+                                    " and is read-only here. Unset it to manage the key in BOSS.",
+                            style = SecretPanelType.meta,
+                            color = BossThemeColors.TextSecondary,
+                        )
+                    } else if (noKeyNeeded) {
+                        // Ollama takes no credential on the wire, so there is nothing to
+                        // paste and no "Save key" flow to offer — offering one would just
+                        // invite a dummy value nobody needs.
+                        OllamaSetupNotice(
+                            info = state.ollamaSystemInfo,
+                            installingTag = state.installingOllamaModelTag,
+                            onInstall = viewModel::openOllamaInstallPage,
+                            onInstallModel = viewModel::installOllamaModel,
+                        )
+                    } else {
+                        // A stored key is never rendered back — the field is for replacing
+                        // it. Settings has no business displaying credential material.
+                        BossTextField(
+                            value = state.keyDrafts[descriptor.id].orEmpty(),
+                            onValueChange = { viewModel.updateKeyDraft(descriptor.id, it) },
+                            label = "API key",
+                            placeholder =
+                                if (connection.source == CredentialSource.STORED) {
+                                    "A key is stored — enter a new one to replace it"
+                                } else {
+                                    descriptor.keyPlaceholder
+                                },
+                            enabled = state.storeAvailable && !busy,
+                            singleLine = true,
+                        )
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            BossPrimaryButton(
+                                text = "Save key",
+                                onClick = { viewModel.saveKey(descriptor.id) },
+                                enabled = state.storeAvailable && !busy &&
+                                    state.keyDrafts[descriptor.id]?.isNotBlank() == true,
                             )
+                            if (connection.source == CredentialSource.STORED) {
+                                BossSecondaryButton(
+                                    text = "Remove",
+                                    onClick = { viewModel.clearKey(descriptor.id) },
+                                    enabled = !busy,
+                                    isDestructive = true,
+                                )
+                            }
+                            if (descriptor.consoleUrl != null) {
+                                BossSecondaryButton(
+                                    text = "Get API key",
+                                    onClick = { viewModel.openProviderConsole(descriptor.id) },
+                                    enabled = !busy,
+                                )
+                            }
                         }
-                        if (descriptor.consoleUrl != null) {
-                            BossSecondaryButton(
-                                text = "Get API key",
-                                onClick = { viewModel.openProviderConsole(descriptor.id) },
-                                enabled = !busy,
-                            )
-                        }
+                    }
+
+                    if (descriptor.envVarNames.isNotEmpty() && !fromEnvironment && !brokered) {
+                        Text(
+                            text = "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
+                            style = SecretPanelType.caption,
+                            color = BossThemeColors.TextMuted,
+                        )
                     }
                 }
 
-                if (descriptor.envVarNames.isNotEmpty() && !fromEnvironment && !brokered) {
-                    Text(
-                        text = "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
-                        style = SecretPanelType.caption,
-                        color = BossThemeColors.TextMuted,
+                ModelSectionContent(
+                    descriptor = descriptor,
+                    connection = connection,
+                    catalog = state.catalogOf(descriptor.id),
+                    busy = busy,
+                    onSelectModel = { viewModel.selectModel(descriptor.id, it) },
+                    onRefresh = { viewModel.refreshModels(descriptor.id) },
+                    onTest = { viewModel.testConnection(descriptor.id) },
+                    onEndpointChange = { viewModel.setCustomEndpoint(descriptor.id, it) },
+                    onManualModelChange = { viewModel.setManualModelId(descriptor.id, it) },
+                )
+
+                if (connection.isConfigured && descriptor.id != state.activeProviderId) {
+                    BossSecondaryButton(
+                        text = "Use ${descriptor.displayName} for AI features",
+                        onClick = { viewModel.setActiveProvider(descriptor.id) },
+                        enabled = !busy,
                     )
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        ModelSection(
-            descriptor = descriptor,
-            connection = connection,
-            catalog = state.catalogOf(descriptor.id),
-            busy = busy,
-            onSelectModel = { viewModel.selectModel(descriptor.id, it) },
-            onRefresh = { viewModel.refreshModels(descriptor.id) },
-            onTest = { viewModel.testConnection(descriptor.id) },
-            onEndpointChange = { viewModel.setCustomEndpoint(descriptor.id, it) },
-            onManualModelChange = { viewModel.setManualModelId(descriptor.id, it) },
-        )
-
-        if (connection.isConfigured && descriptor.id != state.activeProviderId) {
-            Spacer(modifier = Modifier.height(12.dp))
-            BossSecondaryButton(
-                text = "Use ${descriptor.displayName} for AI features",
-                onClick = { viewModel.setActiveProvider(descriptor.id) },
-                enabled = !busy,
-            )
-        }
     }
 }
 
-/** What replaces the whole editor body when [OllamaSystemInfo.meetsMinimum] is false. */
+/** What replaces the rest of the card when [OllamaSystemInfo.meetsMinimum] is false. */
 @Composable
-private fun OllamaUnavailableCard(info: OllamaSystemInfo) {
-    BossCard {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = "Not available on this machine",
-                style = SecretPanelType.bodyStrong,
-                color = BossThemeColors.TextPrimary,
-            )
-            Text(
-                text =
-                    "This machine reports " +
-                        (info.totalRamGb?.let { "about ${it.roundToInt()} GB" } ?: "an unreadable amount") +
-                        " of RAM. Ollama needs at least ${OllamaSystemCheck.MIN_USABLE_RAM_GB.roundToInt()} GB " +
-                        "to run any model usefully, so this provider isn't offered here.",
-                style = SecretPanelType.meta,
-                color = BossThemeColors.TextSecondary,
-            )
-        }
+private fun OllamaUnavailableContent(info: OllamaSystemInfo) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "Not available on this machine",
+            style = SecretPanelType.bodyStrong,
+            color = BossThemeColors.TextPrimary,
+        )
+        Text(
+            text =
+                "This machine reports " +
+                    (info.totalRamGb?.let { "about ${it.roundToInt()} GB" } ?: "an unreadable amount") +
+                    " of RAM. Ollama needs at least ${OllamaSystemCheck.MIN_USABLE_RAM_GB.roundToInt()} GB " +
+                    "to run any model usefully, so this provider isn't offered here.",
+            style = SecretPanelType.meta,
+            color = BossThemeColors.TextSecondary,
+        )
     }
 }
 
 /**
  * What the key section shows for Ollama once it's confirmed to be worth offering at all:
- * whether the binary is here yet, and — either way — a short, RAM-sized shortlist of what to
- * pull once it is running. The live model picker below this only ever shows models already
- * pulled, so naming a few worth pulling is the whole point of this over the generic message
- * every other keyless provider would get.
+ * whether the binary is here yet, and — either way — a picker over a short, RAM-sized
+ * shortlist that pulls a model by calling Ollama's own API, not by naming a terminal command
+ * and hoping the user comes back and runs it. The live model picker below this only ever
+ * shows models already pulled, so getting one pulled from here is the whole point of this
+ * over the generic message every other keyless provider would get.
  */
 @Composable
 private fun OllamaSetupNotice(
     info: OllamaSystemInfo,
+    installingTag: String?,
     onInstall: () -> Unit,
+    onInstallModel: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!info.binaryFound) {
@@ -727,25 +732,102 @@ private fun OllamaSetupNotice(
             Text(
                 text =
                     "Suggested for this machine" +
-                        (info.totalRamGb?.let { " (~${it.roundToInt()} GB RAM)" } ?: "") +
-                        " — run in a terminal, then click Refresh above:",
+                        (info.totalRamGb?.let { " (~${it.roundToInt()} GB RAM)" } ?: "") + ":",
                 style = SecretPanelType.caption,
                 color = BossThemeColors.TextMuted,
             )
-            info.suggestedModels.forEach { model ->
-                Text(
-                    text = "ollama pull ${model.tag}   —   ${model.note}",
-                    style = SecretPanelType.caption,
-                    fontFamily = FontFamily.Monospace,
-                    color = BossThemeColors.TextSecondary,
-                )
-            }
+            OllamaModelInstallPicker(
+                models = info.suggestedModels,
+                installingTag = installingTag,
+                onInstall = onInstallModel,
+            )
         }
     }
 }
 
+/**
+ * A model picker paired with an Install button, rather than a list of `ollama pull` commands
+ * to copy into a terminal — [onInstall] calls Ollama's own API directly. The dropdown mirrors
+ * [ModelPicker]'s shape so the two read as the same control at different points in the flow.
+ */
 @Composable
-private fun ModelSection(
+private fun OllamaModelInstallPicker(
+    models: List<SuggestedOllamaModel>,
+    installingTag: String?,
+    onInstall: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var chosen by remember(models) { mutableStateOf(models.firstOrNull()) }
+    val busy = installingTag != null
+
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(BossThemeColors.BackgroundColor)
+                        .border(1.dp, BossThemeColors.BorderColor, RoundedCornerShape(6.dp))
+                        .clickable(enabled = !busy) { expanded = true }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = chosen?.tag ?: "Select a model",
+                        style = SecretPanelType.body,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (chosen == null) BossThemeColors.TextMuted else BossThemeColors.TextPrimary,
+                    )
+                    chosen?.let {
+                        Text(text = it.note, style = SecretPanelType.caption, color = BossThemeColors.TextMuted)
+                    }
+                }
+                Icon(
+                    imageVector = Icons.Filled.ArrowDropDown,
+                    contentDescription = null,
+                    tint = BossThemeColors.TextSecondary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier.heightIn(max = 320.dp).background(BossThemeColors.SurfaceColor),
+            ) {
+                models.forEach { model ->
+                    DropdownMenuItem(
+                        onClick = {
+                            expanded = false
+                            chosen = model
+                        },
+                    ) {
+                        Column {
+                            Text(
+                                text = model.tag,
+                                style = SecretPanelType.body,
+                                fontFamily = FontFamily.Monospace,
+                                color = BossThemeColors.TextPrimary,
+                            )
+                            Text(text = model.note, style = SecretPanelType.caption, color = BossThemeColors.TextMuted)
+                        }
+                    }
+                }
+            }
+        }
+
+        BossPrimaryButton(
+            text = if (installingTag != null && installingTag == chosen?.tag) "Installing…" else "Install",
+            onClick = { chosen?.let { onInstall(it.tag) } },
+            enabled = !busy && chosen != null,
+        )
+    }
+}
+
+@Composable
+private fun ModelSectionContent(
     descriptor: ProviderDescriptor,
     connection: ProviderConnection,
     catalog: CatalogState,
@@ -756,119 +838,114 @@ private fun ModelSection(
     onEndpointChange: (String) -> Unit,
     onManualModelChange: (String) -> Unit,
 ) {
-    BossCard {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Model",
+                style = SecretPanelType.body,
+                fontWeight = FontWeight.Medium,
+                color = BossThemeColors.TextPrimary,
+                modifier = Modifier.weight(1f),
+            )
+            if (busy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    color = BossThemeColors.AccentColor,
+                    strokeWidth = 2.dp,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            if (descriptor.modelsEndpoint != null && connection.isConfigured) {
+                Icon(
+                    imageVector = Icons.Outlined.Refresh,
+                    contentDescription = "Refresh model list",
+                    tint = BossThemeColors.TextSecondary,
+                    modifier =
+                        Modifier
+                            .size(16.dp)
+                            .clickable(enabled = !busy, onClick = onRefresh),
+                )
+            }
+        }
+
+        when {
+            // No models endpoint (a custom/self-hosted runtime): there is nothing
+            // authoritative to ask, so the endpoint and model id are typed in. Without
+            // these two fields a custom provider could be given a key and still never
+            // be usable, because activeConfig() requires both.
+            ProviderRegistry.needsManualModel(descriptor) -> {
                 Text(
-                    text = "Model",
-                    style = SecretPanelType.body,
-                    fontWeight = FontWeight.Medium,
-                    color = BossThemeColors.TextPrimary,
-                    modifier = Modifier.weight(1f),
+                    text =
+                        "${descriptor.displayName} has no model list to query — " +
+                            "enter the endpoint and the model id it expects.",
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextSecondary,
                 )
-                if (busy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(14.dp),
-                        color = BossThemeColors.AccentColor,
-                        strokeWidth = 2.dp,
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
-                if (descriptor.modelsEndpoint != null && connection.isConfigured) {
-                    Icon(
-                        imageVector = Icons.Outlined.Refresh,
-                        contentDescription = "Refresh model list",
-                        tint = BossThemeColors.TextSecondary,
-                        modifier =
-                            Modifier
-                                .size(16.dp)
-                                .clickable(enabled = !busy, onClick = onRefresh),
-                    )
-                }
-            }
-
-            when {
-                // No models endpoint (a custom/self-hosted runtime): there is nothing
-                // authoritative to ask, so the endpoint and model id are typed in. Without
-                // these two fields a custom provider could be given a key and still never
-                // be usable, because activeConfig() requires both.
-                ProviderRegistry.needsManualModel(descriptor) -> {
-                    Text(
-                        text =
-                            "${descriptor.displayName} has no model list to query — " +
-                                "enter the endpoint and the model id it expects.",
-                        style = SecretPanelType.meta,
-                        color = BossThemeColors.TextSecondary,
-                    )
-                    ManualEndpointAndModel(
-                        connection = connection,
-                        enabled = !busy,
-                        onEndpointCommit = onEndpointChange,
-                        onModelCommit = onManualModelChange,
-                    )
-                }
-
-                catalog is CatalogState.NotConfigured ->
-                    Text(
-                        text = "Add an API key to load ${descriptor.displayName}'s models.",
-                        style = SecretPanelType.meta,
-                        color = BossThemeColors.TextSecondary,
-                    )
-
-                catalog is CatalogState.Loading ->
-                    Text(
-                        text = "Loading models from ${descriptor.displayName}…",
-                        style = SecretPanelType.meta,
-                        color = BossThemeColors.TextSecondary,
-                    )
-
-                else -> {
-                    val loaded =
-                        when (catalog) {
-                            is CatalogState.Loaded -> catalog
-                            is CatalogState.Failed -> catalog.lastKnown
-                            else -> null
-                        }
-
-                    if (catalog is CatalogState.Failed) {
-                        Text(
-                            text = catalog.message,
-                            style = SecretPanelType.meta,
-                            color = BossThemeColors.ErrorColor,
-                        )
-                    }
-
-                    if (loaded == null) {
-                        Text(
-                            text = "No models available yet.",
-                            style = SecretPanelType.meta,
-                            color = BossThemeColors.TextSecondary,
-                        )
-                    } else {
-                        ModelPicker(
-                            models = loaded.models,
-                            selectedModelId = connection.selectedModelId,
-                            enabled = !busy,
-                            onSelect = onSelectModel,
-                        )
-                        FreshnessLine(loaded)
-                        loaded.models
-                            .firstOrNull { it.id == connection.selectedModelId }
-                            ?.let { ModelFacts(it) }
-                    }
-                }
-            }
-
-            if (connection.isConfigured && descriptor.modelsEndpoint != null) {
-                BossSecondaryButton(
-                    text = "Test connection",
-                    onClick = onTest,
+                ManualEndpointAndModel(
+                    connection = connection,
                     enabled = !busy,
+                    onEndpointCommit = onEndpointChange,
+                    onModelCommit = onManualModelChange,
                 )
             }
+
+            catalog is CatalogState.NotConfigured ->
+                Text(
+                    text = "Add an API key to load ${descriptor.displayName}'s models.",
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextSecondary,
+                )
+
+            catalog is CatalogState.Loading ->
+                Text(
+                    text = "Loading models from ${descriptor.displayName}…",
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextSecondary,
+                )
+
+            else -> {
+                val loaded =
+                    when (catalog) {
+                        is CatalogState.Loaded -> catalog
+                        is CatalogState.Failed -> catalog.lastKnown
+                        else -> null
+                    }
+
+                if (catalog is CatalogState.Failed) {
+                    Text(
+                        text = catalog.message,
+                        style = SecretPanelType.meta,
+                        color = BossThemeColors.ErrorColor,
+                    )
+                }
+
+                if (loaded == null) {
+                    Text(
+                        text = "No models available yet.",
+                        style = SecretPanelType.meta,
+                        color = BossThemeColors.TextSecondary,
+                    )
+                } else {
+                    ModelPicker(
+                        models = loaded.models,
+                        selectedModelId = connection.selectedModelId,
+                        enabled = !busy,
+                        onSelect = onSelectModel,
+                    )
+                    FreshnessLine(loaded)
+                    loaded.models
+                        .firstOrNull { it.id == connection.selectedModelId }
+                        ?.let { ModelFacts(it) }
+                }
+            }
+        }
+
+        if (connection.isConfigured && descriptor.modelsEndpoint != null) {
+            BossSecondaryButton(
+                text = "Test connection",
+                onClick = onTest,
+                enabled = !busy,
+            )
         }
     }
 }

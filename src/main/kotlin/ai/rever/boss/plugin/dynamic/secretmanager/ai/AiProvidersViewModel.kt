@@ -73,6 +73,8 @@ data class AiProvidersUiState(
      * before the real check lands.
      */
     val ollamaSystemInfo: OllamaSystemInfo = OllamaSystemInfo(binaryFound = false, totalRamGb = null),
+    /** The tag currently being pulled into Ollama, or null when no pull is in flight. */
+    val installingOllamaModelTag: String? = null,
     val connections: Map<String, ProviderConnection> = emptyMap(),
     val catalogs: Map<String, CatalogState> = emptyMap(),
     /** In-progress key edits, keyed by provider id. Never persisted until saved. */
@@ -141,6 +143,8 @@ class AiProvidersViewModel(
      * [gateway] are — so it's fakeable without touching the real filesystem or `Desktop`.
      */
     private val ollamaSystemCheck: OllamaSystemCheck = OllamaSystemCheck(),
+    /** How a suggested model is actually pulled. Injected for the same reason as above. */
+    private val ollamaModelInstaller: OllamaModelInstaller = OllamaModelInstaller(),
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -480,6 +484,36 @@ class AiProvidersViewModel(
     fun openOllamaInstallPage() {
         if (!ollamaSystemCheck.openInstallPage()) {
             _state.update { it.copy(notice = "Open ${OllamaSystemCheck.INSTALL_URL} to install Ollama.") }
+        }
+    }
+
+    /**
+     * Pull [tag] into the local Ollama daemon, then select it once it lands.
+     *
+     * One pull at a time: a second press while [AiProvidersUiState.installingOllamaModelTag]
+     * is already set is a no-op rather than a second concurrent pull racing the first for the
+     * same disk write. Selecting the model on success — rather than leaving the picker empty
+     * for the user to notice a new entry and choose it themselves — is what makes "install"
+     * feel like it finished something, not just started a download.
+     */
+    fun installOllamaModel(tag: String) {
+        if (_state.value.installingOllamaModelTag != null) return
+        _state.update { it.copy(installingOllamaModelTag = tag, error = null, notice = null) }
+        scope.launch {
+            ollamaModelInstaller
+                .pull(tag)
+                .onSuccess {
+                    _state.update { it.copy(installingOllamaModelTag = null, notice = "Pulled $tag.") }
+                    refreshOne(ProviderRegistry.OLLAMA, force = true)
+                    selectModel(ProviderRegistry.OLLAMA, tag)
+                }.onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            installingOllamaModelTag = null,
+                            error = error.message ?: "Could not pull $tag.",
+                        )
+                    }
+                }
         }
     }
 
