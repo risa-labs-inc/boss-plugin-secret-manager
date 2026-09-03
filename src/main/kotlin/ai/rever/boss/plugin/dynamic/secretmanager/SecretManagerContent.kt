@@ -2771,7 +2771,9 @@ private fun AiProviderKeyDialog(
                         onDismissRequest = { providerMenuOpen = false },
                         modifier = Modifier.background(BossThemeColors.SurfaceColor)
                     ) {
-                        ProviderRegistry.all.forEach { candidate ->
+                        // userKeyed, not all: a keyless or brokered provider has no key to
+                        // store here. See ProviderRegistry.userKeyed.
+                        ProviderRegistry.userKeyed.forEach { candidate ->
                             DropdownMenuItem(
                                 onClick = {
                                     providerMenuOpen = false

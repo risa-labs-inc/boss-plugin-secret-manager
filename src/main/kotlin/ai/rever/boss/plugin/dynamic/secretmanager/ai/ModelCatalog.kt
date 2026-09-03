@@ -115,7 +115,9 @@ class ModelCatalog(
         force: Boolean = false,
         nowEpochMs: Long = System.currentTimeMillis(),
     ) {
-        if (apiKey.isBlank()) {
+        // A provider that declares it needs no key (a local Ollama daemon) is fetched
+        // with a blank one rather than reported as unconfigured forever.
+        if (descriptor.requiresApiKey && apiKey.isBlank()) {
             markNotConfigured(descriptor.id)
             return
         }

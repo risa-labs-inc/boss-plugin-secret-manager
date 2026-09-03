@@ -487,4 +487,48 @@ class ProviderRegistryTest {
         val openai = ProviderRegistry.find(ProviderRegistry.OPENAI)!!
         assertFalse(openai.chatEndpointFor("gpt-5").contains("gpt-5"))
     }
+
+    @Test
+    fun `openrouter and ollama speak the openai-compatible wire format`() {
+        // Both ride the OPENAI_CHAT adapter the gateway plugin already implements —
+        // adding a provider here is a registry entry, not a new wire format.
+        val openRouter = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+        val ollama = ProviderRegistry.find(ProviderRegistry.OLLAMA)!!
+
+        assertEquals(WireFormat.OPENAI_CHAT, openRouter.wireFormat)
+        assertEquals(WireFormat.OPENAI_CHAT, ollama.wireFormat)
+        assertEquals(CredentialTransport.BEARER_HEADER, openRouter.credentialTransport)
+        assertEquals(CredentialTransport.BEARER_HEADER, ollama.credentialTransport)
+    }
+
+    @Test
+    fun `ollama is the only provider besides custom that needs no key`() {
+        val keyless = ProviderRegistry.all.filterNot { it.requiresApiKey }.map { it.id }
+        assertEquals(listOf(ProviderRegistry.OLLAMA), keyless)
+
+        // OpenRouter is a real hosted API behind its own key, unlike the local daemon
+        // next to it in the registry — pin that the two are not accidentally conflated.
+        assertTrue(ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!.requiresApiKey)
+    }
+}
+
+/**
+ * Pins [ProviderConnection.isConfigured] for the one provider that needs no credential
+ * at all, alongside the ordinary key-bearing case it must not disturb.
+ */
+class ProviderConnectionConfiguredTest {
+    @Test
+    fun `a keyless provider is configured with a blank key`() {
+        val connection = ProviderConnection(providerId = ProviderRegistry.OLLAMA, apiKey = "", source = CredentialSource.NONE)
+        assertTrue(connection.isConfigured)
+    }
+
+    @Test
+    fun `an ordinary provider still needs a key`() {
+        val connection = ProviderConnection(providerId = ProviderRegistry.OPENROUTER, apiKey = "", source = CredentialSource.NONE)
+        assertFalse(connection.isConfigured)
+
+        val withKey = connection.copy(apiKey = "sk-or-v1-abc")
+        assertTrue(withKey.isConfigured)
+    }
 }

@@ -422,7 +422,9 @@ class SecretManagerViewModel(
 
             // Pre-select the first provider that has no key yet, since adding is the
             // common case; changing an existing one is then an explicit pick.
-            val firstUnset = ProviderRegistry.all
+            // Over the same list the dialog offers, or this pre-selects a provider the user
+            // cannot then see in the picker.
+            val firstUnset = ProviderRegistry.userKeyed
                 .firstOrNull { (sources[it.id] ?: CredentialSource.NONE) == CredentialSource.NONE }
                 ?.id
 
