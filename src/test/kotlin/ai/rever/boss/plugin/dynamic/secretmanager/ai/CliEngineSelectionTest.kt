@@ -95,6 +95,7 @@ class CliEngineSelectionTest {
             scope = scope,
             envResolver = env,
             cliEngines = cli,
+            ollamaSystemCheck = noOllamaOnThisMachine(),
         )
     }
 

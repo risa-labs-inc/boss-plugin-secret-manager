@@ -239,6 +239,25 @@ object ProviderRegistry {
     val all: List<ProviderDescriptor> =
         listOf(together, risaGlm, moonshot, custom, ollama, openRouter, xai, anthropic, openai, google)
 
+    /**
+     * The providers a user can hand this plugin a key for — everything the secrets section's
+     * "Add AI provider key" dialog may offer.
+     *
+     * Two kinds are excluded, for different reasons, and both were reachable through that
+     * dialog before this list existed:
+     *
+     * - a **keyless** provider ([ProviderDescriptor.requiresApiKey] false). Ollama has nothing
+     *   to store; picking it wrote an `OLLAMA_API_KEY` into the vault that nothing would ever
+     *   read, while the AI row went on correctly saying "No key needed" beside it. Worse, its
+     *   endpoint is plain `http://` with a bearer transport, so a stray stored key would be
+     *   sent in cleartext for no reason at all.
+     * - a **brokered** provider ([ProviderDescriptor.brokerId] non-null). RISA Codex GLM mints
+     *   its own short-lived credential from the BOSS sign-in, and the rule everywhere else in
+     *   this plugin is that a brokered credential is never written to disk — a dialog that
+     *   invites the user to type one in is the one place that rule was still reachable.
+     */
+    val userKeyed: List<ProviderDescriptor> = all.filter { it.requiresApiKey && it.brokerId == null }
+
     private val byId: Map<String, ProviderDescriptor> = all.associateBy { it.id }
 
     /** The provider selected when nothing has been chosen yet — first in display order. */

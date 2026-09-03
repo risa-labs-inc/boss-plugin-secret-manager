@@ -49,7 +49,7 @@ class OllamaSystemCheck(
     private val home: String = System.getProperty("user.home").orEmpty(),
     private val isWindows: Boolean =
         System.getProperty("os.name")?.startsWith("Windows", ignoreCase = true) == true,
-    private val isExecutable: (File) -> Boolean = { runCatching { it.canExecute() }.getOrDefault(false) },
+    private val isExecutable: (File) -> Boolean = ::isRunnableBinary,
     /** Total physical RAM in bytes, or null when it could not be read. */
     private val physicalMemoryBytes: () -> Long? = ::readTotalPhysicalMemoryBytes,
     /** Hands a URL to the platform's browser. Injected so the route is testable. */
@@ -99,6 +99,18 @@ class OllamaSystemCheck(
         const val INSTALL_URL = "https://ollama.com/download"
 
         /**
+         * Whether a candidate path is the runnable binary — the default [isExecutable].
+         *
+         * `isFile` as well as `canExecute`: `canExecute` is true for a **directory** carrying
+         * the x bit, so on its own it reports the binary found on a machine that merely has an
+         * `~/.ollama/bin/ollama/` directory. Named rather than a lambda so the rule itself is
+         * testable; a test that went through the constructor would have to inject over it, and
+         * would then be asserting on its own fake.
+         */
+        fun isRunnableBinary(file: File): Boolean =
+            runCatching { file.isFile && file.canExecute() }.getOrDefault(false)
+
+        /**
          * Ollama's own published floor for running its smallest models at all (see its
          * README: "You should have at least 8 GB of RAM available to run the 7B models").
          * Below this, no model is worth offering.
@@ -127,6 +139,18 @@ class OllamaSystemCheck(
         fun suggestedModelsFor(totalRamGb: Double): List<SuggestedOllamaModel> =
             RAM_TIERS.firstOrNull { totalRamGb >= it.first }?.second.orEmpty()
 
+        /**
+         * The one hardcoded model list in this plugin, and a deliberate exception to the rule
+         * `ModelCatalogClient` exists to enforce ("the host implementation this replaced shipped
+         * hardcoded models that drifted years out of date"). These are *suggestions for a machine
+         * that has pulled nothing yet* — there is no endpoint to ask, because the honest answer
+         * from an empty daemon is an empty list. The live picker stays the only authority on what
+         * is actually installed.
+         *
+         * The tags will drift. When `llama3.1:70b` stops being the right suggestion for a 64 GB
+         * machine, this list is the only place to change — nothing keys off these strings, and a
+         * tag that no longer exists surfaces as a failed pull rather than a silent wrong model.
+         */
         private val RAM_TIERS: List<Pair<Double, List<SuggestedOllamaModel>>> =
             listOf(
                 64.0 to

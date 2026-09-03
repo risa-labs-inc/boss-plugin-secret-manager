@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
 import java.io.File
 import java.net.URI
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -75,7 +76,12 @@ class OllamaSystemCheckTest {
     fun `opening the install page hands the real URL to the injected browser`() {
         var seen: URI? = null
         val opened =
-            OllamaSystemCheck(browse = { uri -> seen = uri; true }).openInstallPage()
+            OllamaSystemCheck(
+                path = "",
+                home = "/home/test",
+                physicalMemoryBytes = { null },
+                browse = { uri -> seen = uri; true },
+            ).openInstallPage()
 
         assertTrue(opened)
         assertEquals(OllamaSystemCheck.INSTALL_URL, seen.toString())
@@ -87,6 +93,27 @@ class OllamaSystemCheckTest {
     }
 
     @Test
+    fun `a directory carrying the x bit is not mistaken for the binary`() {
+        // `canExecute()` alone is true for a directory, so the default predicate has to test
+        // `isFile` too - otherwise a machine that merely has an `~/.ollama/bin/ollama/`
+        // directory reads as installed. Asserted on the predicate itself rather than through
+        // `current()`: the candidate list includes absolute paths like /opt/homebrew/bin, so a
+        // test going through the constructor would pass or fail on whether the machine running
+        // it happens to have Ollama.
+        val root = Files.createTempDirectory("ollama-candidates").toFile()
+        try {
+            val asDirectory = File(root, "ollama").apply { mkdirs(); setExecutable(true) }
+            assertFalse(OllamaSystemCheck.isRunnableBinary(asDirectory))
+
+            asDirectory.deleteRecursively()
+            val asFile = File(root, "ollama").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            assertTrue(OllamaSystemCheck.isRunnableBinary(asFile))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `home-relative candidate directories are expanded before checking`() {
         val checked = mutableListOf<File>()
         val custom =
@@ -95,6 +122,7 @@ class OllamaSystemCheckTest {
                 home = "/home/test",
                 isWindows = false,
                 isExecutable = { file -> checked += file; false },
+                physicalMemoryBytes = { null },
             )
         custom.current()
 

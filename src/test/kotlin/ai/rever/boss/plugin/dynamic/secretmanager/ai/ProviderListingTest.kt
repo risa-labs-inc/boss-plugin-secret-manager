@@ -51,4 +51,57 @@ class ProviderListingTest {
             ),
         )
     }
+
+    @Test
+    fun `a keyless provider the user added stays listed while its catalog is still failing`() {
+        // The user with no daemon yet is the one the install flow exists for. Picking Ollama
+        // from "Add provider" and closing the card must not silently undo the add.
+        val ollama = ProviderRegistry.find(ProviderRegistry.OLLAMA)!!
+        val alwaysConfigured = connection(ollama.id, configured = false)
+
+        assertTrue(
+            isProviderListed(
+                ollama,
+                alwaysConfigured,
+                CatalogState.Failed(message = "Connection refused"),
+                wasAddedByUser = true,
+            ),
+        )
+        assertTrue(
+            isProviderListed(ollama, alwaysConfigured, CatalogState.NotConfigured, wasAddedByUser = true),
+        )
+    }
+
+    @Test
+    fun `an unconfigured ordinary provider is not listed just because it was added`() {
+        // The add flag only substitutes for the catalog rule, which is keyless-only. An
+        // ordinary provider still earns its row by having a credential - otherwise opening
+        // and cancelling the Add dropdown would leave a row that can never be used.
+        val openRouter = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+
+        assertFalse(
+            isProviderListed(
+                openRouter,
+                connection(openRouter.id, configured = false),
+                CatalogState.NotConfigured,
+                wasAddedByUser = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `the key dialog is offered only providers that have a key to store`() {
+        // ProviderRegistry.userKeyed backs the secrets section's "Add AI provider key" dialog.
+        // Ollama has nothing to store; RISA GLM mints its own and must never be written down.
+        val offered = ProviderRegistry.userKeyed.map { it.id }
+
+        assertFalse(ProviderRegistry.OLLAMA in offered)
+        assertFalse(ProviderRegistry.RISA_GLM in offered)
+        assertTrue(ProviderRegistry.OPENROUTER in offered)
+        assertTrue(ProviderRegistry.ANTHROPIC in offered)
+        assertTrue(
+            ProviderRegistry.userKeyed.all { it.requiresApiKey && it.brokerId == null },
+            "userKeyed must hold exactly the providers a user can hand a key to",
+        )
+    }
 }

@@ -16,8 +16,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.ConnectException
+import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /** Everything the AI providers panel renders. */
 data class AiProvidersUiState(
@@ -67,14 +71,33 @@ data class AiProvidersUiState(
     /** True while the Toolbox is being asked, so the button cannot be pressed twice. */
     val isAskingForGateway: Boolean = false,
     /**
-     * What this machine can tell us about running Ollama: installed or not, and how much RAM
-     * there is. Defaults to "assume it's fine" (unknown RAM reads as meeting the minimum, see
-     * [OllamaSystemInfo.meetsMinimum]) rather than blocking the provider for the one frame
-     * before the real check lands.
+     * What this machine can tell us about running Ollama, or **null until the probe answers**.
+     *
+     * Null rather than a `binaryFound = false` default for the same reason
+     * [CliEngineHealth.Unknown] exists and [gatewayNotice] starts at NONE: the probe is
+     * asynchronous, and a card that renders "Ollama doesn't appear to be installed on this
+     * machine" in the frame before it lands is making a claim rather than waiting — to a user
+     * who does have it installed. Everything reading this treats null as "don't say yet", and
+     * unknown RAM still reads as meeting the minimum once it *has* answered (see
+     * [OllamaSystemInfo.meetsMinimum]).
      */
-    val ollamaSystemInfo: OllamaSystemInfo = OllamaSystemInfo(binaryFound = false, totalRamGb = null),
+    val ollamaSystemInfo: OllamaSystemInfo? = null,
     /** The tag currently being pulled into Ollama, or null when no pull is in flight. */
     val installingOllamaModelTag: String? = null,
+    /**
+     * Providers the user picked from "Add provider" in this session.
+     *
+     * Only a keyless provider needs this. An ordinary one earns its row by having a credential;
+     * a keyless one earns it by having a reachable daemon (`isProviderListed`), which is exactly
+     * what the user who just added Ollama does *not* have yet — so without this the row they
+     * added vanishes the moment they close the card, with nothing said, for precisely the user
+     * the whole install flow exists for.
+     *
+     * Session-scoped rather than persisted on purpose: on the next launch the rule that decides
+     * the row is "is the daemon answering", which is the honest one. This only stops an add from
+     * being undone while the user is still standing in front of it.
+     */
+    val addedProviderIds: Set<String> = emptySet(),
     val connections: Map<String, ProviderConnection> = emptyMap(),
     val catalogs: Map<String, CatalogState> = emptyMap(),
     /** In-progress key edits, keyed by provider id. Never persisted until saved. */
@@ -159,6 +182,9 @@ class AiProvidersViewModel(
 
     /** Guards [refreshLapsedBrokeredCredential] so a burst of reads triggers one reload. */
     private val brokeredRefreshInFlight = AtomicBoolean(false)
+
+    /** The pull in flight, so [installOllamaModel] admits exactly one at a time. */
+    private val installingOllamaTag = AtomicReference<String?>(null)
 
     /**
      * When the last brokered refresh *finished*, as a floor on how often one may run.
@@ -288,9 +314,12 @@ class AiProvidersViewModel(
     /** Load credentials, seed cached model lists, then refresh anything stale. */
     fun load() {
         connectionsLoadStarted.set(true)
+        // Marked in flight synchronously, before the launch rather than inside it: `isLoading`
+        // is the panel's own "this entry is still settling" signal, and a caller that returns
+        // from load() to a state still reading `isLoading = false` is being told the load
+        // already finished. Nothing about the flag needs the coroutine.
+        _state.update { it.copy(isLoading = true, error = null) }
         scope.launch {
-            _state.update { it.copy(isLoading = true, error = null) }
-
             catalog.seedFromCache()
             // Re-read the environment on every entry into the section. The panel tells
             // users they can unset a variable to take key management over in BOSS, and the
@@ -300,12 +329,25 @@ class AiProvidersViewModel(
             // Same reasoning applies to whether Ollama is installed: a user who left this
             // panel to go run the installer this "Install Ollama" button just sent them to
             // should not have to restart BOSS to see that it landed.
-            refreshOllamaSystemInfo()
+            //
+            // Awaited rather than launched, unlike the one in `init`: `refreshStale` below
+            // consults `binaryFound` to decide whether to reach for the local daemon at all,
+            // and a probe still in flight would make that decision on a stale answer.
+            readOllamaSystemInfo()
             val connections = loadConnections()
 
             _state.update { current ->
                 current.copy(
                     isLoading = false,
+                    // Closed on every entry into the section. This ViewModel is the plugin's
+                    // single instance, shared between the sidebar AI tab and the host's
+                    // Settings -> AI Providers, so without this an editor left open on one
+                    // visit rides through to the next one - and to the other surface - which
+                    // is the always-open form this redesign set out to remove. Deliberately
+                    // *not* symmetrical with selectedProviderId below: remembering which
+                    // provider you were looking at is useful, reopening a transient form
+                    // nobody asked for this time is not.
+                    isEditorOpen = false,
                     // Keep whichever provider the user had expanded. This runs from a
                     // LaunchedEffect on every entry into the section, so resetting the
                     // selection here discarded their place each time.
@@ -361,9 +403,21 @@ class AiProvidersViewModel(
      */
     private suspend fun refreshStale(connections: Map<String, ProviderConnection>) =
         coroutineScope {
+            val localDaemonAbsent = _state.value.ollamaSystemInfo?.binaryFound == false
             ProviderRegistry.all.map { descriptor ->
                 async {
                     val connection = connections[descriptor.id] ?: return@async
+                    // A keyless provider is unconditionally `isConfigured`, so without this
+                    // every user - overwhelmingly, users who will never run Ollama - fetched
+                    // http://localhost:11434 on every panel entry and on every store
+                    // invalidation, which the secrets list triggers on any create/update/delete.
+                    // Nothing broke (a fast connection-refused, and the Failed state is hidden),
+                    // but "the binary is not on this machine" is a free answer to the same
+                    // question. Only skipped on a *probed* absence: null means not yet asked.
+                    if (!descriptor.requiresApiKey && localDaemonAbsent) {
+                        catalog.markNotConfigured(descriptor.id)
+                        return@async
+                    }
                     if (!connection.isConfigured) {
                         catalog.markNotConfigured(descriptor.id)
                         return@async
@@ -375,16 +429,36 @@ class AiProvidersViewModel(
             Unit
         }
 
-    /** Select [providerId] and open its editor card — picking a row or an Add action. */
+    /**
+     * Select [providerId] and open its editor card — picking a row or an Add action.
+     *
+     * Recording the id in [AiProvidersUiState.addedProviderIds] is what makes an add of a
+     * keyless provider stick; for one that already has a row it is a no-op.
+     */
     fun selectProvider(providerId: String) {
         _state.update {
-            it.copy(selectedProviderId = providerId, isEditorOpen = true, notice = null, error = null)
+            it.copy(
+                selectedProviderId = providerId,
+                isEditorOpen = true,
+                addedProviderIds = it.addedProviderIds + providerId,
+                notice = null,
+                error = null,
+            )
         }
     }
 
-    /** Close the editor card without discarding anything already saved through it. */
+    /**
+     * Close the editor card without discarding anything already saved through it.
+     *
+     * Drops the unsaved key draft, which is what "Cancel" implies and what the rest of this
+     * plugin's handling of plaintext requires: this ViewModel outlives the card by the life of
+     * the process and is shared with the other surface, so a pasted-but-unsaved key would
+     * otherwise sit in memory until shutdown *and* reappear in the Settings window's field.
+     */
     fun closeEditor() {
-        _state.update { it.copy(isEditorOpen = false) }
+        _state.update {
+            it.copy(isEditorOpen = false, keyDrafts = it.keyDrafts - it.selectedProviderId)
+        }
     }
 
     /**
@@ -472,50 +546,97 @@ class AiProvidersViewModel(
      * should ever be a reason a panel entry blocks on disk access.
      */
     fun refreshOllamaSystemInfo() {
-        scope.launch(Dispatchers.IO) {
-            val info =
-                runCatching { ollamaSystemCheck.current() }
-                    .getOrElse { OllamaSystemInfo(binaryFound = false, totalRamGb = null) }
-            _state.update { it.copy(ollamaSystemInfo = info) }
-        }
+        scope.launch { readOllamaSystemInfo() }
     }
 
-    /** Send the user to Ollama's installer. Falls back to naming the URL when no browser answers. */
+    /** [refreshOllamaSystemInfo]'s body, awaitable by a caller whose next step depends on it. */
+    private suspend fun readOllamaSystemInfo() {
+        val info =
+            withContext(Dispatchers.IO) {
+                runCatching { ollamaSystemCheck.current() }
+                    .getOrElse { OllamaSystemInfo(binaryFound = false, totalRamGb = null) }
+            }
+        _state.update { it.copy(ollamaSystemInfo = info) }
+    }
+
+    /**
+     * Send the user to Ollama's installer.
+     *
+     * Through the host's own tab, like the "Get API key" button next to it — an https page is
+     * exactly what `openUrlInActivePanel` is for, and it keeps the user inside BOSS.
+     * `GatewayPresence` reaches for `Desktop` only because it hands over a `boss://` deep link
+     * that a BOSS tab cannot take; this URL has no such constraint. The `Desktop` route survives
+     * as the fallback for a host that serves no split-view operations, and runs on IO because
+     * `Desktop.browse` hands off to the platform (xdg-open, LSOpenURLs) and can block — the same
+     * reason `askToolboxToInstall` is `suspend`.
+     */
     fun openOllamaInstallPage() {
-        if (!ollamaSystemCheck.openInstallPage()) {
-            _state.update { it.copy(notice = "Open ${OllamaSystemCheck.INSTALL_URL} to install Ollama.") }
+        val operations = splitViewOperations
+        if (operations != null) {
+            operations.openUrlInActivePanel(OllamaSystemCheck.INSTALL_URL, "Install Ollama", forceNewTab = true)
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            if (!ollamaSystemCheck.openInstallPage()) {
+                _state.update { it.copy(notice = "Open ${OllamaSystemCheck.INSTALL_URL} to install Ollama.") }
+            }
         }
     }
 
     /**
      * Pull [tag] into the local Ollama daemon, then select it once it lands.
      *
-     * One pull at a time: a second press while [AiProvidersUiState.installingOllamaModelTag]
-     * is already set is a no-op rather than a second concurrent pull racing the first for the
-     * same disk write. Selecting the model on success — rather than leaving the picker empty
-     * for the user to notice a new entry and choose it themselves — is what makes "install"
-     * feel like it finished something, not just started a download.
+     * One pull at a time, held in an [AtomicReference] rather than read back off `_state`:
+     * this is public API on a ViewModel two surfaces share, so a check-then-act on the state
+     * flow is only safe for as long as every caller happens to be the UI thread. Losing the
+     * `compareAndSet` means two concurrent pulls racing each other for the same disk write.
+     *
+     * Selecting the model on success — rather than leaving the picker empty for the user to
+     * notice a new entry and choose it themselves — is what makes "install" feel like it
+     * finished something, not just started a download. The busy flag clears *after* the
+     * catalog refresh and the selection, the way `saveKey` sequences it: clearing first
+     * re-enables Install while the refresh it depends on is still in flight.
      */
     fun installOllamaModel(tag: String) {
-        if (_state.value.installingOllamaModelTag != null) return
+        if (!installingOllamaTag.compareAndSet(null, tag)) return
         _state.update { it.copy(installingOllamaModelTag = tag, error = null, notice = null) }
         scope.launch {
-            ollamaModelInstaller
-                .pull(tag)
-                .onSuccess {
-                    _state.update { it.copy(installingOllamaModelTag = null, notice = "Pulled $tag.") }
-                    refreshOne(ProviderRegistry.OLLAMA, force = true)
-                    selectModel(ProviderRegistry.OLLAMA, tag)
-                }.onFailure { error ->
-                    _state.update {
-                        it.copy(
-                            installingOllamaModelTag = null,
-                            error = error.message ?: "Could not pull $tag.",
-                        )
+            try {
+                ollamaModelInstaller
+                    .pull(tag)
+                    .onSuccess {
+                        refreshOne(ProviderRegistry.OLLAMA, force = true)
+                        selectModel(ProviderRegistry.OLLAMA, tag)
+                        _state.update { it.copy(notice = "Pulled $tag.") }
+                    }.onFailure { error ->
+                        _state.update { it.copy(error = ollamaFailureMessage(tag, error)) }
                     }
-                }
+            } finally {
+                installingOllamaTag.set(null)
+                _state.update { it.copy(installingOllamaModelTag = null) }
+            }
         }
     }
+
+    /**
+     * A pull failure in words the user can act on.
+     *
+     * The raw cause is a `ConnectException` whose message is "Connection refused", which tells
+     * a user nothing about what to do — and it is the *expected* failure for the two states this
+     * panel already knows about: the binary is not here, or it is here and the daemon is not
+     * running. Anything else keeps the underlying message, which for Ollama's own mid-stream
+     * errors ("pull model manifest: file does not exist") is the useful one.
+     */
+    private fun ollamaFailureMessage(tag: String, error: Throwable): String =
+        when {
+            error is ConnectException || error is SocketTimeoutException ->
+                if (_state.value.ollamaSystemInfo?.binaryFound == true) {
+                    "Ollama isn't running — start it and try again."
+                } else {
+                    "Ollama isn't installed on this machine yet — install it first, then pull $tag."
+                }
+            else -> error.message ?: "Could not pull $tag."
+        }
 
     /**
      * Ask the Toolbox to install the gateway, then re-check.
