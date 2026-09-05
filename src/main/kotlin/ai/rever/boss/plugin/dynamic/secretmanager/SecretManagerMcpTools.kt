@@ -98,16 +98,41 @@ internal class SecretManagerMcpToolProvider(
         // reached the caller.
         McpToolDefinition(
             name = "my_secrets_list",
-            description = "List your secrets and secrets shared with you (id, website, username, owner, access).",
-            inputSchema = LIMIT_SCHEMA,
+            description = "List your secrets and secrets shared with you (id, website, username, owner, access). " +
+                "Returns the first $DEFAULT_MY_LIST_LIMIT by default; pass a larger `limit` (up to 500) for more.",
+            inputSchema = MY_LIST_LIMIT_SCHEMA,
             handler = McpToolHandler { args ->
-                val limit = (args.int("limit") ?: 100).coerceIn(1, 500)
+                // Whether the caller chose the size is what decides if truncation is a
+                // surprise. An explicit `limit` is the caller's own cap and returns exactly
+                // what it returned before; a defaulted one is this tool's cap, and a cap the
+                // caller did not ask for has to announce itself.
+                val requested = args.int("limit")
+                val limit = (requested ?: DEFAULT_MY_LIST_LIMIT).coerceIn(1, 500)
                 secrets.getUserSecretsWithSharingInfo(limit).fold(
                     onSuccess = { page ->
                         if (page.data.isEmpty()) McpToolResult("No secrets.")
-                        else McpToolResult(page.data.joinToString("\n") { s ->
-                            "${s.id}\t${s.website}\t${s.username}\t[${accessLabel(s.accessLevel)}]"
-                        })
+                        else {
+                            val rows = page.data.joinToString("\n") { s ->
+                                "${s.id}\t${s.website}\t${s.username}\t[${accessLabel(s.accessLevel)}]"
+                            }
+                            // A silently capped list reads as "these are all my secrets",
+                            // which is the one wrong answer this tool must never give. The
+                            // count of what was omitted is deliberately not stated: there is
+                            // no total on the page, and `hasMore` is derived host-side from
+                            // `size >= limit`, so the only way to count is to fetch (and
+                            // decrypt) every remaining entry - the cost this cap exists to
+                            // avoid. That derivation also means the notice can appear when
+                            // the vault holds exactly `limit` entries; erring toward "look
+                            // again" is the safe direction for a list of secrets.
+                            McpToolResult(
+                                if (requested == null && page.hasMore) {
+                                    rows + "\n\n(Showing the first ${page.data.size}. More secrets exist - " +
+                                        "pass a larger `limit`, up to 500, to see them.)"
+                                } else {
+                                    rows
+                                }
+                            )
+                        }
                     },
                     onFailure = { McpToolResult("Failed: ${it.message}", isError = true) },
                 )
@@ -257,6 +282,27 @@ internal class SecretManagerMcpToolProvider(
     private companion object {
         const val LIMIT_SCHEMA =
             """{"type":"object","properties":{"limit":{"type":"integer","description":"Max secrets (default 100)."}}}"""
+
+        /**
+         * `my_secrets_list`'s default page, and the reason it is not [LIMIT_SCHEMA]'s 100.
+         *
+         * An MCP result is re-read on every subsequent request for the rest of the session,
+         * so this tool's default is a *per-request* cost rather than a one-off. Measured
+         * against a real vault: the tool returned ~4,080 tokens with no argument and ~244
+         * with `limit: 5`, i.e. the size was row count alone - the row is four short columns
+         * and there is nothing per-row left to trim. Nothing in the old schema signalled that
+         * omitting `limit` was the expensive choice, so nothing ever passed one.
+         *
+         * 20 lands near the ~600-token target while still showing most vaults in full. An
+         * explicit `limit` is untouched and still reaches 500.
+         *
+         * Deliberately a **separate** constant from [LIMIT_SCHEMA] rather than an edit to it:
+         * `secrets_list` shares that schema and still defaults to 100, so changing it in
+         * place would misdocument a tool this change does not touch.
+         */
+        const val DEFAULT_MY_LIST_LIMIT = 20
+        const val MY_LIST_LIMIT_SCHEMA =
+            """{"type":"object","properties":{"limit":{"type":"integer","description":"Max secrets to return (default 20, max 500). Omit for a short list; pass a larger value to see more."}}}"""
         const val QUERY_SCHEMA =
             """{"type":"object","properties":{"query":{"type":"string","description":"Search text."}},"required":["query"]}"""
         const val CREATE_SCHEMA =
