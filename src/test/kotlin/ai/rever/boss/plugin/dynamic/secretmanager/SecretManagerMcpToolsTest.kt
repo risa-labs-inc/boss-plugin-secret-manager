@@ -344,8 +344,99 @@ class SecretManagerMcpToolsTest {
             assertFalse(result.text.contains(MORE_EXIST), "nothing was withheld: ${result.text}")
         }
 
+    @Test
+    fun `my_secret_get finds a secret past the first 500`() =
+        runTest {
+            // The bug. One `limit = 500` call answered "No secret with id X" for every id past
+            // row 500 - stated as fact about a secret that was sitting right there.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultWith(size = 700, deepIndex = 599, password = "deep-pw")
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "600")))
+
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains("deep-pw"), result.text)
+        }
+
+    @Test
+    fun `my_secret_get still reports a genuinely absent id as absent`() =
+        runTest {
+            // The other half: refusing to claim absence must not become refusing to answer.
+            // A vault walked to its end supports the flat statement, so it should still make it.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(120)
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "999")))
+
+            assertTrue(result.isError)
+            assertTrue(result.text.contains("No secret with id 999"), result.text)
+            assertFalse(result.text.contains(NOT_SEARCHED), "hedged about a vault it fully read: ${result.text}")
+        }
+
+    @Test
+    fun `my_secret_get does not claim absence beyond the walk bound`() =
+        runTest {
+            // The distinction the whole fix is for. Past the bound the tool has not looked, and
+            // "I stopped looking" must not be delivered as "it does not exist" - an agent acts
+            // on the second one (recreates the credential, reports it missing) and not on the
+            // first. The id here exists; the tool simply never reaches it.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultWith(size = 1500, deepIndex = 1399, password = "unreachable-pw")
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "1400")))
+
+            assertTrue(result.isError)
+            assertTrue(result.text.contains(NOT_SEARCHED), result.text)
+            assertFalse(
+                result.text.contains("No secret with id"),
+                "reported a secret that exists as non-existent: ${result.text}",
+            )
+            assertFalse(result.text.contains("unreachable-pw"), result.text)
+        }
+
+    @Test
+    fun `my_secret_get stops at the page holding the id`() =
+        runTest {
+            // The second defect, which no assertion on the returned text can see: every row
+            // carries a decrypted password, so the old single call materialised 500 plaintexts
+            // to read one. An early hit must cost one page, not the vault.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultWith(size = 700, deepIndex = 2, password = "shallow-pw")
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "3")))
+
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains("shallow-pw"), result.text)
+            assertEquals(1, secrets.sharingCalls.size, "walked past the page holding the id: ${secrets.sharingCalls}")
+            // The row count is the plaintext count, so this is the assertion that pins the cost.
+            assertTrue(
+                secrets.sharingCalls.all { it.first <= 100 },
+                "asked for a page big enough to decrypt the vault: ${secrets.sharingCalls}",
+            )
+        }
+
     /** Rows carry tab-separated columns; the truncation notice does not. */
     private fun rowsIn(text: String): Int = text.lines().count { it.contains('\t') }
+
+    /** [vaultOf] with one entry at [deepIndex] carrying a password nothing else has. */
+    private fun vaultWith(
+        size: Int,
+        deepIndex: Int,
+        password: String,
+    ): List<SecretEntryWithSharingData> =
+        vaultOf(size).mapIndexed { i, e -> if (i == deepIndex) e.copy(password = password) else e }
 
     private fun vaultOf(size: Int): List<SecretEntryWithSharingData> =
         (1..size).map { sharingEntry("$it", "site$it.com", accessLevel = "owner", isOwner = true) }
@@ -403,6 +494,13 @@ class SecretManagerMcpToolsTest {
          * its wording, and pinning the full sentence would fail on a copy edit.
          */
         const val MORE_EXIST = "More secrets exist"
+
+        /**
+         * The distinguishing half of the past-the-bound answer, matched as a fragment for the
+         * same reason as [MORE_EXIST]: what matters is that the tool hedged, not how it worded
+         * it. It must never share wording with the flat "No secret with id X".
+         */
+        const val NOT_SEARCHED = "Searched the first"
     }
 
     /** Records writes; only the members the tools touch do anything. */
@@ -418,6 +516,15 @@ class SecretManagerMcpToolsTest {
         val created = mutableListOf<CreateSecretRequestData>()
         val deleted = mutableListOf<String>()
         var failWrites = false
+
+        /**
+         * Every `(limit, offset)` [getUserSecretsWithSharingInfo] was asked for, oldest first.
+         *
+         * Recorded because the cost this fix is about is invisible in the returned text: a
+         * lookup that answers correctly while decrypting the whole vault to do it looks
+         * identical to one that stopped at the first page.
+         */
+        val sharingCalls = mutableListOf<Pair<Int, Int>>()
 
         override suspend fun getUserSecrets(
             limit: Int,
@@ -447,6 +554,7 @@ class SecretManagerMcpToolsTest {
             limit: Int,
             offset: Int,
         ): Result<PaginatedSecretsWithSharingData> {
+            sharingCalls += limit to offset
             val page = sharingEntries.drop(offset).take(limit)
             return Result.success(
                 PaginatedSecretsWithSharingData(page, hasMore = offset + page.size < sharingEntries.size),

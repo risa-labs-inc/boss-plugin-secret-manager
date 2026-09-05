@@ -7,6 +7,7 @@ import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.api.SecretEntryWithSharingData
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 
 /**
@@ -138,11 +139,12 @@ internal class SecretManagerMcpToolProvider(
                 )
             },
         ),
-        // Known limit, shared with findById: this reads the first 500 accessible entries and
-        // answers "no secret with id X" past that - a wrong answer rather than an error. The
-        // with-sharing set is a strict superset of the managed one, so it is the likelier of the
-        // two to overflow, and each call materialises 500 decrypted passwords to find one. A
-        // by-id RPC is the fix; SecretDataProvider does not have one.
+        // Answers by walking pages (see [findSharedById]) rather than reading one 500-row page.
+        // The old single call had two defects and `offset`, already on SecretDataProvider and
+        // never used, fixes both: an id past row 500 was reported as non-existent - a confident
+        // wrong answer rather than an error - and every lookup materialised 500 decrypted
+        // passwords to read one. The walk exits at the first hit and refuses to claim absence
+        // for a vault it did not finish reading.
         McpToolDefinition(
             name = "my_secret_get",
             description = "Reveal one of your secrets' full value (password, notes) by id. Sensitive.",
@@ -150,15 +152,25 @@ internal class SecretManagerMcpToolProvider(
             handler = McpToolHandler { args ->
                 val id = args.string("id")
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
-                // fold, not getOrNull: a network or auth failure collapsed into "No secret with
-                // id X" tells the agent the secret does not exist, which is a different fact and
-                // one it may act on.
-                val page = secrets.getUserSecretsWithSharingInfo(limit = 500).fold(
-                    onSuccess = { it },
-                    onFailure = { return@McpToolHandler McpToolResult("Failed: ${it.message}", isError = true) },
-                )
-                val entry = page.data.firstOrNull { it.id == id }
-                    ?: return@McpToolHandler McpToolResult("No secret with id $id", isError = true)
+                // Four outcomes, not two. A network or auth failure collapsed into "No secret
+                // with id X" tells the agent the secret does not exist, which is a different
+                // fact and one it may act on - the reason this was a fold and not a getOrNull.
+                // A walk that stopped at the bound makes exactly the same false claim, so it
+                // gets its own answer too.
+                val entry = when (val found = findSharedById(id)) {
+                    is SharedLookup.Found -> found.entry
+                    is SharedLookup.Failed ->
+                        return@McpToolHandler McpToolResult("Failed: ${found.message}", isError = true)
+                    is SharedLookup.Absent ->
+                        return@McpToolHandler McpToolResult("No secret with id $id", isError = true)
+                    is SharedLookup.Unsearched ->
+                        return@McpToolHandler McpToolResult(
+                            "Searched the first ${found.searched} secrets without finding id $id. " +
+                                "More secrets exist beyond that point, so this is not a statement " +
+                                "that the id does not exist.",
+                            isError = true,
+                        )
+                }
                 // The same refusal secret_get carries. This tool shipped without it for three
                 // days and read exactly the keys the other one withholds: same vault, same
                 // secret.read gate, so a gate on one tool and not its sibling is no gate.
@@ -273,8 +285,61 @@ internal class SecretManagerMcpToolProvider(
             null
         }
 
+    /**
+     * `secret_get`'s lookup, still a single 500-row page. Left as it is on purpose: it collapses
+     * "the call failed" and "no such id" into one null, which is a change to `secret_get`'s
+     * contract rather than part of this fix. [findSharedById] is the shape to copy when it moves.
+     */
     private suspend fun findById(id: String): SecretEntryData? =
         secrets.getUserSecrets(limit = 500).getOrNull()?.data?.firstOrNull { it.id == id }
+
+    /**
+     * What a bounded search can honestly conclude.
+     *
+     * [Absent] and [Unsearched] are deliberately separate: "it is not in your vault" and "I
+     * stopped looking" are different facts, and folding the second into the first is the bug
+     * this type exists to make unrepresentable.
+     */
+    private sealed interface SharedLookup {
+        data class Found(val entry: SecretEntryWithSharingData) : SharedLookup
+
+        /** The walk reached the end of the vault without a match: the id really is not there. */
+        data object Absent : SharedLookup
+
+        /** The walk stopped after [searched] entries with pages unread. Says nothing about existence. */
+        data class Unsearched(val searched: Int) : SharedLookup
+
+        data class Failed(val message: String?) : SharedLookup
+    }
+
+    /**
+     * Finds one shared-info secret by id, paging with `offset` and stopping at the first hit.
+     *
+     * The page size is the real cost here: every row carries a *decrypted* password, so a page
+     * is the plaintext this materialises per round trip. A hit in the first chunk therefore
+     * costs one RPC and [ID_SCAN_CHUNK] plaintexts instead of 500.
+     */
+    private suspend fun findSharedById(id: String): SharedLookup {
+        var offset = 0
+        while (offset < ID_SCAN_BOUND) {
+            // Clamped so the walk cannot overshoot the bound on a short page.
+            val limit = minOf(ID_SCAN_CHUNK, ID_SCAN_BOUND - offset)
+            val page = secrets.getUserSecretsWithSharingInfo(limit = limit, offset = offset).fold(
+                onSuccess = { it },
+                onFailure = { return SharedLookup.Failed(it.message) },
+            )
+            page.data.firstOrNull { it.id == id }?.let { return SharedLookup.Found(it) }
+            // A short page still advances by what it returned; an empty one cannot advance at
+            // all, so stop rather than spin - and if the host still claims more, stop without
+            // claiming absence, because that is precisely the page never read.
+            if (page.data.isEmpty()) {
+                return if (page.hasMore) SharedLookup.Unsearched(offset) else SharedLookup.Absent
+            }
+            offset += page.data.size
+            if (!page.hasMore) return SharedLookup.Absent
+        }
+        return SharedLookup.Unsearched(offset)
+    }
 
     private fun idSchema(desc: String): String =
         """{"type":"object","properties":{"id":{"type":"string","description":"$desc"}},"required":["id"]}"""
@@ -303,6 +368,28 @@ internal class SecretManagerMcpToolProvider(
         const val DEFAULT_MY_LIST_LIMIT = 20
         const val MY_LIST_LIMIT_SCHEMA =
             """{"type":"object","properties":{"limit":{"type":"integer","description":"Max secrets to return (default 20, max 500). Omit for a short list; pass a larger value to see more."}}}"""
+
+        /**
+         * The page size and the total cap of `my_secret_get`'s walk.
+         *
+         * **50 per page**, because a page is decrypted plaintext, not just bytes: every row
+         * carries a password, so the chunk size *is* the number of secrets a single lookup
+         * materialises. 50 is [SecretDataProvider]'s own default page and sits well above the
+         * vault [DEFAULT_MY_LIST_LIMIT] was measured against, so a typical vault is answered in
+         * one round trip for a tenth of the old plaintext. Much smaller turns an ordinary miss
+         * into dozens of sequential RPCs; much larger walks back toward decrypting everything to
+         * read one thing.
+         *
+         * **1000 in total**, because the bound is a work cap and not a definition of
+         * correctness - past it the tool says what it actually knows instead of guessing. So it
+         * wants to be the largest number whose *worst* case is still tolerable: 1000 decrypted
+         * rows across 20 sequential RPCs, and only for a genuine miss in a vault that large.
+         * That is strictly more reach than the single `limit = 500` call had, so nothing that
+         * used to be findable stops being findable, and 500 more ids that used to be reported
+         * as non-existent are now returned.
+         */
+        const val ID_SCAN_CHUNK = 50
+        const val ID_SCAN_BOUND = 1000
         const val QUERY_SCHEMA =
             """{"type":"object","properties":{"query":{"type":"string","description":"Search text."}},"required":["query"]}"""
         const val CREATE_SCHEMA =
