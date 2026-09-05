@@ -269,6 +269,87 @@ class SecretManagerMcpToolsTest {
             assertFalse(result.text.contains("shared("), "reported as shared: ${result.text}")
         }
 
+    @Test
+    fun `my_secrets_list caps the defaulted page`() =
+        runTest {
+            // An MCP result is re-read on every later request in the session, so this default
+            // is a per-request cost. At the old default of 100 the tool measured ~4,080 tokens
+            // against a real vault; the size is row count alone.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(50)
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(emptyMap()))
+
+            assertFalse(result.isError, result.text)
+            assertEquals(20, rowsIn(result.text), "defaulted page was not capped: ${result.text}")
+        }
+
+    @Test
+    fun `my_secrets_list says so when the defaulted page truncates`() =
+        runTest {
+            // A silently capped list reads as "these are all my secrets", which is the one
+            // wrong answer this tool must not give.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(50)
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(emptyMap()))
+
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains(MORE_EXIST), "truncation was not announced: ${result.text}")
+        }
+
+    @Test
+    fun `an explicit limit is returned without a truncation notice`() =
+        runTest {
+            // The property that guarantees existing callers lost nothing: an explicit limit is
+            // the caller's own cap, so it returns exactly what it returned before the default
+            // changed - rows only, even though more entries exist beyond the page.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(50)
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(mapOf("limit" to 5)))
+
+            assertFalse(result.isError, result.text)
+            assertEquals(5, rowsIn(result.text), result.text)
+            assertFalse(
+                result.text.contains(MORE_EXIST),
+                "a caller-chosen limit gained a notice it did not have before: ${result.text}",
+            )
+        }
+
+    @Test
+    fun `a vault that fits inside the default is returned whole and unannotated`() =
+        runTest {
+            // The notice is about truncation, not about defaulting: a vault under the cap has
+            // nothing withheld, so telling the reader to look again would be noise.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(3)
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(emptyMap()))
+
+            assertFalse(result.isError, result.text)
+            assertEquals(3, rowsIn(result.text), result.text)
+            assertFalse(result.text.contains(MORE_EXIST), "nothing was withheld: ${result.text}")
+        }
+
+    /** Rows carry tab-separated columns; the truncation notice does not. */
+    private fun rowsIn(text: String): Int = text.lines().count { it.contains('\t') }
+
+    private fun vaultOf(size: Int): List<SecretEntryWithSharingData> =
+        (1..size).map { sharingEntry("$it", "site$it.com", accessLevel = "owner", isOwner = true) }
+
     private fun sharedProviderKey(
         id: String,
         providerId: String,
@@ -314,6 +395,15 @@ class SecretManagerMcpToolsTest {
         createdAt = "2026-01-01",
         updatedAt = "2026-01-01",
     )
+
+    private companion object {
+        /**
+         * The distinguishing half of the truncation notice. Deliberately a fragment rather
+         * than the whole line: the tests are about whether the notice is present, not about
+         * its wording, and pinning the full sentence would fail on a copy edit.
+         */
+        const val MORE_EXIST = "More secrets exist"
+    }
 
     /** Records writes; only the members the tools touch do anything. */
     private class FakeSecrets(
