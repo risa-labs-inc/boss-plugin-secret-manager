@@ -100,15 +100,16 @@ internal class SecretManagerMcpToolProvider(
         McpToolDefinition(
             name = "my_secrets_list",
             description = "List your secrets and secrets shared with you (id, website, username, owner, access). " +
-                "Returns the first $DEFAULT_MY_LIST_LIMIT by default; pass a larger `limit` (up to 500) for more.",
+                "Returns the first $DEFAULT_MY_LIST_LIMIT by default; pass a larger `limit` " +
+                "(up to $MAX_LIST_LIMIT) for more.",
             inputSchema = MY_LIST_LIMIT_SCHEMA,
             handler = McpToolHandler { args ->
-                // Whether the caller chose the size is what decides if truncation is a
-                // surprise. An explicit `limit` is the caller's own cap and returns exactly
-                // what it returned before; a defaulted one is this tool's cap, and a cap the
-                // caller did not ask for has to announce itself.
+                // Whether the caller got the size it chose is what decides if truncation is
+                // a surprise. An in-range `limit` is the caller's own cap and returns exactly
+                // what it returned before; anything else - defaulted, or clamped - is this
+                // tool's cap, and a cap the caller did not ask for has to announce itself.
                 val requested = args.int("limit")
-                val limit = (requested ?: DEFAULT_MY_LIST_LIMIT).coerceIn(1, 500)
+                val limit = (requested ?: DEFAULT_MY_LIST_LIMIT).coerceIn(1, MAX_LIST_LIMIT)
                 secrets.getUserSecretsWithSharingInfo(limit).fold(
                     onSuccess = { page ->
                         if (page.data.isEmpty()) McpToolResult("No secrets.")
@@ -125,10 +126,16 @@ internal class SecretManagerMcpToolProvider(
                             // avoid. That derivation also means the notice can appear when
                             // the vault holds exactly `limit` entries; erring toward "look
                             // again" is the safe direction for a list of secrets.
+                            //
+                            // `requested != limit` rather than `requested == null`: the two
+                            // agree for every in-range limit and part company at the clamp.
+                            // `limit: 1000` came back as 500 rows with no notice - "these are
+                            // all my secrets" again, reachable by a caller who followed the
+                            // schema's own "max 500" one step too far. It also covers
+                            // `limit: 0`/negative, clamped up to a single row.
                             McpToolResult(
-                                if (requested == null && page.hasMore) {
-                                    rows + "\n\n(Showing the first ${page.data.size}. More secrets exist - " +
-                                        "pass a larger `limit`, up to 500, to see them.)"
+                                if (page.hasMore && requested != limit) {
+                                    rows + truncationNotice(page.data.size, limit)
                                 } else {
                                     rows
                                 }
@@ -144,7 +151,8 @@ internal class SecretManagerMcpToolProvider(
         // never used, fixes both: an id past row 500 was reported as non-existent - a confident
         // wrong answer rather than an error - and every lookup materialised 500 decrypted
         // passwords to read one. The walk exits at the first hit and refuses to claim absence
-        // for a vault it did not finish reading.
+        // for a vault it did not finish reading - or finished only by crossing a page boundary
+        // the RPC does not order stably.
         McpToolDefinition(
             name = "my_secret_get",
             description = "Reveal one of your secrets' full value (password, notes) by id. Sensitive.",
@@ -152,22 +160,39 @@ internal class SecretManagerMcpToolProvider(
             handler = McpToolHandler { args ->
                 val id = args.string("id")
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
-                // Four outcomes, not two. A network or auth failure collapsed into "No secret
+                // Five outcomes, not two. A network or auth failure collapsed into "No secret
                 // with id X" tells the agent the secret does not exist, which is a different
                 // fact and one it may act on - the reason this was a fold and not a getOrNull.
-                // A walk that stopped at the bound makes exactly the same false claim, so it
-                // gets its own answer too.
+                // A walk that stopped at the bound makes exactly the same false claim, and so
+                // does one that finished across pages the RPC does not order stably, so each
+                // gets its own answer. Only one of the five is a denial.
                 val entry = when (val found = findSharedById(id)) {
                     is SharedLookup.Found -> found.entry
                     is SharedLookup.Failed ->
                         return@McpToolHandler McpToolResult("Failed: ${found.message}", isError = true)
                     is SharedLookup.Absent ->
                         return@McpToolHandler McpToolResult("No secret with id $id", isError = true)
+                    is SharedLookup.UnstablePaging ->
+                        return@McpToolHandler McpToolResult(
+                            "Searched all ${found.searched} accessible secrets across ${found.pages} " +
+                                "pages without finding id $id. The listing is not ordered stably " +
+                                "across pages, so an entry can fall between two reads - this is not " +
+                                "a statement that the id does not exist.",
+                            isError = true,
+                        )
                     is SharedLookup.Unsearched ->
                         return@McpToolHandler McpToolResult(
-                            "Searched the first ${found.searched} secrets without finding id $id. " +
-                                "More secrets exist beyond that point, so this is not a statement " +
-                                "that the id does not exist.",
+                            // At offset 0 nothing was read at all, and "searched the first 0
+                            // secrets" describes a search that did not happen. Same fact either
+                            // way; worded so the reader can tell how much was actually looked at.
+                            if (found.searched == 0) {
+                                "Could not read any of your secrets while looking for id $id, " +
+                                    "so this is not a statement that the id does not exist."
+                            } else {
+                                "Searched the first ${found.searched} secrets without finding id $id. " +
+                                    "More secrets exist beyond that point, so this is not a statement " +
+                                    "that the id does not exist."
+                            },
                             isError = true,
                         )
                 }
@@ -260,6 +285,24 @@ internal class SecretManagerMcpToolProvider(
         if (SecretAccess.isShare(accessLevel)) "shared($accessLevel)" else accessLevel
 
     /**
+     * What `my_secrets_list` appends when a page it capped has more behind it.
+     *
+     * Two wordings because there are two caps. Under the ceiling, "pass a larger `limit`" is
+     * the fix and the notice should say so. At the ceiling it is not: a caller who already
+     * asked for 1000 and got 500 cannot act on that advice, and a notice offering an
+     * impossible next step reads as though nothing more is really there - the failure mode
+     * this notice exists to prevent, in a politer voice.
+     */
+    private fun truncationNotice(shown: Int, limit: Int): String =
+        if (limit >= MAX_LIST_LIMIT) {
+            "\n\n(Showing the first $shown, this tool's maximum in one call. " +
+                "More secrets exist beyond them.)"
+        } else {
+            "\n\n(Showing the first $shown. More secrets exist - " +
+                "pass a larger `limit`, up to $MAX_LIST_LIMIT, to see them.)"
+        }
+
+    /**
      * The refusal every value-revealing tool here shares, or null when the secret is
      * ordinary. Non-null means "return this instead".
      *
@@ -303,8 +346,33 @@ internal class SecretManagerMcpToolProvider(
     private sealed interface SharedLookup {
         data class Found(val entry: SecretEntryWithSharingData) : SharedLookup
 
-        /** The walk reached the end of the vault without a match: the id really is not there. */
+        /**
+         * The whole vault came back in **one** page and held no match: the id really is not
+         * there. Sound only for a single read - see [UnstablePaging] for why a walk is not.
+         */
         data object Absent : SharedLookup
+
+        /**
+         * The walk reached the end of the vault, but took [pages] reads to do it, so it cannot
+         * conclude absence.
+         *
+         * `get_user_secrets_with_shared` pages with `ORDER BY s.created_at DESC LIMIT/OFFSET`
+         * and **no tiebreaker** (BossConsole
+         * `20260802010000_secret_role_share_hierarchy.sql`), over a `created_at` that carries
+         * no unique constraint and no index - and `now()` is the *transaction* clock, so
+         * secrets written together share it byte for byte. Tied rows are emitted in whatever
+         * order the planner feeds the sort, which is not reproducible between round trips, so
+         * a row can sit at the end of page 1 on one read and at the start of page 2 on the
+         * next and be returned by neither. A single page never re-sorts, so it is unaffected;
+         * every boundary the walk crosses is a row it may have stepped over.
+         *
+         * This is a mitigation in **wording**, not a fix: the walk still cannot see the row,
+         * it just stops calling it non-existent. The fix is a deterministic tiebreaker on the
+         * RPC (`ORDER BY s.created_at DESC, s.id DESC`), which is a BossConsole migration
+         * against production and is tracked separately. When that lands, this case can fold
+         * back into [Absent].
+         */
+        data class UnstablePaging(val searched: Int, val pages: Int) : SharedLookup
 
         /** The walk stopped after [searched] entries with pages unread. Says nothing about existence. */
         data class Unsearched(val searched: Int) : SharedLookup
@@ -318,9 +386,14 @@ internal class SecretManagerMcpToolProvider(
      * The page size is the real cost here: every row carries a *decrypted* password, so a page
      * is the plaintext this materialises per round trip. A hit in the first chunk therefore
      * costs one RPC and [ID_SCAN_CHUNK] plaintexts instead of 500.
+     *
+     * A hit is always sound - the row was returned, whatever order it arrived in. A *miss* is
+     * only sound within one page, because the RPC's paging order is not stable; see
+     * [SharedLookup.UnstablePaging].
      */
     private suspend fun findSharedById(id: String): SharedLookup {
         var offset = 0
+        var pages = 0
         while (offset < ID_SCAN_BOUND) {
             // Clamped so the walk cannot overshoot the bound on a short page.
             val limit = minOf(ID_SCAN_CHUNK, ID_SCAN_BOUND - offset)
@@ -328,18 +401,30 @@ internal class SecretManagerMcpToolProvider(
                 onSuccess = { it },
                 onFailure = { return SharedLookup.Failed(it.message) },
             )
+            pages++
             page.data.firstOrNull { it.id == id }?.let { return SharedLookup.Found(it) }
             // A short page still advances by what it returned; an empty one cannot advance at
             // all, so stop rather than spin - and if the host still claims more, stop without
             // claiming absence, because that is precisely the page never read.
             if (page.data.isEmpty()) {
-                return if (page.hasMore) SharedLookup.Unsearched(offset) else SharedLookup.Absent
+                return if (page.hasMore) SharedLookup.Unsearched(offset) else endOfVault(offset, pages)
             }
             offset += page.data.size
-            if (!page.hasMore) return SharedLookup.Absent
+            if (!page.hasMore) return endOfVault(offset, pages)
         }
         return SharedLookup.Unsearched(offset)
     }
+
+    /**
+     * What reaching the end of the vault is worth, which depends on how many reads it took.
+     *
+     * One page is a single consistent snapshot and supports the flat "no such id" - the common
+     * case, and it must keep giving a clean answer. More than one is a walk across an unstable
+     * sort ([SharedLookup.UnstablePaging]), where "I read everything" no longer implies "it is
+     * not there".
+     */
+    private fun endOfVault(searched: Int, pages: Int): SharedLookup =
+        if (pages == 1) SharedLookup.Absent else SharedLookup.UnstablePaging(searched, pages)
 
     private fun idSchema(desc: String): String =
         """{"type":"object","properties":{"id":{"type":"string","description":"$desc"}},"required":["id"]}"""
@@ -366,8 +451,20 @@ internal class SecretManagerMcpToolProvider(
          * place would misdocument a tool this change does not touch.
          */
         const val DEFAULT_MY_LIST_LIMIT = 20
+
+        /**
+         * The ceiling `limit` is clamped to, and the only place it is written down.
+         *
+         * A `const val` may be templated into another `const val` and stay a compile-time
+         * constant, so the clamp, the tool description and the schema all read this one
+         * number. They used to spell it three times, and "the schema did not describe the
+         * behaviour" is exactly the defect the truncation notice above exists to fix - a
+         * schema that drifts from the clamp is the same bug one layer out, and it is the copy
+         * a model actually reads.
+         */
+        const val MAX_LIST_LIMIT = 500
         const val MY_LIST_LIMIT_SCHEMA =
-            """{"type":"object","properties":{"limit":{"type":"integer","description":"Max secrets to return (default 20, max 500). Omit for a short list; pass a larger value to see more."}}}"""
+            """{"type":"object","properties":{"limit":{"type":"integer","description":"Max secrets to return (default $DEFAULT_MY_LIST_LIMIT, max $MAX_LIST_LIMIT). Omit for a short list; pass a larger value to see more."}}}"""
 
         /**
          * The page size and the total cap of `my_secret_get`'s walk.

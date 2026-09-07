@@ -345,6 +345,69 @@ class SecretManagerMcpToolsTest {
         }
 
     @Test
+    fun `an explicit limit above the maximum is capped and says so`() =
+        runTest {
+            // The gap the `requested == null` gate left open. The schema says "max 500", so a
+            // caller asking for 1000 is following this tool's own documentation - and it got
+            // 500 rows with nothing said, which is "these are all my secrets" arriving through
+            // the notice's front door.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(700)
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(mapOf("limit" to 1000)))
+
+            assertFalse(result.isError, result.text)
+            assertEquals(500, rowsIn(result.text), "the ceiling moved: ${result.text}")
+            assertTrue(result.text.contains(MORE_EXIST), "a clamped page said nothing: ${result.text}")
+            // The advice has to be one the caller can take: this one already asked for more
+            // than the ceiling, so "pass a larger `limit`" would be an impossible next step,
+            // and an impossible next step reads as "there is nothing more to get".
+            assertFalse(result.text.contains(PASS_A_LARGER), result.text)
+        }
+
+    @Test
+    fun `a limit below one is clamped up and still says more exist`() =
+        runTest {
+            // The same clamp at the other end. `limit: 0` is nonsense, but it returns one row,
+            // and one row presented as the whole vault is the same wrong answer.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(50)
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(mapOf("limit" to 0)))
+
+            assertFalse(result.isError, result.text)
+            assertEquals(1, rowsIn(result.text), result.text)
+            assertTrue(result.text.contains(MORE_EXIST), result.text)
+        }
+
+    @Test
+    fun `a vault of exactly the default is announced as truncated`() =
+        runTest {
+            // The accepted false positive, pinned so it stays a decision. The host derives
+            // hasMore from `size >= limit`, so a full page always reports more - including the
+            // last one. Erring toward "look again" is the safe direction for a list of
+            // secrets, and the alternative is decrypting the rest of the vault to count it.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.hostHasMore = true
+            secrets.sharingEntries = vaultOf(20)
+
+            val result =
+                tool(store, secrets, "my_secrets_list")
+                    .handler
+                    .call(McpToolArgs(emptyMap()))
+
+            assertFalse(result.isError, result.text)
+            assertEquals(20, rowsIn(result.text), result.text)
+            assertTrue(result.text.contains(MORE_EXIST), result.text)
+        }
+
+    @Test
     fun `my_secret_get finds a secret past the first 500`() =
         runTest {
             // The bug. One `limit = 500` call answered "No secret with id X" for every id past
@@ -362,12 +425,13 @@ class SecretManagerMcpToolsTest {
         }
 
     @Test
-    fun `my_secret_get still reports a genuinely absent id as absent`() =
+    fun `a single-page vault still reports a genuinely absent id as absent`() =
         runTest {
             // The other half: refusing to claim absence must not become refusing to answer.
-            // A vault walked to its end supports the flat statement, so it should still make it.
+            // One page is one consistent snapshot with nothing to re-sort, so it supports the
+            // flat statement - and this is the common case, which must keep a clean answer.
             val (store, secrets) = storeWith(emptyList())
-            secrets.sharingEntries = vaultOf(120)
+            secrets.sharingEntries = vaultOf(20)
 
             val result =
                 tool(store, secrets, "my_secret_get")
@@ -425,6 +489,163 @@ class SecretManagerMcpToolsTest {
                 secrets.sharingCalls.all { it.first <= 100 },
                 "asked for a page big enough to decrypt the vault: ${secrets.sharingCalls}",
             )
+        }
+
+    @Test
+    fun `my_secret_get reports a failed first read as a failure`() =
+        runTest {
+            // Not "No secret with id X". The fake could not fail a read until now, which is
+            // exactly how this branch was free to rot: an auth or network failure delivered as
+            // absence is a fact an agent acts on - it recreates the credential, or reports it
+            // gone - and the `fold` here exists for no other reason.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(50)
+            secrets.failSharingReadsAfter = 0
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "1")))
+
+            assertTrue(result.isError)
+            assertTrue(result.text.startsWith("Failed:"), result.text)
+            assertFalse(
+                result.text.contains("No secret with id"),
+                "a failed read was reported as absence: ${result.text}",
+            )
+        }
+
+    @Test
+    fun `my_secret_get does not conclude absence when a later page fails`() =
+        runTest {
+            // The half no other test reaches: one page read, no match, then the connection
+            // goes. A partially walked vault knows strictly less than an unwalked one, so it
+            // must not answer with more confidence than the first-page failure does.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(120)
+            secrets.failSharingReadsAfter = 1
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "100")))
+
+            assertTrue(result.isError)
+            assertEquals(2, secrets.sharingCalls.size, secrets.sharingCalls.toString())
+            assertTrue(result.text.startsWith("Failed:"), result.text)
+            assertFalse(
+                result.text.contains("No secret with id"),
+                "a partially walked vault claimed absence: ${result.text}",
+            )
+        }
+
+    @Test
+    fun `my_secret_get does not claim absence after a multi-page walk`() =
+        runTest {
+            // `get_user_secrets_with_shared` pages with `ORDER BY s.created_at DESC` and no
+            // tiebreaker, over a column with no unique constraint that defaults to the
+            // transaction clock - so secrets written together tie, and two reads are two
+            // different sorts. A row can sit at the end of page 1 on one read and the start of
+            // page 2 on the next and be returned by neither, which makes "I read all of it" no
+            // proof of absence. Same denial the sealed type exists to prevent, one cause over.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.sharingEntries = vaultOf(120)
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "999")))
+
+            assertTrue(result.isError)
+            assertFalse(
+                result.text.contains("No secret with id"),
+                "claimed absence across an unstable page boundary: ${result.text}",
+            )
+            assertTrue(result.text.contains(NOT_ABSENCE), result.text)
+            assertTrue(result.text.contains("120"), "did not say how much it read: ${result.text}")
+        }
+
+    @Test
+    fun `my_secret_get reports an empty vault as absent`() =
+        runTest {
+            // The degenerate single page: no second read, so nothing could be re-sorted past
+            // the walk. Refusing to answer here would be hedging about the one case that is
+            // genuinely certain.
+            val (store, secrets) = storeWith(emptyList())
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "1")))
+
+            assertTrue(result.isError)
+            assertTrue(result.text.contains("No secret with id 1"), result.text)
+            assertFalse(result.text.contains(NOT_ABSENCE), result.text)
+        }
+
+    @Test
+    fun `a vault of exactly the walk bound is not reported as absent`() =
+        runTest {
+            // The bound's own edge, and reachable only under the host's hasMore rule: twenty
+            // full pages, every one of them claiming more behind it, so the walk ends having
+            // read 1000 rows and knowing nothing whatever about row 1001.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.hostHasMore = true
+            secrets.sharingEntries = vaultOf(1000)
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "9999")))
+
+            assertTrue(result.isError)
+            assertEquals(20, secrets.sharingCalls.size, secrets.sharingCalls.toString())
+            assertTrue(result.text.contains(NOT_SEARCHED), result.text)
+            assertFalse(result.text.contains("No secret with id"), result.text)
+        }
+
+    @Test
+    fun `a vault ending on a page boundary stops at the empty page`() =
+        runTest {
+            // Under the host's rule the last full page still reports more, so the walk asks
+            // once more and gets nothing back. It has to stop there - an empty page advances
+            // the offset by zero, so a walk that carried on would spin - and having crossed a
+            // page boundary to get there it still cannot call the id absent.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.hostHasMore = true
+            secrets.sharingEntries = vaultOf(50)
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "999")))
+
+            assertTrue(result.isError)
+            assertEquals(2, secrets.sharingCalls.size, secrets.sharingCalls.toString())
+            assertFalse(result.text.contains("No secret with id"), result.text)
+            assertTrue(result.text.contains(NOT_ABSENCE), result.text)
+        }
+
+    @Test
+    fun `an empty page that still claims more does not conclude absence`() =
+        runTest {
+            // The branch no honest fake reaches: a host reporting more over no rows at all.
+            // The walk must not spin on it, and must not call the vault read - the page it was
+            // promised never arrived, so nothing was searched.
+            val (store, secrets) = storeWith(emptyList())
+            secrets.emptyPageClaimsMore = true
+
+            val result =
+                tool(store, secrets, "my_secret_get")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to "1")))
+
+            assertTrue(result.isError)
+            assertEquals(1, secrets.sharingCalls.size, secrets.sharingCalls.toString())
+            assertFalse(result.text.contains("No secret with id"), result.text)
+            assertTrue(result.text.contains(NOT_ABSENCE), result.text)
+            // "Searched the first 0 secrets" describes a search that did not happen.
+            assertFalse(result.text.contains("Searched the first 0"), result.text)
         }
 
     /** Rows carry tab-separated columns; the truncation notice does not. */
@@ -501,6 +722,19 @@ class SecretManagerMcpToolsTest {
          * it. It must never share wording with the flat "No secret with id X".
          */
         const val NOT_SEARCHED = "Searched the first"
+
+        /**
+         * The clause every non-denial answer ends on. `my_secret_get` has five outcomes and
+         * only one of them - [Absent] - is a statement about existence; asserting this
+         * fragment is how a test says "whatever it answered, it did not deny the id".
+         */
+        const val NOT_ABSENCE = "not a statement that the id does not exist"
+
+        /**
+         * The half of the truncation notice that is *advice*. A caller already over the
+         * ceiling cannot act on it, so the notice must not offer it there.
+         */
+        const val PASS_A_LARGER = "pass a larger `limit`"
     }
 
     /** Records writes; only the members the tools touch do anything. */
@@ -512,6 +746,31 @@ class SecretManagerMcpToolsTest {
          * secrets, `get_user_secrets_with_shared` adds everything shared with the caller.
          */
         var sharingEntries: List<SecretEntryWithSharingData> = emptyList(),
+        /**
+         * Derive `hasMore` the way the host does - `size >= limit` - rather than from the true
+         * total, which the host has never had.
+         *
+         * Off by default so the tests written before it keep the semantics they were written
+         * against, but this is the honest rule (see the comment in `my_secrets_list` and
+         * AGENTS.md), and it is the only way to reach two real cases: a page that is exactly
+         * `limit` long and therefore claims more with nothing behind it, and the trailing
+         * empty page a vault that is a multiple of the chunk produces.
+         */
+        var hostHasMore: Boolean = false,
+        /**
+         * Fail `getUserSecretsWithSharingInfo` from the read after this one onward; `null`
+         * never fails. `0` fails the first read, `1` the second.
+         *
+         * `failWrites` only reaches `createSecret`/`deleteSecret`, so until this a read could
+         * not fail at all - which is why `SharedLookup.Failed` could be turned into `Absent`
+         * with the whole suite still green, on the one path this file exists to keep honest.
+         */
+        var failSharingReadsAfter: Int? = null,
+        /**
+         * Report `hasMore` on a page carrying no rows: the host pathology the walk's
+         * empty-page branch guards against, and unreachable under either rule above.
+         */
+        var emptyPageClaimsMore: Boolean = false,
     ) : SecretDataProvider {
         val created = mutableListOf<CreateSecretRequestData>()
         val deleted = mutableListOf<String>()
@@ -555,10 +814,17 @@ class SecretManagerMcpToolsTest {
             offset: Int,
         ): Result<PaginatedSecretsWithSharingData> {
             sharingCalls += limit to offset
+            failSharingReadsAfter?.let { after ->
+                if (sharingCalls.size > after) return Result.failure(IllegalStateException("read refused"))
+            }
             val page = sharingEntries.drop(offset).take(limit)
-            return Result.success(
-                PaginatedSecretsWithSharingData(page, hasMore = offset + page.size < sharingEntries.size),
-            )
+            val hasMore =
+                when {
+                    page.isEmpty() && emptyPageClaimsMore -> true
+                    hostHasMore -> page.size >= limit
+                    else -> offset + page.size < sharingEntries.size
+                }
+            return Result.success(PaginatedSecretsWithSharingData(page, hasMore = hasMore))
         }
 
         override suspend fun searchSecrets(
