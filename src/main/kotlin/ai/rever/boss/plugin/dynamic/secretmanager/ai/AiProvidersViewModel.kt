@@ -348,12 +348,16 @@ class AiProvidersViewModel(
             if (catalogRequestSatisfied && probeRequestSatisfied) return
             // Consumer polling reuses the previous probe. Panel entry forces one so a user who
             // just followed the installer link sees Ollama without restarting BOSS.
+            var probeRan = false
             if (refreshOllamaProbe || state.value.ollamaSystemInfo == null) {
                 readOllamaSystemInfo()
                 lastOllamaProbeNanos.set(monotonicNanos())
+                probeRan = true
             }
             if (generation != catalogRefreshGeneration.get()) return
-            if (catalogRequestSatisfied) return
+            // A newly installed daemon changes what refreshStale should fetch, even when an
+            // overlapping sweep already satisfied every catalog under the previous probe.
+            if (catalogRequestSatisfied && !probeRan) return
             if (!_catalogsLoaded.value) catalog.seedFromCache()
             refreshStale(connections)
             hasCatalogRefreshed.set(true)
@@ -1148,12 +1152,19 @@ class AiProvidersViewModel(
             _catalogsLoaded.value = false
             changed.forEach(catalog::markNotConfigured)
             if (catalogsLoadStarted.get()) {
-                refreshCatalogs(
-                    connections = _state.value.connections,
-                    requestedAtNanos = monotonicNanos(),
-                    generation = generation,
-                    refreshOllamaProbe = false,
-                )
+                val connections = _state.value.connections
+                val requestedAtNanos = monotonicNanos()
+                // Do not put provider network latency in front of the invalidation collector:
+                // another secret edit must be able to refresh the credential snapshot promptly.
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        refreshCatalogs(connections, requestedAtNanos, generation, refreshOllamaProbe = false)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        logger.warn(LogCategory.NETWORK, "Could not refresh AI model catalogs")
+                    }
+                }
             }
         }
     }

@@ -86,6 +86,9 @@ class ModelCatalog(
 
     /** Record that a provider has no usable credential, clearing any stale list. */
     fun markNotConfigured(providerId: String) {
+        // Routine sweeps look at every unconfigured provider. Do not turn that bookkeeping into
+        // a new credential generation or make it race an unrelated explicit refresh.
+        if (_states.value[providerId] is CatalogState.NotConfigured) return
         generations.computeIfAbsent(providerId) { AtomicLong() }.incrementAndGet()
         _states.update { it + (providerId to CatalogState.NotConfigured) }
     }
