@@ -97,9 +97,11 @@ class LlmProviderSettingsApiImpl(
             if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
                 return@mapNotNull null
             }
-            // Model-in-path formats need a resolved default to produce a usable endpoint.
-            // Keep the model and connection sets joinable instead of offering an uncallable row.
-            if (configFor(descriptor.id, requireModel = false) == null) return@mapNotNull null
+            // This endpoint is credential-free. Keep its usability check pure too: configFor
+            // intentionally refreshes brokered credentials because its callers return keys.
+            if (!hasUsableProviderConnection(descriptor, connection, requireModel = false)) {
+                return@mapNotNull null
+            }
 
             val models =
                 if (ProviderRegistry.needsManualModel(descriptor)) {
@@ -131,20 +133,15 @@ class LlmProviderSettingsApiImpl(
         val state = viewModel.state.value
         val descriptor = ProviderRegistry.find(providerId) ?: return null
         val connection = state.connections[providerId] ?: return null
-        if (!connection.isConfigured) return null
+        if (!hasUsableProviderConnection(descriptor, connection, requireModel)) return null
 
         val modelId = connection.selectedModelId.orEmpty().trim()
-        if (requireModel && modelId.isEmpty()) return null
-        // Google's model is part of the URL, unlike chat/Responses request bodies. Do not
-        // expose .../models/:generateContent as a usable provider connection.
-        if (descriptor.wireFormat == WireFormat.GOOGLE_GENERATIVE && modelId.isEmpty()) return null
 
         val endpoint =
             when {
                 // A custom provider's endpoint is user-supplied; without it there is
                 // nothing to call.
-                descriptor.id == ProviderRegistry.CUSTOM ->
-                    connection.customEndpoint?.takeIf { it.isNotBlank() } ?: return null
+                descriptor.id == ProviderRegistry.CUSTOM -> connection.customEndpoint!!.trim()
 
                 else -> descriptor.chatEndpointFor(modelId)
             }

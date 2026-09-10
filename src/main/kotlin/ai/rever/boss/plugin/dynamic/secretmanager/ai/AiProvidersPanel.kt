@@ -378,35 +378,6 @@ private fun healthLine(
     }
 
 /**
- * Whether [descriptor] belongs in the compact "your providers" list, as opposed to only
- * being reachable through [AddProviderRow].
- *
- * For an ordinary provider this is just [ProviderConnection.isConfigured] — it has a real
- * credential. A keyless local daemon (Ollama today) declares itself configured
- * unconditionally, since there is no credential to wait on — so for one of those, listing
- * instead waits for its catalog to have actually loaded. Without that, every user would see
- * it in their list from first launch whether or not they had ever run it: the plugin being
- * installed is not the same as Ollama being reachable.
- *
- * [wasAddedByUser] is the second half of that rule, and the reason it cannot simply be
- * `isConfigured`. A user with no daemon yet picks Ollama from "Add provider", gets the card
- * and the Install button, closes it — and on the catalog rule alone their row is gone with
- * nothing said, which is exactly the user this flow is for. An explicit add lists the row for
- * the session regardless; the catalog rule still governs every later launch.
- */
-internal fun isProviderListed(
-    descriptor: ProviderDescriptor,
-    connection: ProviderConnection,
-    catalog: CatalogState,
-    wasAddedByUser: Boolean = false,
-): Boolean =
-    if (descriptor.requiresApiKey) {
-        connection.isConfigured
-    } else {
-        catalog is CatalogState.Loaded || wasAddedByUser
-    }
-
-/**
  * Two equal-weight ways to gain a provider, not a search box: the catalog is small enough
  * that a plain list beats a filter, and "add one of these" versus "declare a custom
  * endpoint" are different enough flows to deserve their own buttons rather than one menu

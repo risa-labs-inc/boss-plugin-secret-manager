@@ -4,12 +4,18 @@ import ai.rever.boss.plugin.api.SecretEntryData
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -25,13 +31,14 @@ class ConsumerProviderDiscoveryTest {
         response: Pair<Int, String> = 200 to """{"data":[{"id":"consumer/model","name":"Consumer model","context_length":131072}]}""",
         responses: List<Pair<Int, String>> = emptyList(),
         probe: OllamaSystemCheck = noOllamaOnThisMachine(),
+        beforeResponse: () -> Unit = {},
         val nowNanos: AtomicLong = AtomicLong(0),
     ) : AutoCloseable {
         val root = Files.createTempDirectory("consumer-provider").toFile()
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         val env = EnvResolver(root, processEnv = keys::get, systemProperty = { null }, useLaunchctl = false)
         val prefs = ActiveProviderPrefs(bossRootDir = root)
-        val http = QueuedHttpClient(responses, always = response)
+        val http = QueuedHttpClient(responses, always = response, beforeResponse = { beforeResponse() })
         val catalog = ModelCatalog(ModelCatalogClient(http))
         val secrets = FakeSecretDataProvider(emptyList())
         val store = ProviderCredentialStore(secrets, env)
@@ -97,6 +104,26 @@ class ConsumerProviderDiscoveryTest {
             withTimeout(5000) { h.vm.catalogsLoaded.first { it } }
             assertEquals(1, h.http.requests.size, "the installed daemon is discovered after the probe answers")
             assertEquals(ProviderRegistry.OLLAMA, h.api.configuredProviders().single().providerId)
+        }
+    }
+
+    @Test fun `an overlapping panel load joins the consumer catalog sweep`() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        Harness(beforeResponse = {
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+        }).use { h ->
+            try {
+                h.api.availableModels()
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                h.vm.load()
+            } finally {
+                release.countDown()
+            }
+            withTimeout(5000) { h.vm.catalogsLoaded.first { it } }
+            withTimeout(5000) { h.vm.state.first { !it.isLoading } }
+            assertEquals(1, h.http.requests.size, "panel load duplicated the in-flight consumer sweep")
         }
     }
 
@@ -191,6 +218,42 @@ class ConsumerProviderDiscoveryTest {
                 h.vm.state.first { it.catalogOf(ProviderRegistry.OPENROUTER) is CatalogState.Loaded }
             }
             assertEquals(1, h.http.requests.size)
+        }
+    }
+
+    @Test fun `an unchanged credential reload preserves the seated catalog`() = runBlocking {
+        Harness().use { h ->
+            h.load()
+            assertTrue(h.catalog.stateOf(ProviderRegistry.OPENROUTER) is CatalogState.Loaded)
+            val sawUnloaded = AtomicBoolean(false)
+            val sawCatalogInvalidation = AtomicBoolean(false)
+            val loadedMonitor = launch {
+                h.vm.catalogsLoaded.drop(1).collect { loaded ->
+                    if (!loaded) sawUnloaded.set(true)
+                }
+            }
+            val catalogMonitor = launch {
+                h.catalog.states.drop(1).collect { states ->
+                    if (states[ProviderRegistry.OPENROUTER] is CatalogState.NotConfigured) {
+                        sawCatalogInvalidation.set(true)
+                    }
+                }
+            }
+
+            val pageCount = h.secrets.pageRequests.size
+            h.store.invalidate()
+            withTimeout(5000) {
+                while (h.secrets.pageRequests.size <= pageCount) delay(10)
+            }
+            // The page request is recorded at the start of reload; let its state write settle.
+            delay(100)
+            loadedMonitor.cancelAndJoin()
+            catalogMonitor.cancelAndJoin()
+
+            assertFalse(sawUnloaded.get(), "an unchanged reload reset catalogsLoaded")
+            assertFalse(sawCatalogInvalidation.get(), "an unchanged reload cleared a seated catalog")
+            assertTrue(h.catalog.stateOf(ProviderRegistry.OPENROUTER) is CatalogState.Loaded)
+            assertEquals(1, h.http.requests.size, "an unchanged reload repeated model discovery")
         }
     }
 

@@ -70,8 +70,8 @@ class ModelCatalogClient(
         // wrong endpoint presents (a 200 that parses to nothing).
         if (first.isFailure && !worthRetryingOnFallback(first.exceptionOrNull())) return first
         val second = fetchAllPages(descriptor, fallback, apiKey)
-        // The primary still gave a valid, authoritative answer. A broken fallback must not
-        // turn "this provider currently has no models" into a discovery failure.
+        // The primary still gave a valid explicit answer. A broken enrichment fallback must
+        // not turn "this provider currently has no models" into a discovery failure.
         if (first.isSuccess && second.isFailure) return first
         return second
     }

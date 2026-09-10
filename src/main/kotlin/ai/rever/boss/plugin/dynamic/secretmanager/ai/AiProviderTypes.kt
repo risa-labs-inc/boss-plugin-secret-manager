@@ -150,6 +150,39 @@ data class ProviderDescriptor(
 }
 
 /**
+ * Whether [descriptor] belongs in the compact provider list shared by the panel and API.
+ *
+ * Keyed providers need a credential. A keyless local daemon instead needs a catalog that
+ * proves it is reachable, unless the user explicitly added it for this panel session so they
+ * can still see the install controls.
+ */
+internal fun isProviderListed(
+    descriptor: ProviderDescriptor,
+    connection: ProviderConnection,
+    catalog: CatalogState,
+    wasAddedByUser: Boolean = false,
+): Boolean =
+    if (descriptor.requiresApiKey) {
+        connection.isConfigured
+    } else {
+        catalog is CatalogState.Loaded || wasAddedByUser
+    }
+
+/** Pure connection-shape check for credential-free discovery responses. */
+internal fun hasUsableProviderConnection(
+    descriptor: ProviderDescriptor,
+    connection: ProviderConnection,
+    requireModel: Boolean,
+): Boolean {
+    if (!connection.isConfigured) return false
+    val modelId = connection.selectedModelId.orEmpty().trim()
+    if (requireModel && modelId.isEmpty()) return false
+    if (descriptor.wireFormat == WireFormat.GOOGLE_GENERATIVE && modelId.isEmpty()) return false
+    if (descriptor.id == ProviderRegistry.CUSTOM && connection.customEndpoint.isNullOrBlank()) return false
+    return true
+}
+
+/**
  * One model offered by a provider, as reported by that provider's models endpoint.
  * Every field beyond [id] is optional because coverage varies — Together reports
  * context length and pricing, OpenAI reports almost nothing.

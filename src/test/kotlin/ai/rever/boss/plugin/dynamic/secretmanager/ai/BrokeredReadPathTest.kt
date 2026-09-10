@@ -397,6 +397,60 @@ class BrokeredReadPathTest {
         }
 
     @Test
+    fun `credential-free model discovery never mints a brokered token`() =
+        runBlocking {
+            val source =
+                CountingSource { issued ->
+                    Result.success(
+                        BrokeredKey(
+                            token = "sk-$issued",
+                            refreshAfterSeconds = 3600,
+                            expiresAt = secondsFromNow(7200),
+                        ),
+                    )
+                }
+            val harness = harnessWith(source)
+            assertNotNull(harness.loadedConfig())
+            source.settled()
+            harness.store.expireBrokeredCache()
+            val baseline = source.calls
+
+            repeat(20) { harness.api.availableModels() }
+            delay(SETTLE_MS)
+
+            assertEquals(baseline, source.calls, "availableModels minted a credential")
+        }
+
+    @Test
+    fun `routine broker renewal preserves its fixed model catalog`() =
+        runBlocking {
+            val source =
+                CountingSource { issued ->
+                    Result.success(
+                        BrokeredKey(
+                            token = "sk-$issued",
+                            refreshAfterSeconds = 3600,
+                            expiresAt = secondsFromNow(600),
+                        ),
+                    )
+                }
+            val harness = harnessWith(source, renewalLeadMs = 600_000, minRenewalDelayMs = 300)
+            harness.api.availableModels()
+            withTimeout(TIMEOUT_MS) { harness.viewModel.catalogsLoaded.first { it } }
+            assertTrue(harness.viewModel.state.value.catalogOf(risa.id) is CatalogState.Loaded)
+            val baseline = source.calls
+
+            source.awaitCalls(baseline + 1)
+            delay(POLL_MS)
+
+            assertTrue(harness.viewModel.catalogsLoaded.value, "renewal reset catalogsLoaded")
+            assertTrue(
+                harness.viewModel.state.value.catalogOf(risa.id) is CatalogState.Loaded,
+                "renewal cleared the fixed catalog",
+            )
+        }
+
+    @Test
     fun `each renewal arms the next one`() =
         runBlocking {
             val source =
