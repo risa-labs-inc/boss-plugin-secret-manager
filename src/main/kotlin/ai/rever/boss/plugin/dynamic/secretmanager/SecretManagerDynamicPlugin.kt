@@ -39,7 +39,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-secret-manager"
 
     private companion object {
-        /** api release that introduced LlmProviderSettingsAPI. */
+        /** Minimum api release required by this implementation's model-discovery signature. */
         const val REQUIRED_API_VERSION = "1.0.89"
 
         /**

@@ -69,7 +69,11 @@ class ModelCatalogClient(
         // refresh. An unrecognised envelope stays in scope because that is the other way a
         // wrong endpoint presents (a 200 that parses to nothing).
         if (first.isFailure && !worthRetryingOnFallback(first.exceptionOrNull())) return first
-        return fetchAllPages(descriptor, fallback, apiKey)
+        val second = fetchAllPages(descriptor, fallback, apiKey)
+        // The primary still gave a valid, authoritative answer. A broken fallback must not
+        // turn "this provider currently has no models" into a discovery failure.
+        if (first.isSuccess && second.isFailure) return first
+        return second
     }
 
     /**

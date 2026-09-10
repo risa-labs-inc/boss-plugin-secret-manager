@@ -199,6 +199,24 @@ class ModelCatalogClientPagingTest {
         }
 
     @Test
+    fun `xai keeps an explicit empty primary result when its fallback fails`() =
+        runTest {
+            val fake =
+                QueuedHttpClient(
+                    listOf(
+                        200 to """{"data":[]}""",
+                        503 to """{"error":"fallback unavailable"}""",
+                    ),
+                )
+
+            val result = ModelCatalogClient(fake).fetch(descriptor(ProviderRegistry.XAI), "k")
+
+            assertTrue(result.isSuccess)
+            assertTrue(result.getOrThrow().isEmpty())
+            assertEquals(2, fake.requests.size)
+        }
+
+    @Test
     fun `a rejected key does not trigger a second request against the fallback`() =
         runTest {
             // The fallback exists because the primary endpoint is a guess, not because the

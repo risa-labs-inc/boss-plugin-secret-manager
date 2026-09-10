@@ -296,7 +296,10 @@ class AiProvidersViewModel(
                 }
                 attempted.set(true)
                 readOllamaSystemInfo()
-                catalog.seedFromCache()
+                // Seeding only fills absences. After the first completed sweep it is a disk
+                // read that cannot change state; credential invalidation marks entries
+                // explicitly, so the old cache must not fill those either.
+                if (!_catalogsLoaded.value) catalog.seedFromCache()
                 refreshStale(state.value.connections)
                 completed.set(true)
             } catch (cancelled: CancellationException) {

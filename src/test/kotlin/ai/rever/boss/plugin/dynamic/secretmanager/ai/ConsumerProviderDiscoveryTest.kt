@@ -35,8 +35,18 @@ class ConsumerProviderDiscoveryTest {
         val catalog = ModelCatalog(ModelCatalogClient(http))
         val secrets = FakeSecretDataProvider(emptyList())
         val store = ProviderCredentialStore(secrets, env)
-        val vm = AiProvidersViewModel(store, catalog, prefs, null, null, scope, env,
-            ollamaSystemCheck = probe, monotonicNanos = nowNanos::get)
+        val vm =
+            AiProvidersViewModel(
+                store = store,
+                catalog = catalog,
+                prefs = prefs,
+                legacyImport = null,
+                splitViewOperations = null,
+                scope = scope,
+                envResolver = env,
+                ollamaSystemCheck = probe,
+                monotonicNanos = nowNanos::get,
+            )
         val api = LlmProviderSettingsApiImpl(vm)
 
         suspend fun load() {

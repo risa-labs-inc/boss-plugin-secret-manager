@@ -40,7 +40,8 @@ class LlmProviderSettingsApiImpl(
      *
      * Null whenever there is no key or no chosen model: a config missing either is not
      * something a caller can send a request with, and returning a half-populated one
-     * would push that check onto every consumer.
+     * would push that check onto every consumer. [configuredProviders] deliberately has
+     * a different contract for consumers that own model selection.
      */
     override fun activeConfig(): LlmConfig? {
         // Callers can reach this before the settings panel has ever been rendered, so
