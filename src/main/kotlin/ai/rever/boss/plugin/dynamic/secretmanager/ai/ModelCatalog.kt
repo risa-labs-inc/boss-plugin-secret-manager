@@ -13,6 +13,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Owns per-provider model lists: fetches them from the providers, caches them on
@@ -40,6 +42,7 @@ class ModelCatalog(
     private val cacheMutex = Mutex()
 
     private val _states = MutableStateFlow<Map<String, CatalogState>>(emptyMap())
+    private val generations = ConcurrentHashMap<String, AtomicLong>()
 
     /** Per-provider catalog state, keyed by [ProviderDescriptor.id]. */
     val states: StateFlow<Map<String, CatalogState>> = _states.asStateFlow()
@@ -83,6 +86,7 @@ class ModelCatalog(
 
     /** Record that a provider has no usable credential, clearing any stale list. */
     fun markNotConfigured(providerId: String) {
+        generations.computeIfAbsent(providerId) { AtomicLong() }.incrementAndGet()
         _states.update { it + (providerId to CatalogState.NotConfigured) }
     }
 
@@ -115,6 +119,8 @@ class ModelCatalog(
         force: Boolean = false,
         nowEpochMs: Long = System.currentTimeMillis(),
     ) {
+        val generation = generations.computeIfAbsent(descriptor.id) { AtomicLong() }
+        val startedAt = generation.get()
         // A provider that declares it needs no key (a local Ollama daemon) is fetched
         // with a blank one rather than reported as unconfigured forever.
         if (descriptor.requiresApiKey && apiKey.isBlank()) {
@@ -153,6 +159,8 @@ class ModelCatalog(
         }
 
         val result = client.fetch(descriptor, apiKey)
+        // Credentials may be removed or replaced while the provider is answering.
+        if (generation.get() != startedAt) return
 
         result
             .onSuccess { models ->

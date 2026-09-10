@@ -927,7 +927,8 @@ private fun ModelSectionContent(
                     )
                 } else {
                     Text(
-                        text = "Optional default for legacy apps. Agents choose their own models.",
+                        text = "Default for apps that don't pick a model themselves. " +
+                            "Those apps need a selection here; agents can choose their own models.",
                         style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )

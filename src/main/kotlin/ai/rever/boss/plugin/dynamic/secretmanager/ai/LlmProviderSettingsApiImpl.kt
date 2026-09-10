@@ -61,8 +61,11 @@ class LlmProviderSettingsApiImpl(
     override fun configuredProviders(): List<LlmConfig> {
         viewModel.ensureConnectionsLoaded()
         val state = viewModel.state.value
-        // Connections belong to settings; model selection belongs to the consumer.
-        return state.providers.mapNotNull { descriptor -> configFor(descriptor.id, requireModel = false) }
+        // Consumers choosing a model may receive an empty modelId for model-independent
+        // endpoints. Legacy consumers must use activeConfig or filter for a chosen model.
+        return state.providers.filter { descriptor ->
+            isProviderListed(descriptor, state.connectionOf(descriptor.id), state.catalogOf(descriptor.id))
+        }.mapNotNull { descriptor -> configFor(descriptor.id, requireModel = false) }
     }
 
     /**
@@ -74,13 +77,15 @@ class LlmProviderSettingsApiImpl(
      * ([AiProvidersUiState.catalogs]), the same data the settings panel's picker reads.
      * A provider needing manual entry (only [ProviderRegistry.CUSTOM] today) has no
      * catalog to ask, so its one model comes from whatever the user typed instead.
+     * While [AiProvidersViewModel.catalogsLoaded] is false an empty result can mean loading;
+     * consumers should read again as discovery completes rather than caching absence forever.
      */
     override fun availableModels(): List<AiProviderModels> {
         viewModel.ensureCatalogsLoaded()
         val state = viewModel.state.value
         return state.providers.mapNotNull { descriptor ->
             val connection = state.connectionOf(descriptor.id)
-            if (!connection.isConfigured) return@mapNotNull null
+            if (!isProviderListed(descriptor, connection, state.catalogOf(descriptor.id))) return@mapNotNull null
 
             val models =
                 if (ProviderRegistry.needsManualModel(descriptor)) {
@@ -114,6 +119,9 @@ class LlmProviderSettingsApiImpl(
 
         val modelId = connection.selectedModelId.orEmpty().trim()
         if (requireModel && modelId.isEmpty()) return null
+        // Google's model is part of the URL, unlike chat/Responses request bodies. Do not
+        // expose .../models/:generateContent as a usable provider connection.
+        if (descriptor.wireFormat == WireFormat.GOOGLE_GENERATIVE && modelId.isEmpty()) return null
 
         val endpoint =
             when {

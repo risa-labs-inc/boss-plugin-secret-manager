@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
@@ -146,6 +147,8 @@ class AiProvidersViewModel(
     private val ollamaSystemCheck: OllamaSystemCheck = OllamaSystemCheck(),
     /** How a suggested model is actually pulled. Injected for the same reason as above. */
     private val ollamaModelInstaller: OllamaModelInstaller = OllamaModelInstaller(),
+    private val catalogRefreshIntervalMs: Long = 30_000,
+    private val monotonicNanos: () -> Long = System::nanoTime,
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -154,6 +157,13 @@ class AiProvidersViewModel(
 
     /** Guards [ensureConnectionsLoaded] so concurrent callers load credentials once. */
     private val connectionsLoadStarted = AtomicBoolean(false)
+    private val catalogsLoadStarted = AtomicBoolean(false)
+    private val catalogRefreshInFlight = AtomicBoolean(false)
+    private val lastCatalogRefreshNanos = AtomicLong(Long.MIN_VALUE / 2)
+    private var ollamaProbeJob: Job? = null
+    private val _catalogsLoaded = MutableStateFlow(false)
+    /** False until the first catalog sweep finishes; an empty list before that is not definitive. */
+    val catalogsLoaded: StateFlow<Boolean> = _catalogsLoaded.asStateFlow()
 
     /** The armed renewal, replaced on each reload rather than stacked. */
     private var brokeredRenewalJob: Job? = null
@@ -234,16 +244,29 @@ class AiProvidersViewModel(
         scope.launch { loadConnections() }
     }
 
-    private val catalogsLoadStarted = java.util.concurrent.atomic.AtomicBoolean(false)
-
     /** Consumers need model metadata even when the settings panel has never been opened. */
     fun ensureCatalogsLoaded() {
         ensureConnectionsLoaded()
-        if (!catalogsLoadStarted.compareAndSet(false, true)) return
-        scope.launch {
-            connectionsLoaded.first { it }
-            catalog.seedFromCache()
-            refreshStale(state.value.connections)
+        catalogsLoadStarted.set(true)
+        // Consumer reads can be frequent. Re-check TTLs on demand, with a retry floor for
+        // transient failures instead of a perpetual refresh coroutine or one-shot latch.
+        if (monotonicNanos() - lastCatalogRefreshNanos.get() < catalogRefreshIntervalMs * 1_000_000) return
+        if (!catalogRefreshInFlight.compareAndSet(false, true)) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                connectionsLoaded.first { it }
+                ollamaProbeJob?.join()
+                catalog.seedFromCache()
+                refreshStale(state.value.connections)
+                _catalogsLoaded.value = true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                logger.warn(LogCategory.NETWORK, "Could not refresh AI model catalogs")
+            }
+        }.invokeOnCompletion {
+            lastCatalogRefreshNanos.set(monotonicNanos())
+            catalogRefreshInFlight.set(false)
         }
     }
 
@@ -315,6 +338,7 @@ class AiProvidersViewModel(
             // panel to go run the installer this "Install Ollama" button just sent them to
             // should not have to restart BOSS to see that it landed.
             refreshOllamaSystemInfo()
+            ollamaProbeJob?.join()
             val connections = loadConnections()
 
             _state.update { current ->
@@ -378,6 +402,10 @@ class AiProvidersViewModel(
             ProviderRegistry.all.map { descriptor ->
                 async {
                     val connection = connections[descriptor.id] ?: return@async
+                    if (descriptor.id == ProviderRegistry.OLLAMA && !state.value.ollamaSystemInfo.binaryFound) {
+                        catalog.markNotConfigured(descriptor.id)
+                        return@async
+                    }
                     if (!connection.isConfigured) {
                         catalog.markNotConfigured(descriptor.id)
                         return@async
@@ -486,7 +514,7 @@ class AiProvidersViewModel(
      * should ever be a reason a panel entry blocks on disk access.
      */
     fun refreshOllamaSystemInfo() {
-        scope.launch(Dispatchers.IO) {
+        ollamaProbeJob = scope.launch(Dispatchers.IO) {
             val info =
                 runCatching { ollamaSystemCheck.current() }
                     .getOrElse { OllamaSystemInfo(binaryFound = false, totalRamGb = null) }
@@ -922,7 +950,16 @@ class AiProvidersViewModel(
         val startedAt = credentials.invalidations.value
         val reloaded = credentials.loadAll()
         if (credentials.invalidations.value != startedAt) return
+        val previous = _state.value.connections
         _state.update { it.copy(connections = withPreferredModels(reloaded.connections)) }
+        val changed = _state.value.connections.filter { (id, connection) ->
+            previous[id]?.apiKey != connection.apiKey || previous[id]?.customEndpoint != connection.customEndpoint
+        }.keys
+        changed.forEach(catalog::markNotConfigured)
+        if (catalogsLoadStarted.get() && changed.isNotEmpty()) {
+            ollamaProbeJob?.join()
+            refreshStale(_state.value.connections)
+        }
         scheduleBrokeredRenewal()
     }
 

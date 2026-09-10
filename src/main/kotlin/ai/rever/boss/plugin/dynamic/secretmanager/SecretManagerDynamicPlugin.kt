@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
+import ai.rever.boss.plugin.api.CustomPluginEvent
 import ai.rever.boss.plugin.api.DynamicPlugin
 import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.SecretDataProvider
@@ -16,10 +17,9 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import ai.rever.boss.plugin.api.CustomPluginEvent
 import java.io.File
 
 /**
@@ -66,12 +66,6 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         val supabaseDataProvider = context.supabaseDataProvider
         val pluginStoreApiKeyProvider = context.pluginStoreApiKeyProvider
         val pluginScope = context.pluginScope ?: CoroutineScope(Dispatchers.Main)
-        val navigation = ProviderNavigation()
-        context.applicationEventBus?.let { bus ->
-            pluginScope.launch(start = CoroutineStart.UNDISPATCHED) {
-                bus.eventsOfType(CustomPluginEvent::class.java).collect { navigation.accept(it) }
-            }
-        }
 
         if (secretDataProvider == null) {
             context.panelRegistry.registerPanel(SecretManagerInfo) { ctx, panelInfo ->
@@ -88,6 +82,21 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 )
             }
             return
+        }
+
+        val navigation = ProviderNavigation()
+        // Verified against the declared API floor's v1.0.73 tag: PluginContext's
+        // applicationEventBus, eventsOfType(Class<T>), and CustomPluginEvent's
+        // eventName/payload all exist there, so this path needs no linkage adapter.
+        context.applicationEventBus?.let { bus ->
+            pluginScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                navigation.collect({ bus.eventsOfType(CustomPluginEvent::class.java) }) { failure ->
+                    logger.warn(
+                        LogCategory.SYSTEM,
+                        "AI provider navigation stopped (${failure.javaClass.simpleName}); secret management remains available",
+                    )
+                }
+            }
         }
 
         // Built once and shared: the panel's "Add AI Provider Key" action and the
@@ -125,6 +134,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 authDataProvider = context.authDataProvider,
                 aiProvidersViewModel = { aiProvidersViewModel },
                 providerNavigation = navigation.state,
+                consumeProviderRequest = navigation::consume,
             )
         }
 

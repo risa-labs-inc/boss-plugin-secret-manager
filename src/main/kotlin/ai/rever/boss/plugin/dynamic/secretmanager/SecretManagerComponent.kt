@@ -11,6 +11,7 @@ import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -18,7 +19,6 @@ import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.essenty.lifecycle.doOnDestroy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
-import androidx.compose.runtime.LaunchedEffect
 
 /**
  * Secret Manager panel component (Dynamic Plugin)
@@ -53,6 +53,7 @@ class SecretManagerComponent(
      */
     private val aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
     private val providerNavigation: StateFlow<Map<String, Long>>? = null,
+    private val consumeProviderRequest: (String?, Long, Boolean) -> Boolean = { _, _, _ -> false },
 ) : PanelComponentWithUI, ComponentContext by ctx {
 
     // Created once per panel instance (not per composition), so secrets stay
@@ -90,7 +91,6 @@ class SecretManagerComponent(
      * another sidebar panel, and a remembered value would drop them back on "Secrets".
      */
     private var selectedSection by mutableStateOf(SecretPanelSection.SECRETS)
-    private var lastProviderRequest = 0L
 
     init {
         // The ViewModels are per panel instance but their coroutines run on the *plugin*
@@ -111,9 +111,8 @@ class SecretManagerComponent(
     override fun Content() {
         LaunchedEffect(providerNavigation, windowId) {
             providerNavigation?.collect { requests ->
-                val request = requests[windowId] ?: 0L
-                if (request > lastProviderRequest) {
-                    lastProviderRequest = request
+                val request = requests[windowId] ?: return@collect
+                if (consumeProviderRequest(windowId, request, aiProvidersViewModel() != null)) {
                     selectedSection = SecretPanelSection.AI_PROVIDERS
                 }
             }

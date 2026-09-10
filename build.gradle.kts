@@ -10,8 +10,8 @@ plugins {
 group = "ai.rever.boss.plugin.dynamic"
 version = "1.2.19"
 
-// Keep the ordinary/test jar from overwriting buildPluginJar's deployable artifact.
-tasks.jar { archiveClassifier.set("thin") }
+// Keep the ordinary JAR away from the plugin artifact and the release's build/libs/*.jar glob.
+tasks.jar { destinationDirectory.set(layout.buildDirectory.dir("intermediates/jar")) }
 
 java {
     toolchain {
