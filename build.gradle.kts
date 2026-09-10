@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.2.22"
+version = "1.2.19"
 
 // Keep the ordinary/test jar from overwriting buildPluginJar's deployable artifact.
 tasks.jar { archiveClassifier.set("thin") }
