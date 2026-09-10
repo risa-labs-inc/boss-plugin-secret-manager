@@ -196,6 +196,9 @@ class AiProvidersViewModel(
     /** False until the first catalog sweep finishes; an empty list before that is not definitive. */
     val catalogsLoaded: StateFlow<Boolean> = _catalogsLoaded.asStateFlow()
 
+    /** The catalog source of truth; unlike the UI mirror, this cannot lag a completed sweep. */
+    fun catalogStateOf(providerId: String): CatalogState = catalog.stateOf(providerId)
+
     /** The armed renewal, replaced on each reload rather than stacked. */
     private var brokeredRenewalJob: Job? = null
 
@@ -343,14 +346,13 @@ class AiProvidersViewModel(
                 !refreshOllamaProbe ||
                     (state.value.ollamaSystemInfo != null && lastOllamaProbeNanos.get() >= requestedAtNanos)
             if (catalogRequestSatisfied && probeRequestSatisfied) return
-            if (generation != catalogRefreshGeneration.get()) return
-
             // Consumer polling reuses the previous probe. Panel entry forces one so a user who
             // just followed the installer link sees Ollama without restarting BOSS.
             if (refreshOllamaProbe || state.value.ollamaSystemInfo == null) {
                 readOllamaSystemInfo()
                 lastOllamaProbeNanos.set(monotonicNanos())
             }
+            if (generation != catalogRefreshGeneration.get()) return
             if (catalogRequestSatisfied) return
             if (!_catalogsLoaded.value) catalog.seedFromCache()
             refreshStale(connections)

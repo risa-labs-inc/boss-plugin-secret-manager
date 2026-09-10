@@ -67,7 +67,7 @@ class LlmProviderSettingsApiImpl(
             if (isProviderListed(
                     descriptor,
                     state.connectionOf(descriptor.id),
-                    state.catalogOf(descriptor.id),
+                    viewModel.catalogStateOf(descriptor.id),
                     // addedProviderIds is a panel-only affordance. A machine-readable list
                     // must not publish an unreachable local daemon because the user clicked Add.
                     wasAddedByUser = false,
@@ -93,13 +93,13 @@ class LlmProviderSettingsApiImpl(
         val state = viewModel.state.value
         return state.providers.mapNotNull { descriptor ->
             val connection = state.connectionOf(descriptor.id)
-            val catalog = state.catalogOf(descriptor.id)
+            val catalog = viewModel.catalogStateOf(descriptor.id)
             if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
                 return@mapNotNull null
             }
-            // This endpoint is credential-free. Keep its usability check pure too: configFor
-            // intentionally refreshes brokered credentials because its callers return keys.
-            if (!hasUsableProviderConnection(descriptor, connection, requireModel = false)) {
+            // Model discovery does not need a sendable completions URL. In particular, Google
+            // model ids must be discoverable before one has been selected for its URL path.
+            if (descriptor.id == ProviderRegistry.CUSTOM && connection.customEndpoint.isNullOrBlank()) {
                 return@mapNotNull null
             }
 

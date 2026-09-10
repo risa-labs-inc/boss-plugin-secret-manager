@@ -106,7 +106,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         // wouldn't be recognised as provider configuration by the other.
         //
         // Safe to construct outside the LinkageError guard below — ProviderCredentialStore
-        // and ProviderRegistry reference only api symbols that predate 1.0.71.
+        // and ProviderRegistry reference only api symbols covered by the 1.0.89 floor.
         val envResolver = EnvResolver()
         val credentialStore = ProviderCredentialStore(secretDataProvider, envResolver)
 
@@ -173,9 +173,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     ?.getPluginCacheDirectory(pluginId)
                     ?.let { File(it) }
 
-            // Inside the guard on purpose: the bridge names an api type added in
-            // 1.0.74, so resolving it is exactly what must not happen on an older
-            // host. Left unset when the host has no broker relay, which makes
+            // Inside the guard on purpose: a malformed host can still violate the declared
+            // 1.0.89 floor. Left unset when the host has no broker relay, which makes
             // brokered providers report unconfigured instead of failing.
             credentialStore.brokeredKeys = BrokeredCredentialBridge.from(context)
 

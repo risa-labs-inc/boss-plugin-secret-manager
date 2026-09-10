@@ -94,8 +94,6 @@ data class ProviderDescriptor(
      * provider has no such endpoint (a user-supplied custom endpoint).
      */
     val modelsEndpoint: String?,
-    /** Whether a model id is embedded into [chatEndpoint] rather than sent in the body. */
-    val needsModelInEndpoint: Boolean = wireFormat == WireFormat.GOOGLE_GENERATIVE,
     /**
      * Secondary models endpoint tried when [modelsEndpoint] fails — xAI exposes a
      * richer `/v1/language-models` alongside the minimal `/v1/models`.
@@ -129,6 +127,10 @@ data class ProviderDescriptor(
      */
     val brokerId: String? = null,
 ) {
+    /** Whether a model id is embedded into [chatEndpoint] rather than sent in the body. */
+    val needsModelInEndpoint: Boolean
+        get() = wireFormat == WireFormat.GOOGLE_GENERATIVE
+
     /**
      * Canonical name for this provider's key, used as the stored secret's name so an
      * entry reads as `TOGETHER_API_KEY` rather than a prose label.

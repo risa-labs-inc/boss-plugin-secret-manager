@@ -87,7 +87,7 @@ class ProviderNavigationTest {
         val parent = Job()
         val scope = CoroutineScope(coroutineContext + parent)
         val failure = IllegalStateException("event bus unavailable")
-        var reported: Exception? = null
+        var reported: Throwable? = null
         val navigation = ProviderNavigation()
         scope.launch {
             navigation.collect({ flow { emit(request("one")); throw failure } }) { reported = it }
@@ -100,9 +100,22 @@ class ProviderNavigationTest {
 
     @Test fun `event subscription failure is contained too`() = runBlocking {
         val failure = IllegalStateException("cannot subscribe")
-        var reported: Exception? = null
+        var reported: Throwable? = null
         ProviderNavigation().collect({ throw failure }) { reported = it }
         assertSame(failure, reported)
+    }
+
+    @Test fun `linkage failure cannot cancel the shared plugin scope`() = runBlocking {
+        val parent = Job()
+        val scope = CoroutineScope(coroutineContext + parent)
+        val failure = NoSuchMethodError("older event bus")
+        var reported: Throwable? = null
+        scope.launch {
+            ProviderNavigation().collect({ throw failure }) { reported = it }
+        }.join()
+        assertSame(failure, reported)
+        assertTrue(parent.isActive)
+        parent.cancel()
     }
 
     @Test fun `navigation collection preserves cancellation`() = runBlocking {

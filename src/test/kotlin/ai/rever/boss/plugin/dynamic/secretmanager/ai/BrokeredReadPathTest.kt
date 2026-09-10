@@ -437,7 +437,7 @@ class BrokeredReadPathTest {
             val harness = harnessWith(source, renewalLeadMs = 600_000, minRenewalDelayMs = 300)
             harness.api.availableModels()
             withTimeout(TIMEOUT_MS) { harness.viewModel.catalogsLoaded.first { it } }
-            assertTrue(harness.viewModel.state.value.catalogOf(risa.id) is CatalogState.Loaded)
+            assertTrue(harness.viewModel.catalogStateOf(risa.id) is CatalogState.Loaded)
             val baseline = source.calls
 
             source.awaitCalls(baseline + 1)
@@ -445,7 +445,7 @@ class BrokeredReadPathTest {
 
             assertTrue(harness.viewModel.catalogsLoaded.value, "renewal reset catalogsLoaded")
             assertTrue(
-                harness.viewModel.state.value.catalogOf(risa.id) is CatalogState.Loaded,
+                harness.viewModel.catalogStateOf(risa.id) is CatalogState.Loaded,
                 "renewal cleared the fixed catalog",
             )
         }

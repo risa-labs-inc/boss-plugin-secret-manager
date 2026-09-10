@@ -131,7 +131,9 @@ class ConsumerProviderDiscoveryTest {
         Harness(response = 503 to "unavailable").use { h ->
             h.load()
             assertTrue(h.api.availableModels().isEmpty())
-            repeat(20) { h.api.availableModels() }
+            h.nowNanos.set(31_000_000_000L)
+            h.api.availableModels()
+            delay(100)
             assertEquals(1, h.http.requests.size, "polling must not retry a failure continuously")
         }
     }
@@ -153,7 +155,7 @@ class ConsumerProviderDiscoveryTest {
         ).use { h ->
             h.load()
             assertFalse(h.api.configuredProviders().any { it.providerId == ProviderRegistry.GOOGLE })
-            assertFalse(h.api.availableModels().any { it.providerId == ProviderRegistry.GOOGLE })
+            assertTrue(h.api.availableModels().any { it.providerId == ProviderRegistry.GOOGLE })
         }
     }
 

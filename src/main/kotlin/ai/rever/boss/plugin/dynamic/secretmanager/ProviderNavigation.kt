@@ -51,12 +51,12 @@ internal class ProviderNavigation(
         requests.update { it - expired }
     }
 
-    suspend fun collect(events: () -> Flow<CustomPluginEvent>, onFailure: (Exception) -> Unit) {
+    suspend fun collect(events: () -> Flow<CustomPluginEvent>, onFailure: (Throwable) -> Unit) {
         try {
             events().collect { accept(it) }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (failure: Exception) {
+        } catch (failure: Throwable) {
             // An optional navigation channel must not cancel the shared plugin scope.
             onFailure(failure)
         }
