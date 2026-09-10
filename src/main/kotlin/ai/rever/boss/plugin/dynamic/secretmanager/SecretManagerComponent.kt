@@ -17,6 +17,8 @@ import androidx.compose.runtime.setValue
 import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.essenty.lifecycle.doOnDestroy
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.StateFlow
+import androidx.compose.runtime.LaunchedEffect
 
 /**
  * Secret Manager panel component (Dynamic Plugin)
@@ -49,7 +51,8 @@ class SecretManagerComponent(
      * window through `LlmProviderSettingsApiImpl`. Disposing it in `doOnDestroy` would take the
      * host's AI Providers section down with the sidebar panel.
      */
-    private val aiProvidersViewModel: () -> AiProvidersViewModel? = { null }
+    private val aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
+    private val providerNavigation: StateFlow<Map<String, Long>>? = null,
 ) : PanelComponentWithUI, ComponentContext by ctx {
 
     // Created once per panel instance (not per composition), so secrets stay
@@ -87,6 +90,7 @@ class SecretManagerComponent(
      * another sidebar panel, and a remembered value would drop them back on "Secrets".
      */
     private var selectedSection by mutableStateOf(SecretPanelSection.SECRETS)
+    private var lastProviderRequest = 0L
 
     init {
         // The ViewModels are per panel instance but their coroutines run on the *plugin*
@@ -105,6 +109,15 @@ class SecretManagerComponent(
 
     @Composable
     override fun Content() {
+        LaunchedEffect(providerNavigation, windowId) {
+            providerNavigation?.collect { requests ->
+                val request = requests[windowId] ?: 0L
+                if (request > lastProviderRequest) {
+                    lastProviderRequest = request
+                    selectedSection = SecretPanelSection.AI_PROVIDERS
+                }
+            }
+        }
         SecretManagerContent(
             viewModel = viewModel,
             sharedSecretsViewModel = sharedSecretsViewModel,

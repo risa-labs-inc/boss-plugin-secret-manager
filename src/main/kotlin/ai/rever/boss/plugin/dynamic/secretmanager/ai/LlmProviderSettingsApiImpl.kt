@@ -61,7 +61,8 @@ class LlmProviderSettingsApiImpl(
     override fun configuredProviders(): List<LlmConfig> {
         viewModel.ensureConnectionsLoaded()
         val state = viewModel.state.value
-        return state.providers.mapNotNull { descriptor -> configFor(descriptor.id) }
+        // Connections belong to settings; model selection belongs to the consumer.
+        return state.providers.mapNotNull { descriptor -> configFor(descriptor.id, requireModel = false) }
     }
 
     /**
@@ -75,7 +76,7 @@ class LlmProviderSettingsApiImpl(
      * catalog to ask, so its one model comes from whatever the user typed instead.
      */
     override fun availableModels(): List<AiProviderModels> {
-        viewModel.ensureConnectionsLoaded()
+        viewModel.ensureCatalogsLoaded()
         val state = viewModel.state.value
         return state.providers.mapNotNull { descriptor ->
             val connection = state.connectionOf(descriptor.id)
@@ -99,7 +100,7 @@ class LlmProviderSettingsApiImpl(
         }
     }
 
-    private fun configFor(providerId: String): LlmConfig? {
+    private fun configFor(providerId: String, requireModel: Boolean = true): LlmConfig? {
         // Every path that hands out a credential goes through here - `activeConfig` and
         // `configuredProviders` both - so this is where a lapsed brokered credential has to be
         // noticed. Hooking only `activeConfig` left `configuredProviders` handing out the same
@@ -111,7 +112,8 @@ class LlmProviderSettingsApiImpl(
         val connection = state.connections[providerId] ?: return null
         if (!connection.isConfigured) return null
 
-        val modelId = connection.selectedModelId?.takeIf { it.isNotBlank() } ?: return null
+        val modelId = connection.selectedModelId.orEmpty().trim()
+        if (requireModel && modelId.isEmpty()) return null
 
         val endpoint =
             when {

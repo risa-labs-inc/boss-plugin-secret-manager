@@ -17,6 +17,9 @@ import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.launch
+import ai.rever.boss.plugin.api.CustomPluginEvent
 import java.io.File
 
 /**
@@ -63,6 +66,12 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         val supabaseDataProvider = context.supabaseDataProvider
         val pluginStoreApiKeyProvider = context.pluginStoreApiKeyProvider
         val pluginScope = context.pluginScope ?: CoroutineScope(Dispatchers.Main)
+        val navigation = ProviderNavigation()
+        context.applicationEventBus?.let { bus ->
+            pluginScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                bus.eventsOfType(CustomPluginEvent::class.java).collect { navigation.accept(it) }
+            }
+        }
 
         if (secretDataProvider == null) {
             context.panelRegistry.registerPanel(SecretManagerInfo) { ctx, panelInfo ->
@@ -114,7 +123,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                 windowId = context.windowId,
                 splitViewOperations = context.splitViewOperations,
                 authDataProvider = context.authDataProvider,
-                aiProvidersViewModel = { aiProvidersViewModel }
+                aiProvidersViewModel = { aiProvidersViewModel },
+                providerNavigation = navigation.state,
             )
         }
 

@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
@@ -231,6 +232,19 @@ class AiProvidersViewModel(
     fun ensureConnectionsLoaded() {
         if (!connectionsLoadStarted.compareAndSet(false, true)) return
         scope.launch { loadConnections() }
+    }
+
+    private val catalogsLoadStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Consumers need model metadata even when the settings panel has never been opened. */
+    fun ensureCatalogsLoaded() {
+        ensureConnectionsLoaded()
+        if (!catalogsLoadStarted.compareAndSet(false, true)) return
+        scope.launch {
+            connectionsLoaded.first { it }
+            catalog.seedFromCache()
+            refreshStale(state.value.connections)
+        }
     }
 
     /**

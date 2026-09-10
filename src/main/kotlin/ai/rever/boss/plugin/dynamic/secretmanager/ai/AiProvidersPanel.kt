@@ -926,6 +926,11 @@ private fun ModelSectionContent(
                         color = BossThemeColors.TextSecondary,
                     )
                 } else {
+                    Text(
+                        text = "Optional default for legacy apps. Agents choose their own models.",
+                        style = SecretPanelType.meta,
+                        color = BossThemeColors.TextSecondary,
+                    )
                     ModelPicker(
                         models = loaded.models,
                         selectedModelId = connection.selectedModelId,
