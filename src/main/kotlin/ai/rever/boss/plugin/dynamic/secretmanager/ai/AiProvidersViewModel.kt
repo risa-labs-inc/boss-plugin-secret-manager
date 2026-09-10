@@ -3,6 +3,7 @@ package ai.rever.boss.plugin.dynamic.secretmanager.ai
 import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -14,9 +15,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -168,6 +173,9 @@ class AiProvidersViewModel(
     private val ollamaSystemCheck: OllamaSystemCheck = OllamaSystemCheck(),
     /** How a suggested model is actually pulled. Injected for the same reason as above. */
     private val ollamaModelInstaller: OllamaModelInstaller = OllamaModelInstaller(),
+    private val catalogRefreshIntervalMs: Long = 30_000,
+    private val monotonicNanos: () -> Long = System::nanoTime,
+    private val catalogConnectionWaitTimeoutMs: Long = CATALOG_CONNECTION_WAIT_TIMEOUT_MS,
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -176,6 +184,20 @@ class AiProvidersViewModel(
 
     /** Guards [ensureConnectionsLoaded] so concurrent callers load credentials once. */
     private val connectionsLoadStarted = AtomicBoolean(false)
+    private val catalogsLoadStarted = AtomicBoolean(false)
+    private val catalogRefreshInFlight = AtomicBoolean(false)
+    private val catalogRefreshMutex = Mutex()
+    private val catalogRefreshGeneration = AtomicLong(0)
+    private val hasCatalogRefreshed = AtomicBoolean(false)
+    private val lastCatalogRefreshNanos = AtomicLong(0)
+    private val lastCatalogRefreshGeneration = AtomicLong(-1)
+    private val lastOllamaProbeNanos = AtomicLong(0)
+    private val _catalogsLoaded = MutableStateFlow(false)
+    /** False until the first catalog sweep finishes; an empty list before that is not definitive. */
+    val catalogsLoaded: StateFlow<Boolean> = _catalogsLoaded.asStateFlow()
+
+    /** The catalog source of truth; unlike the UI mirror, this cannot lag a completed sweep. */
+    fun catalogStateOf(providerId: String): CatalogState = catalog.stateOf(providerId)
 
     /** The armed renewal, replaced on each reload rather than stacked. */
     private var brokeredRenewalJob: Job? = null
@@ -236,7 +258,15 @@ class AiProvidersViewModel(
         store?.let { credentialStore ->
             scope.launch {
                 credentialStore.invalidations.drop(1).collect {
-                    if (connectionsLoadStarted.get()) reloadConnections()
+                    if (connectionsLoadStarted.get()) {
+                        try {
+                            reloadConnections()
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            logger.warn(LogCategory.NETWORK, "Could not reload AI provider connections")
+                        }
+                    }
                 }
             }
         }
@@ -257,6 +287,84 @@ class AiProvidersViewModel(
     fun ensureConnectionsLoaded() {
         if (!connectionsLoadStarted.compareAndSet(false, true)) return
         scope.launch { loadConnections() }
+    }
+
+    /** Consumers need model metadata even when the settings panel has never been opened. */
+    fun ensureCatalogsLoaded() {
+        ensureConnectionsLoaded()
+        catalogsLoadStarted.set(true)
+        // Consumer reads can be frequent. Re-check TTLs on demand, with a retry floor for
+        // transient failures instead of a perpetual refresh coroutine or one-shot latch.
+        val requestedAtNanos = monotonicNanos()
+        if (hasCatalogRefreshed.get() &&
+            requestedAtNanos - lastCatalogRefreshNanos.get() < catalogRefreshIntervalMs * NANOS_PER_MILLI
+        ) return
+        if (!catalogRefreshInFlight.compareAndSet(false, true)) return
+        scope.launch(Dispatchers.IO) {
+            try {
+                val connectionsReady =
+                    withTimeoutOrNull(catalogConnectionWaitTimeoutMs) {
+                        connectionsLoaded.first { it }
+                        true
+                    } == true
+                if (!connectionsReady) {
+                    logger.warn(LogCategory.NETWORK, "Timed out waiting to load AI provider connections")
+                    return@launch
+                }
+                val generation = catalogRefreshGeneration.get()
+                refreshCatalogs(state.value.connections, requestedAtNanos, generation, refreshOllamaProbe = false)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                logger.warn(LogCategory.NETWORK, "Could not refresh AI model catalogs")
+            }
+        }.invokeOnCompletion {
+            catalogRefreshInFlight.set(false)
+        }
+    }
+
+    /**
+     * Run one catalog sweep at a time, regardless of whether a consumer, panel load, or
+     * credential reload requested it.
+     *
+     * [requestedAtNanos] prevents two overlapping entry points from running back-to-back: if
+     * the sweep that held the mutex finished after this caller asked, it already satisfied the
+     * request. [generation] prevents that older sweep from publishing "loaded" after a changed
+     * credential invalidated its result.
+     */
+    private suspend fun refreshCatalogs(
+        connections: Map<String, ProviderConnection>,
+        requestedAtNanos: Long,
+        generation: Long,
+        refreshOllamaProbe: Boolean,
+    ) {
+        catalogRefreshMutex.withLock {
+            val catalogRequestSatisfied = hasCatalogRefreshed.get() &&
+                lastCatalogRefreshGeneration.get() == generation &&
+                lastCatalogRefreshNanos.get() >= requestedAtNanos
+            val probeRequestSatisfied =
+                !refreshOllamaProbe ||
+                    (state.value.ollamaSystemInfo != null && lastOllamaProbeNanos.get() >= requestedAtNanos)
+            if (catalogRequestSatisfied && probeRequestSatisfied) return
+            // Consumer polling reuses the previous probe. Panel entry forces one so a user who
+            // just followed the installer link sees Ollama without restarting BOSS.
+            var probeRan = false
+            if (refreshOllamaProbe || state.value.ollamaSystemInfo == null) {
+                readOllamaSystemInfo()
+                lastOllamaProbeNanos.set(monotonicNanos())
+                probeRan = true
+            }
+            if (generation != catalogRefreshGeneration.get()) return
+            // A newly installed daemon changes what refreshStale should fetch, even when an
+            // overlapping sweep already satisfied every catalog under the previous probe.
+            if (catalogRequestSatisfied && !probeRan) return
+            if (!_catalogsLoaded.value) catalog.seedFromCache()
+            refreshStale(connections)
+            hasCatalogRefreshed.set(true)
+            lastCatalogRefreshNanos.set(monotonicNanos())
+            lastCatalogRefreshGeneration.set(generation)
+            if (generation == catalogRefreshGeneration.get()) _catalogsLoaded.value = true
+        }
     }
 
     /**
@@ -314,26 +422,20 @@ class AiProvidersViewModel(
     /** Load credentials, seed cached model lists, then refresh anything stale. */
     fun load() {
         connectionsLoadStarted.set(true)
+        catalogsLoadStarted.set(true)
+        val catalogRequestedAtNanos = monotonicNanos()
+        val catalogGeneration = catalogRefreshGeneration.get()
         // Marked in flight synchronously, before the launch rather than inside it: `isLoading`
         // is the panel's own "this entry is still settling" signal, and a caller that returns
         // from load() to a state still reading `isLoading = false` is being told the load
         // already finished. Nothing about the flag needs the coroutine.
         _state.update { it.copy(isLoading = true, error = null) }
         scope.launch {
-            catalog.seedFromCache()
             // Re-read the environment on every entry into the section. The panel tells
             // users they can unset a variable to take key management over in BOSS, and the
             // resolver memoises misses as well as hits — so without this that instruction
             // was only true after an app restart.
             envResolver.invalidate()
-            // Same reasoning applies to whether Ollama is installed: a user who left this
-            // panel to go run the installer this "Install Ollama" button just sent them to
-            // should not have to restart BOSS to see that it landed.
-            //
-            // Awaited rather than launched, unlike the one in `init`: `refreshStale` below
-            // consults `binaryFound` to decide whether to reach for the local daemon at all,
-            // and a probe still in flight would make that decision on a stale answer.
-            readOllamaSystemInfo()
             val connections = loadConnections()
 
             _state.update { current ->
@@ -365,7 +467,15 @@ class AiProvidersViewModel(
                 )
             }
 
-            refreshStale(connections)
+            // The shared serializer also performs the awaited Ollama probe before deciding
+            // whether its local catalog is reachable. An overlapping consumer sweep can
+            // satisfy this request without a second provider-wide sweep.
+            refreshCatalogs(
+                connections,
+                catalogRequestedAtNanos,
+                catalogGeneration,
+                refreshOllamaProbe = true,
+            )
             checkLegacyImport()
         }
     }
@@ -1029,8 +1139,49 @@ class AiProvidersViewModel(
         val startedAt = credentials.invalidations.value
         val reloaded = credentials.loadAll()
         if (credentials.invalidations.value != startedAt) return
+        val previous = _state.value.connections
         _state.update { it.copy(connections = withPreferredModels(reloaded.connections)) }
+        // Re-arm promptly; a catalog sweep can wait behind another provider's network timeout.
         scheduleBrokeredRenewal()
+        val changed = _state.value.connections.filter { (id, connection) ->
+            val before = previous[id] ?: return@filter false
+            catalogInputChanged(id, before, connection)
+        }.keys
+        if (changed.isNotEmpty()) {
+            val generation = catalogRefreshGeneration.incrementAndGet()
+            _catalogsLoaded.value = false
+            changed.forEach(catalog::markNotConfigured)
+            if (catalogsLoadStarted.get()) {
+                val connections = _state.value.connections
+                val requestedAtNanos = monotonicNanos()
+                // Do not put provider network latency in front of the invalidation collector:
+                // another secret edit must be able to refresh the credential snapshot promptly.
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        refreshCatalogs(connections, requestedAtNanos, generation, refreshOllamaProbe = false)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        logger.warn(LogCategory.NETWORK, "Could not refresh AI model catalogs")
+                    }
+                }
+            }
+        }
+    }
+
+    /** Only inputs that can change a remotely discovered catalog warrant invalidating it. */
+    private fun catalogInputChanged(
+        providerId: String,
+        before: ProviderConnection,
+        after: ProviderConnection,
+    ): Boolean {
+        val descriptor = ProviderRegistry.find(providerId) ?: return false
+        // Fixed catalogs (including the brokered GLM provider) do not depend on a minted token,
+        // and manual providers have no catalog endpoint to invalidate.
+        if (!ProviderRegistry.hasKnownModels(descriptor) || ProviderRegistry.fixedModels.containsKey(providerId)) {
+            return false
+        }
+        return before.apiKey != after.apiKey || before.customEndpoint != after.customEndpoint
     }
 
     /**
@@ -1104,6 +1255,7 @@ class AiProvidersViewModel(
          */
         const val DEFAULT_MIN_BROKERED_REFRESH_INTERVAL_MS = 5_000L
         const val NANOS_PER_MILLI = 1_000_000L
+        const val CATALOG_CONNECTION_WAIT_TIMEOUT_MS = 30_000L
 
         /**
          * How far ahead of a brokered credential's reuse deadline to renew it.

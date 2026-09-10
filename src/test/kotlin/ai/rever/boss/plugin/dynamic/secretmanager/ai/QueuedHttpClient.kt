@@ -4,6 +4,8 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * An [HttpClient] that serves canned responses in order and records every request URI.
@@ -16,12 +18,15 @@ import java.util.concurrent.CompletableFuture
 internal class QueuedHttpClient(
     private val responses: List<Pair<Int, String>>,
     private val always: Pair<Int, String>? = null,
+    private val beforeResponse: (HttpRequest) -> Unit = {},
 ) : HttpClient() {
-    val requests = mutableListOf<String>()
+    val requests = CopyOnWriteArrayList<String>()
+    private val nextResponse = AtomicInteger()
 
     private fun next(request: HttpRequest): Pair<Int, String> {
-        val index = requests.size
+        val index = nextResponse.getAndIncrement()
         requests += request.uri().toString()
+        beforeResponse(request)
         return responses.getOrNull(index)
             ?: always
             ?: responses.lastOrNull()

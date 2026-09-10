@@ -13,6 +13,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Owns per-provider model lists: fetches them from the providers, caches them on
@@ -40,6 +42,7 @@ class ModelCatalog(
     private val cacheMutex = Mutex()
 
     private val _states = MutableStateFlow<Map<String, CatalogState>>(emptyMap())
+    private val generations = ConcurrentHashMap<String, AtomicLong>()
 
     /** Per-provider catalog state, keyed by [ProviderDescriptor.id]. */
     val states: StateFlow<Map<String, CatalogState>> = _states.asStateFlow()
@@ -83,6 +86,10 @@ class ModelCatalog(
 
     /** Record that a provider has no usable credential, clearing any stale list. */
     fun markNotConfigured(providerId: String) {
+        // Routine sweeps look at every unconfigured provider. Do not turn that bookkeeping into
+        // a new credential generation or make it race an unrelated explicit refresh.
+        if (_states.value[providerId] is CatalogState.NotConfigured) return
+        generations.computeIfAbsent(providerId) { AtomicLong() }.incrementAndGet()
         _states.update { it + (providerId to CatalogState.NotConfigured) }
     }
 
@@ -96,7 +103,8 @@ class ModelCatalog(
             // A permanent failure (rejected key) is not stale: nothing changes until the
             // credential does, and the panel re-enters this on every open. Saving a new key
             // calls refresh(force = true), so recovery does not depend on staleness.
-            is CatalogState.Failed -> !state.permanent
+            is CatalogState.Failed ->
+                !state.permanent && nowEpochMs - state.failedAtEpochMs >= TRANSIENT_FAILURE_RETRY_MS
             null, is CatalogState.NotConfigured -> true
             is CatalogState.Loading -> false
         }
@@ -115,12 +123,16 @@ class ModelCatalog(
         force: Boolean = false,
         nowEpochMs: Long = System.currentTimeMillis(),
     ) {
+        val generation = generations.computeIfAbsent(descriptor.id) { AtomicLong() }
+        val startedAt = generation.get()
         // A provider that declares it needs no key (a local Ollama daemon) is fetched
         // with a blank one rather than reported as unconfigured forever.
         if (descriptor.requiresApiKey && apiKey.isBlank()) {
             markNotConfigured(descriptor.id)
             return
         }
+
+        if (!force && !isStale(descriptor.id, nowEpochMs)) return
 
         // A provider that serves a fixed set has nothing to ask. This is not a return
         // to the hardcoded catalogue this class replaced: it covers only the case where
@@ -129,13 +141,14 @@ class ModelCatalog(
         // the TTL does not make it look stale and retry forever.
         val fixed = ProviderRegistry.fixedModels[descriptor.id]
         if (fixed != null) {
-            _states.update {
-                it + (descriptor.id to CatalogState.Loaded(models = fixed, fetchedAtEpochMs = nowEpochMs))
-            }
+            seatIfCurrent(
+                descriptor.id,
+                generation,
+                startedAt,
+                CatalogState.Loaded(models = fixed, fetchedAtEpochMs = nowEpochMs),
+            )
             return
         }
-
-        if (!force && !isStale(descriptor.id, nowEpochMs)) return
 
         // Carry the previous good list through a *chain* of failures, not just the first.
         // Before Failed survived seeding, re-entry converted it back to Loaded so this cast
@@ -149,7 +162,10 @@ class ModelCatalog(
                 else -> null
             }
         if (lastKnown == null) {
-            _states.update { it + (descriptor.id to CatalogState.Loading) }
+            // Check inside StateFlow's CAS update. If invalidation wins before this write,
+            // the lambda retries against its NotConfigured state and sees the new generation;
+            // a separate check followed by a write still left a race one instruction wide.
+            if (!seatIfCurrent(descriptor.id, generation, startedAt, CatalogState.Loading)) return
         }
 
         val result = client.fetch(descriptor, apiKey)
@@ -162,7 +178,7 @@ class ModelCatalog(
                         fetchedAtEpochMs = nowEpochMs,
                         fromCache = false,
                     )
-                _states.update { it + (descriptor.id to loaded) }
+                if (!seatIfCurrent(descriptor.id, generation, startedAt, loaded)) return@onSuccess
                 writeCacheEntry(descriptor.id, loaded)
                 logger.info(
                     LogCategory.NETWORK,
@@ -173,9 +189,8 @@ class ModelCatalog(
                 val message = error.message ?: "Could not reach ${descriptor.displayName}."
                 val status = (error as? ModelCatalogClient.HttpStatusFailure)?.status
                 val permanent = status == 401 || status == 403
-                _states.update {
-                    it + (descriptor.id to CatalogState.Failed(message, lastKnown, permanent))
-                }
+                val failed = CatalogState.Failed(message, lastKnown, permanent, nowEpochMs)
+                if (!seatIfCurrent(descriptor.id, generation, startedAt, failed)) return@onFailure
                 // The message is provider-supplied and status-only by construction —
                 // ModelCatalogClient never puts response bodies or keys into it.
                 logger.warn(
@@ -184,6 +199,21 @@ class ModelCatalog(
                     mapOf("provider" to descriptor.id, "reason" to message),
                 )
             }
+    }
+
+    /** Seat a refresh result only while it still belongs to the current credential. */
+    private fun seatIfCurrent(
+        providerId: String,
+        generation: AtomicLong,
+        startedAt: Long,
+        next: CatalogState,
+    ): Boolean {
+        var seated = false
+        _states.update { current ->
+            seated = generation.get() == startedAt
+            if (seated) current + (providerId to next) else current
+        }
+        return seated
     }
 
     // ==================== disk cache ====================
@@ -314,6 +344,9 @@ class ModelCatalog(
     companion object {
         /** Model lists are refreshed when older than this. */
         const val CACHE_TTL_MS: Long = 6 * 60 * 60 * 1000L
+
+        /** Transient provider failures back off instead of retrying every consumer poll. */
+        const val TRANSIENT_FAILURE_RETRY_MS: Long = 5 * 60 * 1000L
 
         private const val CACHE_FILE_NAME = "ai-model-catalog.json"
         private const val CACHE_FORMAT_VERSION = 1

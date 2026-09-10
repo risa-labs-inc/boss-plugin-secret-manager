@@ -8,7 +8,7 @@ Your credentials, secrets shared with you, Plugin Store API keys and AI provider
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.secretmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin`
-- **API Version**: 1.0.73 (`plugin.json` `apiVersion` and `minApiVersion`)
+- **API Version**: 1.0.89 (`plugin.json` `apiVersion` and `minApiVersion`)
 
 ## Essential Commands
 
@@ -280,6 +280,15 @@ window away from the vault the keys are stored in.
 
 Four things about it that are easy to get wrong:
 
+**Cross-plugin navigation is a short-lived command, not durable state.** The event contract is
+`CustomPluginEvent(eventName = "secret-manager.open-ai", payload["windowId"] = <host window>)`.
+`ProviderNavigation` retains it because the click can beat panel construction, scopes it by window,
+and consumes it once. It expires after 30 seconds so opening the panel much later cannot jump the
+user for a forgotten click; a panel without an AI ViewModel consumes-and-declines it too. The event
+collector starts `UNDISPATCHED` only to establish the subscription before `register()` returns;
+unlike `checkGateway`, it performs no host registry or network work on that thread. Collection
+failures are contained because the shared plugin scope is not a supervisor.
+
 **The ViewModel arrives as a supplier, and the order forces that.** `AiProvidersViewModel` is built
 inside `registerAiProviderSettings`'s `LinkageError` guard - it starts a `catalog.states` collector,
 which on a host that cannot link `LlmProviderSettingsApiImpl` would be started and then orphaned -
@@ -295,9 +304,9 @@ the plugin's single instance, shared with the host's Settings window through
 `LlmProviderSettingsApiImpl`. Disposing it with the sidebar panel would take the host's AI Providers
 section down too.
 
-**The tab is absent, not disabled, when there is no ViewModel.** On a host whose api predates
-`LlmProviderSettingsAPI` (1.0.71) the section cannot render at all, and a tab whose only content is
-"not available here" is worse than one tab fewer. `showAiSection` is that check.
+**The tab is absent, not disabled, when there is no ViewModel.** Registration still contains an
+unexpected `LinkageError` so the secrets panel survives a malformed host API, and a tab whose only
+content is "not available here" is worse than one tab fewer. `showAiSection` is that check.
 
 **`checkGateway()` launches; it does not read the registry on the registration thread.** The work
 is one in-memory list read, but `getLoadedPlugins()` asks the plugin loader about its own registry
@@ -326,7 +335,7 @@ to discover that one plugin stood in the way.
 gateway serving no engines is a different fact from an absent one. It is ported from
 `user-secret-list`'s `SecretManagerLink` minus the part that does not apply: that plugin's floor is
 1.0.20, so it had to probe reflectively for `openPanel` (api 1.0.57). This plugin's floor is
-**1.0.73**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
+**1.0.89**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
 it and are called straight - a guard there would be dead code implying a risk that cannot occur.
 
 Two rules carried over from that port, both mutation-verified here:
@@ -362,6 +371,31 @@ This plugin owns **all** AI provider configuration. The host has none: its
 `LlmProviderSettingsAPI`, and `PluginContext.llmProvider` is relayed from the same
 registered instance. Provider registry, credentials, environment-variable resolution
 and the model catalogue all live here.
+
+### Consumer discovery is connection-first and credential-free
+
+`configuredProviders()` returns resolved connections for consumers that own model selection;
+`activeConfig()` keeps the stricter ready-to-send-default-or-null contract. A model-independent
+connection may therefore carry a blank `modelId`, but never a missing required credential; a blank
+`apiKey` means the service is keyless and the consumer omits credential headers. Google-style
+model-in-path providers are omitted until a default exists because their complete endpoint cannot
+otherwise be formed. This semantic split is part of the API KDoc, not merely an implementation
+detail, because already-installed consumers can call either method.
+
+`availableModels()` is credential-free and asynchronous. Missing catalog state is omitted, a
+successfully fetched empty catalog is returned as an empty list, and `Failed.lastKnown` remains
+available so an offline refresh does not empty a consumer's picker. It uses the same machine-facing
+listing rule as `configuredProviders`: an Ollama daemon appears only after its catalog loaded.
+`addedProviderIds` is deliberately excluded because it is a UI-session affordance for keeping the
+Install card visible, not evidence that another plugin can call localhost. Both consumer methods
+start catalog discovery so their answers do not depend on which one another plugin called first.
+
+`ensureCatalogsLoaded` always awaits the Ollama system probe before a sweep, bounds its wait for the
+credential load, spaces consumer-triggered sweeps, and releases its in-flight guard on every exit.
+Transient provider failures have their own five-minute retry floor; 401/403 failures remain parked
+until the credential changes. `load()` marks discovery started too: invalidating a changed
+credential must never clear a catalog without scheduling its replacement. `catalogsLoaded` drops
+false across that invalidation and becomes true only after the replacement sweep completes.
 
 ### Legacy plaintext key import
 
@@ -462,6 +496,10 @@ hit once already:
   carries the stamped copy; adding the raw directory put an *unstamped* `plugin.json` in the jar
   too (the committed one says `1.0.9`), and with `duplicatesStrategy = EXCLUDE` the winner was
   decided by `from` order alone.
+- The ordinary `jar` and `buildPluginJar` otherwise resolve to the same filename. The ordinary
+  jar lives under `build/intermediates/jar`, not `build/libs`: the shared release workflow globs
+  `build/libs/*.jar`, and two tasks writing the release path let a plain jar overwrite the verified
+  plugin artifact after `verifyPackagedJar` had already passed.
 
 `PluginVersionTest` asserts against `boss.plugin.expectedVersion`, injected by the Test task from
 the Gradle version. Comparing the reported version to the bundled `plugin.json` would be circular -
@@ -547,8 +585,8 @@ fine.
 `context.authDataProvider` is read on the always-taken registration path, and so are the four
 `AuthDataProvider` members the ViewModel touches - a member newer than the floor is a
 `NoSuchMethodError` there that takes the whole plugin down, not just the AI section. All five
-were checked with `javap` against the released `boss-plugin-api-1.0.73.jar` (exactly
-`minApiVersion`), not assumed: `PluginContext.getAuthDataProvider`, plus `getCurrentUser`,
+were checked with `javap` against the released `boss-plugin-api-1.0.73.jar` (which predates the
+current floor), not assumed: `PluginContext.getAuthDataProvider`, plus `getCurrentUser`,
 `isAdmin`, `hasPermission(String)` and `getUserPermissions`.
 
 ### Provider keys are withheld from `secret_get`
@@ -596,15 +634,19 @@ Providers instead get an assisted flow: a "Get API key" button opening
 
 ### Linkage containment
 
-The guard covers the `Llm*` symbols only, so anything else this plugin touches must
-genuinely predate the declared `apiVersion` floor, which is **1.0.73** (`plugin.json`, both
-`apiVersion` and `minApiVersion`). This paragraph said 1.0.20 long after the manifest moved -
-understating the floor by 53 releases makes safe symbols look dangerous and sends people down
-pointless `LinkageError`-guard detours, so check it against `plugin.json` rather than trusting
-the prose. Verified against the api tags:
+The manifest's declared `apiVersion` floor is **1.0.89** (`plugin.json`, both `apiVersion` and
+`minApiVersion`). Check it rather than trusting prose: this section has lagged the manifest twice.
+The registration guard remains a final containment boundary for malformed host installations,
+not a substitute for declaring every type in a public method signature. In particular,
+`AiProviderModels` and `AiAvailableModel` first ship in **v1.0.89**; they occur in
+`availableModels()`'s signature, can resolve after guarded construction, and may be inspected by
+the host's binary validator before registration. That is why the floor moved instead of claiming
+the guard made older hosts safe.
+
+Earlier audits remain useful evidence. Verified against the api tags:
 `PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
 `openSettings` all landed in **1.0.16** and are present in the `v1.0.20` tag. (That check
-predates the floor moving to 1.0.73 and still holds: the api is additive-only, so presence in
+predates the floor moving and still holds: the api is additive-only, so presence in
 an earlier tag implies presence in every later one. Do not read it as the floor being 1.0.20.) That matters
 because they are read on the always-taken registration path (`registerPanel`), outside any
 guard - a member newer than the floor would throw `NoSuchMethodError` there and take the
@@ -622,37 +664,35 @@ true the moment the panel is rendered from `SecretManagerContent`".
 `BossBadge`, `BossTabIndicator` and `BossEmptyState` from `SecretManagerContent` and
 `SharedSecretsSection`, i.e. on the always-taken path, so a host missing any of them throws
 `NoSuchMethodError` where nothing can catch it. All five were therefore checked **against the
-declared floor rather than the local jar** - `git show v1.0.73:.../BossComponents.kt` in the api
+then-declared floor rather than the local jar** - `git show v1.0.73:.../BossComponents.kt` in the api
 checkout - along with `BossThemeColors.TextMuted`, `AccentColor` and `BorderColor`. Reading the
 sibling checkout's newest jar (1.0.84 at the time) would have proved nothing about 1.0.73. The
 rule for the next component: check the tag, not the jar, and add it here.
 
-`LlmProviderSettingsApiImpl`, `BrokeredCredentialBridge` and `GatewayCliEngineAccess` are the
-**only** files referencing api symbols added after this plugin's declared floor
-(`LlmProviderSettingsAPI`, `LlmApiFormat.GOOGLE_GENERATIVE` from 1.0.71;
-`BrokeredCredentialProvider` and `PluginContext.brokeredCredentialProvider` from 1.0.74;
-`AiCliSessionAPI` and `AiCliHealth` from 1.0.78).
+The cross-plugin navigation path was checked against **v1.0.73**, not the newest jar:
+`PluginContext.applicationEventBus`, `ApplicationEventBus.eventsOfType(Class)`, and
+`CustomPluginEvent.eventName`/`payload` are all present there and therefore below today's floor.
+
+`LlmProviderSettingsApiImpl`, `BrokeredCredentialBridge` and `GatewayCliEngineAccess` remain the
+only files that name the newer AI API types (`LlmProviderSettingsAPI` and
+`LlmApiFormat.GOOGLE_GENERATIVE` from 1.0.71; `BrokeredCredentialProvider`,
+`PluginContext.brokeredCredentialProvider` and `LlmApiFormat.OPENAI_RESPONSES` from 1.0.74;
+`AiCliSessionAPI` and `AiCliHealth` from 1.0.78; model discovery types from 1.0.89).
 Everything else uses the plugin-local `WireFormat` enum, the plugin-local `BrokeredKeySource`
-seam, and the plugin-local `CliEngineAccess` seam. That is why `registerAiProviderSettings` can wrap registration
-in a `LinkageError` guard and why `plugin.json` keeps its lower `apiVersion`: on an older
-host the AI panel is simply not served, and secret management still works. Adding a
-new-api reference outside those two files would take the whole plugin down on such a host.
+seam, and the plugin-local `CliEngineAccess` seam. Keep the adapter boundary even with the higher
+floor: it limits blast radius when a host API installation is incoherent.
 
 `ProviderCredentialStore` is constructed **outside** the guard, which is why it cannot
 hold an api type and gets `brokeredKeys` assigned after the fact. Left null, brokered
 providers report unconfigured - the same answer a host with no broker should give.
 
-### `LlmApiFormat.OPENAI_RESPONSES` is resolved reflectively, and has to be
+### Wire formats are direct at the declared API floor
 
-The GOOGLE_GENERATIVE argument ("it shipped in the same release as the interface, so any
-host that can link this class has both") does **not** extend to `OPENAI_RESPONSES`: it
-landed in 1.0.74, three releases later. A host on 1.0.71 links
-`LlmProviderSettingsApiImpl` fine and then throws `NoSuchFieldError` on the constant,
-because the enum is host-compiled and served parent-first. So it goes through
-`LlmApiFormat.valueOf` inside a `LinkageError`/`IllegalArgumentException` guard, and
-`configFor` returns null when it is missing - the provider reports unconfigured instead of
-crashing the section. Only `RISA_GLM` speaks that format and it needs the broker relay
-anyway, so on such a host it could never have worked.
+`LlmApiFormat.OPENAI_RESPONSES` once needed reflective resolution because it landed in 1.0.74
+while the plugin admitted 1.0.73 hosts. The 1.0.89 model-discovery signature raised the floor, so
+every enum constant used by `LlmProviderSettingsApiImpl` is now guaranteed and the reflective
+branch became misleading dead compatibility code. Map them directly; a new constant still requires
+checking its release against the manifest before use.
 
 ### Local CLI sessions
 
@@ -663,9 +703,9 @@ key-entry form would have a user paste a key they never needed.
 
 The gateway owns the engines; this panel owns the choice. `CliEngineAccess` is a plugin-local
 mirror of `AiCliSessionAPI` for the same reason `WireFormat` mirrors `LlmApiFormat`, and
-`GatewayCliEngineAccess` is the only file naming the api types - constructed inside the same
-`LinkageError` guard as the broker bridge, so an older host loses this section and nothing else.
-That is why `plugin.json` stays at its floor rather than moving to 1.0.78.
+`GatewayCliEngineAccess` is the only file naming the api types. The types predate today's floor,
+but keeping them at one adapter preserves the optional-gateway boundary and keeps the panel seam
+host-independent in tests.
 
 **Exactly one thing is active, and both setters enforce it.** `setActiveCliEngine` clears the
 HTTP provider and `setActiveProvider` calls `selectEngine(null)`. The second direction is the
@@ -961,7 +1001,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 250 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 302 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so

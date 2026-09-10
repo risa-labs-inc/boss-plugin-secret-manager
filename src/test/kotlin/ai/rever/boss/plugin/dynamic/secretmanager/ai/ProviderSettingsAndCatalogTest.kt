@@ -333,10 +333,12 @@ class ModelCatalogStateTest {
                     cacheDir = Files.createTempDirectory("catalog-transient").toFile(),
                 )
 
-            catalog.refresh(descriptor, apiKey = "good-key", force = true)
+            val failedAt = 10_000L
+            catalog.refresh(descriptor, apiKey = "good-key", force = true, nowEpochMs = failedAt)
             val failed = catalog.stateOf(descriptor.id) as CatalogState.Failed
             assertFalse(failed.permanent, "a 503 was treated as permanent")
-            assertTrue(catalog.isStale(descriptor.id, nowEpochMs = 0))
+            assertFalse(catalog.isStale(descriptor.id, failedAt + ModelCatalog.TRANSIENT_FAILURE_RETRY_MS - 1))
+            assertTrue(catalog.isStale(descriptor.id, failedAt + ModelCatalog.TRANSIENT_FAILURE_RETRY_MS))
         }
 
     @Test
@@ -482,9 +484,11 @@ class ProviderRegistryTest {
     @Test
     fun `google puts the model in the path and others do not`() {
         val google = ProviderRegistry.find(ProviderRegistry.GOOGLE)!!
+        assertTrue(google.needsModelInEndpoint)
         assertTrue(google.chatEndpointFor("gemini-3-pro").endsWith("/models/gemini-3-pro:generateContent"))
 
         val openai = ProviderRegistry.find(ProviderRegistry.OPENAI)!!
+        assertFalse(openai.needsModelInEndpoint)
         assertFalse(openai.chatEndpointFor("gpt-5").contains("gpt-5"))
     }
 

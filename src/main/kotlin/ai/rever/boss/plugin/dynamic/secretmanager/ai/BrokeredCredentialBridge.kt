@@ -7,13 +7,9 @@ import ai.rever.boss.plugin.api.PluginContext
  * Adapts the host's [BrokeredCredentialProvider] onto the plugin-local
  * [BrokeredKeySource] seam.
  *
- * **This file references api symbols added in 1.0.74**, which puts it under the same
- * rule as [LlmProviderSettingsApiImpl]: it must only ever be loaded from inside the
- * `LinkageError` guard in `SecretManagerDynamicPlugin.registerAiProviderSettings`.
- * On a host whose api jar predates the interface, resolving this class throws and the
- * guard skips the whole AI section - which is the intended degradation. Referencing it
- * from the store, the registry or the panel would instead take the entire plugin down
- * on such a host, because those load unconditionally. See AGENTS.md.
+ * This adapter keeps host API types out of the credential store even though they predate
+ * the manifest's 1.0.89 floor. The boundary still makes the store independently testable
+ * and limits an incoherent host installation to AI settings registration. See AGENTS.md.
  *
  * Returns null when the host has no broker relay at all, so the caller can leave
  * [ProviderCredentialStore.brokeredKeys] unset and have brokered providers report
