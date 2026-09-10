@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
+import ai.rever.boss.plugin.api.SecretEntryData
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -31,7 +32,8 @@ class ConsumerProviderDiscoveryTest {
         val prefs = ActiveProviderPrefs(bossRootDir = root)
         val http = QueuedHttpClient(emptyList(), always = response)
         val catalog = ModelCatalog(ModelCatalogClient(http))
-        val store = ProviderCredentialStore(FakeSecretDataProvider(emptyList()), env)
+        val secrets = FakeSecretDataProvider(emptyList())
+        val store = ProviderCredentialStore(secrets, env)
         val vm = AiProvidersViewModel(store, catalog, prefs, null, null, scope, env,
             ollamaSystemCheck = probe, monotonicNanos = nowNanos::get)
         val api = LlmProviderSettingsApiImpl(vm)
@@ -118,7 +120,16 @@ class ConsumerProviderDiscoveryTest {
         Harness(keys = emptyMap()).use { h ->
             h.load()
             assertTrue(h.api.availableModels().isEmpty())
-            h.store.saveKey(ProviderRegistry.OPENROUTER, "new-test-key").getOrThrow()
+            // The shared fake records create requests but intentionally does not persist
+            // them. Model a Secrets-section edit by changing its readable rows first,
+            // then emitting the same invalidation that production CRUD emits.
+            h.secrets.entries = listOf(SecretEntryData(
+                id = "new-provider-secret", website = ProviderRegistry.OPENROUTER,
+                username = "test-account", password = "new-test-key", notes = null,
+                tags = listOf(ProviderCredentialStore.TAG_AI_PROVIDER, ProviderRegistry.OPENROUTER),
+                createdAt = "2026-01-01", updatedAt = "2026-01-01",
+            ))
+            h.store.invalidate()
             withTimeout(5000) {
                 h.vm.state.first { it.catalogOf(ProviderRegistry.OPENROUTER) is CatalogState.Loaded }
             }
