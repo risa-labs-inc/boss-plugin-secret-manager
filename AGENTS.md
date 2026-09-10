@@ -861,6 +861,96 @@ it: every endpoint-less provider must be either `CUSTOM` (the user types the id)
 fixed list, and nothing with an endpoint may have a fixed list. Without the second, this
 becomes the drifting hardcoded list `ModelCatalogClient` replaced.
 
+### Keyless providers: Ollama, and the four rules it needs
+
+`ProviderDescriptor.requiresApiKey` is about **the wire**: false means the provider takes no
+credential on a request, which is true of a local Ollama daemon and of nothing else here. It is
+deliberately not a general "is this provider usable" flag, and four separate rules hang off that
+distinction — each of which was got wrong once:
+
+- **The hardware gate is not `requiresApiKey`.** A machine below Ollama's own published floor
+  (`MIN_USABLE_RAM_GB`, 8 GB, from its README) can run no model at all, so `ProviderDetail`
+  replaces the whole card with an explanation and `AddProviderRow` stops offering it. That check
+  is Ollama-specific *on purpose*: `requiresApiKey` is a protocol fact, this is a hardware fact,
+  and folding them together would mean any future keyless provider inherited a RAM threshold that
+  has nothing to do with it.
+- **Listing is not `isConfigured`.** `ProviderConnection.isConfigured` is unconditionally true for
+  a keyless provider — there is no credential to wait on — so listing on it would put Ollama in
+  every user's provider list from first launch, whether or not they had ever run it. The rule
+  (`isProviderListed`) is instead "its catalog actually loaded", i.e. the daemon answered, **or**
+  the user explicitly added it this session (`addedProviderIds`). The second half is not optional:
+  without it a user with no daemon picks Ollama from Add provider, gets the card and the Install
+  button, closes it, and the row silently vanishes — which is precisely the user the flow exists
+  for. Session-scoped, not persisted: on the next launch "is the daemon answering" is the honest
+  rule again.
+- **The catalog fetch is gated on the binary.** A keyless provider is always `isConfigured`, so
+  `refreshStale` would reach `http://localhost:11434` for *every* user, on every panel entry and
+  on every store invalidation (which the secrets list triggers on any create/update/delete). It
+  fails fast and the `Failed` state is correctly hidden, but "the binary is not on this machine"
+  answers the same question for free. Only a *probed* absence skips it — `ollamaSystemInfo` is
+  null until then, and `load()` awaits the probe for exactly this reason.
+- **The key dialog must not offer it.** `ProviderRegistry.userKeyed` (`requiresApiKey &&
+  brokerId == null`) is what the secrets section's "Add AI provider key" dialog iterates. Over
+  `all`, that dialog offered Ollama — writing an `OLLAMA_API_KEY` into the vault that nothing
+  ever reads, over a plain-`http` endpoint with a bearer transport — and `RISA_GLM`, which is the
+  one place the "a brokered credential is never written to disk" rule was still reachable.
+
+`OllamaSystemInfo` is **null until probed**, not `binaryFound = false`. Same reason
+`CliEngineHealth` has an `Unknown` and `gatewayNotice` starts at `NONE`: the probe is async, and
+"Ollama doesn't appear to be installed on this machine" rendered in the frame before it lands is
+a claim, not a wait — to a user who does have it. Everything reading the field tests `== false`
+rather than negating, so an unprobed machine is never blocked or accused.
+
+### `/api/pull` is Ollama's own API, and success is the positive rule
+
+`OllamaModelInstaller` pulls a model by calling `POST /api/pull` directly rather than printing an
+`ollama pull` command for the user to run. That endpoint is Ollama's **native** API, not the
+OpenAI-compatible one `WireFormat` speaks — pulling is a management operation with no OpenAI
+equivalent — which is why it has its own fixed base URL rather than deriving one from the
+descriptor's `chatEndpoint`.
+
+**A pull succeeded iff the stream's terminal line is `{"status":"success"}`.** Do not go back to
+scanning for an error status: two real failures carry no error status at all, and both end with
+the ViewModel persisting a `selectedModelId` for a model that is not on disk — which `configFor`
+then hands to every other plugin as `LlmConfig.modelId`.
+
+- A **mid-stream failure** is its own object with no `status` key (`{"error":"pull model
+  manifest: file does not exist"}`), arriving after the HTTP 200, so neither the status code nor
+  a `status` scan can see it. That `error` field is the message the user can act on.
+- A **truncated stream** — daemon killed, disk full, laptop asleep — ends on an ordinary
+  `downloading` record.
+
+Mutation-verified: restoring the `contains("error")` rule fails three installer cases and the
+ViewModel's *a pull that fails mid-stream does not select a model that is not there*.
+
+`RAM_TIERS` is the one hardcoded model list in this plugin and a deliberate exception to the rule
+`ModelCatalogClient` exists to enforce. It is a *suggestion shortlist for a machine that has
+pulled nothing yet* — there is no endpoint to ask, because the honest answer from an empty daemon
+is an empty list — and the live picker stays the only authority on what is installed. The tags
+will drift; that file is the only place to change them.
+
+### The editor card is state, and this ViewModel outlives every visit
+
+`isEditorOpen` is separate from `selectedProviderId`, and only one of them survives a reload.
+Remembering which provider you were looking at is useful; reopening a transient form nobody asked
+for this time is not — so `load()` sets `isEditorOpen = false` and leaves `selectedProviderId`
+alone.
+
+This matters because the ViewModel is the plugin's **single instance**, shared between the sidebar
+AI tab and the host's `Settings → AI Providers` (see "Three sections, and the AI one is not owned
+by the panel"). A per-panel ViewModel would reset the flag for free by being reconstructed; this
+one carries whatever the last visit left, to both surfaces. `ProviderRow`'s
+`isSelected = state.isEditorOpen && …` guard depends on the reset too — without it the stale
+selection and the stale open flag survive together and the guard cannot do what it says.
+
+`closeEditor` also drops the provider's `keyDrafts` entry. That is what Cancel implies, and it is
+what the rest of this plugin's handling of plaintext requires: a pasted-but-unsaved key would
+otherwise sit in a process-lifetime ViewModel *and* reappear in the other surface's field.
+
+Two new classes landed here (`OllamaSystemCheck`, `OllamaModelInstaller`). Neither holds a
+`ComponentLogger`, so `buildPluginJar`'s `javap` guard passes — but that is a fact to re-check,
+not to assume, whenever a class is added to this package.
+
 ### Out-of-process caveat
 
 `plugin.json` declares `isolationMode: out-of-process`, which only engages under
@@ -871,7 +961,7 @@ rather than failing.
 
 ### Tests
 
-`./gradlew test` - 214 host-independent cases, no live credential needed, run on every
+`./gradlew test` - 250 host-independent cases, no live credential needed, run on every
 pull request by `.github/workflows/test.yml`. The
 model-list parsers are the point: each was written from a provider's published
 reference, and xAI's and Together's envelopes aren't documented at all, so
@@ -889,6 +979,16 @@ past the first page, and the cache honouring `invalidate()`. `ModelCatalogClient
 uses a response *queue* rather than one fixed body, which is what makes cursor-following, the
 `MAX_PAGES` bound and the xAI primary-then-fallback path reachable at all.
 
+**Every `AiProvidersViewModel` a test builds must be handed `noOllamaOnThisMachine()`.** `init`
+calls `refreshOllamaSystemInfo()`, so the default `OllamaSystemCheck()` reads the real `PATH`, the
+real `user.home` and the real JMX bean - which quietly falsifies `envIn`'s "every source of
+variables is injected" and makes the result depend on whether the machine running the suite
+happens to have Ollama installed. `OllamaSystemCheckTest` has the same rule for
+`physicalMemoryBytes`. The one case that genuinely needs the real predicate -
+"a directory carrying the x bit is not mistaken for the binary" - asserts on
+`OllamaSystemCheck.isRunnableBinary` directly rather than through `current()`, because the
+candidate list includes absolute paths like `/opt/homebrew/bin` that no injection reaches.
+
 **A test that races the ViewModel's own `init` is a test that eventually fails a release.**
 `anUnprobedEngineReadsAsCheckingRatherThanMissing` constructed the ViewModel and read
 `state.value` on the next line, racing `init`'s `refreshCliEngines()` launch on
@@ -902,6 +1002,10 @@ has not answered yet" is a state the test is *in* rather than a window it has to
 releases the gate and asserts the row updates - without that second half the test would pass
 against a ViewModel that never probed at all. Any new test here that asserts on a value `init`
 fills in asynchronously needs the same treatment; `loadedEngines()` exists for the other direction.
+
+`load()` marks `isLoading` **before** the launch, not inside it, so `load(); state.first { !it.isLoading }`
+is a deterministic wait rather than a race a test has to win. `AiProvidersPanelStateTest` depends
+on that; so does any future test of a `load()`-driven transition.
 
 Two suites were validated against deliberate mutations, because a test that passes
 unconditionally is indistinguishable from no test:

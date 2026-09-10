@@ -3,10 +3,11 @@ package ai.rever.boss.plugin.dynamic.secretmanager.ai
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.net.URI
 import java.net.http.HttpClient
@@ -35,9 +36,18 @@ class OllamaModelInstaller(
      * The response is streamed newline-delimited JSON progress (`{"status":"downloading",
      * "completed":.., "total":..}`, ..., finally `{"status":"success"}`); this drains it
      * rather than surfacing live progress, which is more than this picker currently shows
-     * and easy to add later without changing this method's contract. Only the *last* line
-     * matters here: an `error` status anywhere in a normally-terminating stream still means
-     * the pull did not land.
+     * and easy to add later without changing this method's contract.
+     *
+     * **Success is the positive rule: the stream must actually end in `{"status":"success"}`.**
+     * Scanning for an error status instead lets two real failures through as successes, and
+     * both end with the caller persisting a model selection for a model that is not on disk:
+     *
+     * - a **mid-stream failure**, which Ollama reports as its own object with no `status` key
+     *   at all (`{"error":"pull model manifest: file does not exist"}`). The HTTP status is 200
+     *   by then, so the check above cannot catch it either — that `error` field is where the
+     *   message the user can act on lives, so it is what gets surfaced;
+     * - a **truncated stream** — daemon killed, disk full, the laptop sleeping mid-download —
+     *   whose last line is an ordinary `downloading` progress record.
      */
     suspend fun pull(tag: String): Result<Unit> =
         withContext(Dispatchers.IO) {
@@ -51,25 +61,35 @@ class OllamaModelInstaller(
                         .build()
 
                 val response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
-                if (response.statusCode() !in 200..299) {
-                    throw IllegalStateException("Ollama rejected the pull request (HTTP ${response.statusCode()}).")
-                }
-
-                var lastStatus: String? = null
-                response.body().bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        val status =
-                            runCatching { json.parseToJsonElement(line).jsonObject["status"]?.jsonPrimitive?.contentOrNull }
-                                .getOrNull()
-                        if (!status.isNullOrBlank()) lastStatus = status
+                // `use` on both paths, not just the streaming one: with `ofInputStream()` the
+                // body *is* the connection, and an unread error body left open never releases it.
+                response.body().use { body ->
+                    if (response.statusCode() !in 200..299) {
+                        throw IllegalStateException("Ollama rejected the pull request (HTTP ${response.statusCode()}).")
                     }
-                }
 
-                if (lastStatus?.contains("error", ignoreCase = true) == true) {
-                    throw IllegalStateException("Ollama could not pull $tag: $lastStatus")
+                    var lastStatus: String? = null
+                    var lastError: String? = null
+                    body.bufferedReader().forEachLine { line ->
+                        val obj = runCatching { json.parseToJsonElement(line).jsonObject }.getOrNull() ?: return@forEachLine
+                        obj.text(ERROR_FIELD)?.let { lastError = it }
+                        obj.text(STATUS_FIELD)?.let { lastStatus = it }
+                    }
+
+                    if (lastStatus != SUCCESS_STATUS) {
+                        val detail =
+                            lastError
+                                ?: lastStatus?.let { "the pull stopped at \"$it\"" }
+                                ?: "the daemon closed the stream without reporting a result"
+                        throw IllegalStateException("Ollama could not pull $tag: $detail")
+                    }
                 }
             }
         }
+
+    /** One non-blank string field, or null — `as?` because a non-primitive here must not throw. */
+    private fun JsonObject.text(field: String): String? =
+        (this[field] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
 
     companion object {
         /**
@@ -79,6 +99,14 @@ class OllamaModelInstaller(
          * fixed: this provider is the default local install, not a user-editable one.
          */
         const val NATIVE_API_BASE = "http://localhost:11434"
+
+        /** The one terminal status that means the model is on disk. */
+        private const val SUCCESS_STATUS = "success"
+
+        private const val STATUS_FIELD = "status"
+
+        /** Ollama's own field for a mid-stream failure; carries the actionable message. */
+        private const val ERROR_FIELD = "error"
 
         /**
          * A model pull can be several gigabytes on a slow connection; the default 20 s used

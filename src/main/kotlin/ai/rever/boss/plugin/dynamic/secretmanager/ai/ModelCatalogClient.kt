@@ -85,12 +85,14 @@ class ModelCatalogClient(
         val collected = mutableListOf<AiModel>()
         var cursor: String? = null
         var pages = 0
+        var explicitlyEmpty = false
 
         while (pages < MAX_PAGES) {
             val page = requestPage(descriptor, endpoint, apiKey, cursor)
             val body = page.getOrElse { return Result.failure(it) }
 
             collected += body.models
+            explicitlyEmpty = explicitlyEmpty || body.explicitlyEmpty
             pages++
 
             // Assign before breaking: leaving the previous page's cursor in place made a
@@ -108,10 +110,9 @@ class ModelCatalogClient(
             )
         }
 
-        // A 2xx that parses to nothing means the envelope wasn't what we expected, not
-        // that the provider has no models. Reporting success here is what would put an
-        // empty dropdown under a "live · updated just now" label.
-        if (collected.isEmpty()) {
+        // An explicit empty model array is a valid answer (e.g. a fresh local daemon).
+        // An unknown shape or entries we cannot decode still must not masquerade as one.
+        if (collected.isEmpty() && !explicitlyEmpty) {
             return Result.failure(
                 UnrecognisedEnvelope(
                     "${descriptor.displayName} returned no recognisable models — response format not recognised.",
@@ -121,7 +122,7 @@ class ModelCatalogClient(
         return Result.success(collected.distinctBy { it.id }.sortedBy { it.displayName.lowercase() })
     }
 
-    private data class Page(val models: List<AiModel>, val nextCursor: String?)
+    private data class Page(val models: List<AiModel>, val nextCursor: String?, val explicitlyEmpty: Boolean)
 
     private suspend fun requestPage(
         descriptor: ProviderDescriptor,
@@ -271,7 +272,9 @@ class ModelCatalogClient(
         body: String,
     ): Page {
         val root = json.parseToJsonElement(body)
-        val entries = modelArray(root)
+        val entries = modelArray(root) ?: throw UnrecognisedEnvelope(
+            "${descriptor.displayName} model list response format was not recognised.",
+        )
         val cursor = nextCursor(descriptor, root)
 
         val models = entries
@@ -287,7 +290,7 @@ class ModelCatalogClient(
                     else -> openAiModel(obj)
                 }
             }
-        return Page(models = models, nextCursor = cursor)
+        return Page(models = models, nextCursor = cursor, explicitlyEmpty = entries.isEmpty())
     }
 
     /**
@@ -332,12 +335,12 @@ class ModelCatalogClient(
      * xAI's and Together's envelope shape is not stated in their published model-list
      * references, so all three forms are accepted rather than betting on one.
      */
-    private fun modelArray(root: JsonElement): List<JsonElement> =
+    private fun modelArray(root: JsonElement): List<JsonElement>? =
         when {
             root is JsonArray -> root
             root is JsonObject && root["data"] is JsonArray -> (root["data"] as JsonArray)
             root is JsonObject && root["models"] is JsonArray -> (root["models"] as JsonArray)
-            else -> emptyList()
+            else -> null
         }
 
     private fun anthropicModel(obj: JsonObject): AiModel? {

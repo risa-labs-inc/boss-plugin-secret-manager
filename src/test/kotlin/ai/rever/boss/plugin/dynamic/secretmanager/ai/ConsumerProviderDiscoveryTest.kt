@@ -12,6 +12,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -22,7 +23,7 @@ class ConsumerProviderDiscoveryTest {
     private class Harness(
         keys: Map<String, String> = mapOf("OPENROUTER_API_KEY" to "test-only-key"),
         response: Pair<Int, String> = 200 to """{"data":[{"id":"consumer/model","name":"Consumer model","context_length":131072}]}""",
-        probe: OllamaSystemCheck = absentOllama(),
+        probe: OllamaSystemCheck = noOllamaOnThisMachine(),
         val nowNanos: AtomicLong = AtomicLong(0),
     ) : AutoCloseable {
         val root = Files.createTempDirectory("consumer-provider").toFile()
@@ -64,24 +65,26 @@ class ConsumerProviderDiscoveryTest {
     @Test fun `consumer catalog waits for Ollama probe before deciding to fetch`() = runBlocking {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val probe = OllamaSystemCheck(path = "", home = "", isExecutable = {
+        val probe = OllamaSystemCheck(path = "", home = "", isWindows = false, isExecutable = {
             entered.countDown()
             check(release.await(5, TimeUnit.SECONDS))
-            false
-        }, physicalMemoryBytes = { null })
+            true
+        }, physicalMemoryBytes = { null }, browse = { false })
         Harness(keys = emptyMap(), probe = probe).use { h ->
             try {
                 assertTrue(entered.await(5, TimeUnit.SECONDS))
                 h.api.availableModels()
                 withTimeout(5000) { h.vm.connectionsLoaded.first { it } }
+                assertNull(withTimeoutOrNull(100) { h.vm.catalogsLoaded.first { it } },
+                    "catalog sweep must remain suspended while the probe is unresolved")
                 assertFalse(h.vm.catalogsLoaded.value)
                 assertTrue(h.http.requests.isEmpty())
             } finally {
                 release.countDown()
             }
             withTimeout(5000) { h.vm.catalogsLoaded.first { it } }
-            assertTrue(h.http.requests.isEmpty(), "an absent daemon must not be contacted")
-            assertTrue(h.api.configuredProviders().isEmpty())
+            assertEquals(1, h.http.requests.size, "the installed daemon is discovered after the probe answers")
+            assertEquals(ProviderRegistry.OLLAMA, h.api.configuredProviders().single().providerId)
         }
     }
 
@@ -146,8 +149,19 @@ class ConsumerProviderDiscoveryTest {
         }
     }
 
-    companion object {
-        private fun absentOllama() = OllamaSystemCheck(path = "", home = "", isExecutable = { false },
-            physicalMemoryBytes = { null })
+    @Test fun `a fetched empty catalog is distinguishable from no fetched catalog`() = runBlocking {
+        Harness(response = 200 to """{"data":[]}""").use { h ->
+            h.load()
+            assertEquals(ProviderRegistry.OPENROUTER, h.api.availableModels().single().providerId)
+            assertTrue(h.api.availableModels().single().models.isEmpty())
+        }
+    }
+
+    @Test fun `manual provider without a typed model is omitted`() = runBlocking {
+        Harness(keys = emptyMap()).use { h ->
+            h.prefs.writeCustomEndpoint(ProviderRegistry.CUSTOM, "http://localhost:9999/v1/chat/completions")
+            h.load()
+            assertTrue(h.api.availableModels().isEmpty())
+        }
     }
 }

@@ -159,7 +159,12 @@ fun AiProvidersPanel(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 val listed =
                     state.providers.filter {
-                        isProviderListed(it, state.connectionOf(it.id), state.catalogOf(it.id))
+                        isProviderListed(
+                            it,
+                            state.connectionOf(it.id),
+                            state.catalogOf(it.id),
+                            wasAddedByUser = it.id in state.addedProviderIds,
+                        )
                     }
 
                 if (listed.isEmpty()) {
@@ -192,8 +197,14 @@ fun AiProvidersPanel(
                                 // A machine that cannot usefully run any model through Ollama
                                 // is not offered it as something to add — see ProviderDetail's
                                 // own blocked-state card for the one already-configured
-                                // exception this does not cover.
-                                !(descriptor.id == ProviderRegistry.OLLAMA && !state.ollamaSystemInfo.meetsMinimum)
+                                // exception this does not cover. `!= false` rather than a bare
+                                // negation: an unprobed machine (null) is offered the provider,
+                                // since withholding it would be a claim about hardware nobody
+                                // has looked at yet.
+                                !(
+                                    descriptor.id == ProviderRegistry.OLLAMA &&
+                                        state.ollamaSystemInfo?.meetsMinimum == false
+                                )
                         },
                     onPick = viewModel::selectProvider,
                     onPickCustom = { viewModel.selectProvider(ProviderRegistry.CUSTOM) },
@@ -376,16 +387,23 @@ private fun healthLine(
  * instead waits for its catalog to have actually loaded. Without that, every user would see
  * it in their list from first launch whether or not they had ever run it: the plugin being
  * installed is not the same as Ollama being reachable.
+ *
+ * [wasAddedByUser] is the second half of that rule, and the reason it cannot simply be
+ * `isConfigured`. A user with no daemon yet picks Ollama from "Add provider", gets the card
+ * and the Install button, closes it — and on the catalog rule alone their row is gone with
+ * nothing said, which is exactly the user this flow is for. An explicit add lists the row for
+ * the session regardless; the catalog rule still governs every later launch.
  */
 internal fun isProviderListed(
     descriptor: ProviderDescriptor,
     connection: ProviderConnection,
     catalog: CatalogState,
+    wasAddedByUser: Boolean = false,
 ): Boolean =
     if (descriptor.requiresApiKey) {
         connection.isConfigured
     } else {
-        catalog is CatalogState.Loaded
+        catalog is CatalogState.Loaded || wasAddedByUser
     }
 
 /**
@@ -478,11 +496,17 @@ private fun ProviderRow(
         )
         // The row itself is already clickable, same target — this is for discoverability:
         // "tap anywhere to edit" is not obvious from a row that otherwise reads as static.
+        //
+        // No contentDescription, and no separate click target: the row above already carries
+        // the provider name and the same action, so describing this would make a screen reader
+        // read the provider twice in one row — the double-read AGENTS.md records for
+        // QuietCopyButton and SharedSecretBadge. Purely decorative, so it is announced as
+        // nothing at all rather than as a second 16dp button.
         Icon(
             imageVector = Icons.Outlined.Edit,
-            contentDescription = "Edit ${descriptor.displayName}",
+            contentDescription = null,
             tint = BossThemeColors.TextSecondary,
-            modifier = Modifier.size(16.dp).clickable(onClick = onClick),
+            modifier = Modifier.size(16.dp),
         )
     }
 }
@@ -535,7 +559,10 @@ private fun ProviderDetail(
     // explanation. Any other keyless provider added later would need its own such check;
     // this one is Ollama-specific on purpose rather than folded into requiresApiKey, since
     // requiresApiKey is about the wire protocol and this is about the hardware.
-    val ollamaBlocked = descriptor.id == ProviderRegistry.OLLAMA && !state.ollamaSystemInfo.meetsMinimum
+    // `== false`, not `!meetsMinimum`: null is "the probe has not answered", and a card that
+    // says "not available on this machine" before anyone read the RAM is a claim, not a wait.
+    val ollamaBlocked =
+        descriptor.id == ProviderRegistry.OLLAMA && state.ollamaSystemInfo?.meetsMinimum == false
 
     // One card for the whole editor — title through the activate button — rather than two
     // separate cards (key section, model section) with a header floating above both. Add and
@@ -678,7 +705,7 @@ private fun ProviderDetail(
 
 /** What replaces the rest of the card when [OllamaSystemInfo.meetsMinimum] is false. */
 @Composable
-private fun OllamaUnavailableContent(info: OllamaSystemInfo) {
+private fun OllamaUnavailableContent(info: OllamaSystemInfo?) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = "Not available on this machine",
@@ -688,7 +715,7 @@ private fun OllamaUnavailableContent(info: OllamaSystemInfo) {
         Text(
             text =
                 "This machine reports " +
-                    (info.totalRamGb?.let { "about ${it.roundToInt()} GB" } ?: "an unreadable amount") +
+                    (info?.totalRamGb?.let { "about ${it.roundToInt()} GB" } ?: "an unreadable amount") +
                     " of RAM. Ollama needs at least ${OllamaSystemCheck.MIN_USABLE_RAM_GB.roundToInt()} GB " +
                     "to run any model usefully, so this provider isn't offered here.",
             style = SecretPanelType.meta,
@@ -707,28 +734,39 @@ private fun OllamaUnavailableContent(info: OllamaSystemInfo) {
  */
 @Composable
 private fun OllamaSetupNotice(
-    info: OllamaSystemInfo,
+    info: OllamaSystemInfo?,
     installingTag: String?,
     onInstall: () -> Unit,
     onInstallModel: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (!info.binaryFound) {
-            Text(
-                text = "Ollama doesn't appear to be installed on this machine.",
-                style = SecretPanelType.meta,
-                color = BossThemeColors.TextSecondary,
-            )
-            BossSecondaryButton(text = "Install Ollama", onClick = onInstall)
-        } else {
-            Text(
-                text = "A local Ollama daemon needs no API key. Pick a model below once it's running.",
-                style = SecretPanelType.meta,
-                color = BossThemeColors.TextSecondary,
-            )
+        when {
+            // Null is "the probe has not answered". Say so, rather than picking one of the
+            // two real answers and being wrong about it for a frame — the same reason
+            // CliEngineHealth has an Unknown and does not default to NotInstalled.
+            info == null ->
+                Text(
+                    text = "Checking whether Ollama is installed…",
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextMuted,
+                )
+            !info.binaryFound -> {
+                Text(
+                    text = "Ollama doesn't appear to be installed on this machine.",
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextSecondary,
+                )
+                BossSecondaryButton(text = "Install Ollama", onClick = onInstall)
+            }
+            else ->
+                Text(
+                    text = "A local Ollama daemon needs no API key. Pick a model below once it's running.",
+                    style = SecretPanelType.meta,
+                    color = BossThemeColors.TextSecondary,
+                )
         }
 
-        if (info.suggestedModels.isNotEmpty()) {
+        if (info != null && info.suggestedModels.isNotEmpty()) {
             Text(
                 text =
                     "Suggested for this machine" +
@@ -739,6 +777,10 @@ private fun OllamaSetupNotice(
             OllamaModelInstallPicker(
                 models = info.suggestedModels,
                 installingTag = installingTag,
+                // Pulling before the binary is here is a guaranteed connection-refused, so
+                // the control that would do it is disabled rather than left to fail and
+                // explain itself. Install Ollama above is the step that comes first.
+                enabled = info.binaryFound,
                 onInstall = onInstallModel,
             )
         }
@@ -754,11 +796,12 @@ private fun OllamaSetupNotice(
 private fun OllamaModelInstallPicker(
     models: List<SuggestedOllamaModel>,
     installingTag: String?,
+    enabled: Boolean,
     onInstall: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     var chosen by remember(models) { mutableStateOf(models.firstOrNull()) }
-    val busy = installingTag != null
+    val busy = installingTag != null || !enabled
 
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(modifier = Modifier.weight(1f)) {

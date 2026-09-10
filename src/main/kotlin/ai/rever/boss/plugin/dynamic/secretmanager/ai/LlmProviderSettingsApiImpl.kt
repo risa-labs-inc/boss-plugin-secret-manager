@@ -64,7 +64,8 @@ class LlmProviderSettingsApiImpl(
         // Consumers choosing a model may receive an empty modelId for model-independent
         // endpoints. Legacy consumers must use activeConfig or filter for a chosen model.
         return state.providers.filter { descriptor ->
-            isProviderListed(descriptor, state.connectionOf(descriptor.id), state.catalogOf(descriptor.id))
+            isProviderListed(descriptor, state.connectionOf(descriptor.id), state.catalogOf(descriptor.id),
+                wasAddedByUser = descriptor.id in state.addedProviderIds)
         }.mapNotNull { descriptor -> configFor(descriptor.id, requireModel = false) }
     }
 
@@ -85,21 +86,21 @@ class LlmProviderSettingsApiImpl(
         val state = viewModel.state.value
         return state.providers.mapNotNull { descriptor ->
             val connection = state.connectionOf(descriptor.id)
-            if (!isProviderListed(descriptor, connection, state.catalogOf(descriptor.id))) return@mapNotNull null
+            if (!isProviderListed(descriptor, connection, state.catalogOf(descriptor.id),
+                    wasAddedByUser = descriptor.id in state.addedProviderIds)) return@mapNotNull null
 
             val models =
                 if (ProviderRegistry.needsManualModel(descriptor)) {
                     connection.selectedModelId
                         ?.takeIf { it.isNotBlank() }
                         ?.let { listOf(AiAvailableModel(id = it, displayName = it)) }
-                        .orEmpty()
+                        ?: return@mapNotNull null
                 } else {
                     (state.catalogOf(descriptor.id) as? CatalogState.Loaded)
                         ?.models
                         ?.map { AiAvailableModel(id = it.id, displayName = it.displayName, contextLength = it.contextLength) }
-                        .orEmpty()
+                        ?: return@mapNotNull null
                 }
-            if (models.isEmpty()) return@mapNotNull null
 
             AiProviderModels(providerId = descriptor.id, providerName = descriptor.displayName, models = models)
         }

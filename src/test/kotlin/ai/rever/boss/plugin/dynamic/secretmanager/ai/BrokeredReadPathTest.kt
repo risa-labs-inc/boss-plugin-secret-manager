@@ -99,6 +99,7 @@ class BrokeredReadPathTest {
                 minBrokeredRefreshIntervalMs = minRefreshIntervalMs,
                 brokeredRenewalLeadMs = renewalLeadMs,
                 minBrokeredRenewalDelayMs = minRenewalDelayMs,
+                ollamaSystemCheck = noOllamaOnThisMachine(),
             )
         return Harness(LlmProviderSettingsApiImpl(viewModel), viewModel, store)
     }

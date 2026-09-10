@@ -89,6 +89,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         // applicationEventBus, eventsOfType(Class<T>), and CustomPluginEvent's
         // eventName/payload all exist there, so this path needs no linkage adapter.
         context.applicationEventBus?.let { bus ->
+            // Subscribe before register returns so a racing management action is retained;
+            // collection suspends immediately and performs no credential or catalog I/O.
             pluginScope.launch(start = CoroutineStart.UNDISPATCHED) {
                 navigation.collect({ bus.eventsOfType(CustomPluginEvent::class.java) }) { failure ->
                     logger.warn(
