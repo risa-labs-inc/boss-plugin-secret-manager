@@ -290,6 +290,7 @@ class ConsumerProviderDiscoveryTest {
             h.prefs.writeCustomEndpoint(ProviderRegistry.CUSTOM, "http://localhost:9999/v1/chat/completions")
             h.load()
             assertTrue(h.api.availableModels().isEmpty())
+            assertTrue(h.api.configuredProviders().isEmpty())
         }
     }
 }

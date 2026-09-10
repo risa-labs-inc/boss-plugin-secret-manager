@@ -94,6 +94,8 @@ data class ProviderDescriptor(
      * provider has no such endpoint (a user-supplied custom endpoint).
      */
     val modelsEndpoint: String?,
+    /** Whether a model id is embedded into [chatEndpoint] rather than sent in the body. */
+    val needsModelInEndpoint: Boolean = wireFormat == WireFormat.GOOGLE_GENERATIVE,
     /**
      * Secondary models endpoint tried when [modelsEndpoint] fails — xAI exposes a
      * richer `/v1/language-models` alongside the minimal `/v1/models`.
@@ -143,18 +145,19 @@ data class ProviderDescriptor(
      * every other provider takes it in the request body and ignores the argument.
      */
     fun chatEndpointFor(modelId: String): String =
-        when (wireFormat) {
-            WireFormat.GOOGLE_GENERATIVE -> "$chatEndpoint/$modelId:generateContent"
-            else -> chatEndpoint
-        }
+        if (needsModelInEndpoint) "$chatEndpoint/$modelId:generateContent" else chatEndpoint
 }
 
 /**
  * Whether [descriptor] belongs in the compact provider list shared by the panel and API.
  *
  * Keyed providers need a credential. A keyless local daemon instead needs a catalog that
- * proves it is reachable, unless the user explicitly added it for this panel session so they
- * can still see the install controls.
+ * proves it is reachable. Without that distinction every user would see Ollama from first
+ * launch whether or not they had ever run it.
+ *
+ * [wasAddedByUser] deliberately overrides the daemon rule for the current panel session. A
+ * user who adds Ollama before installing it must keep the row and its install controls after
+ * closing the editor; the catalog rule takes over again on the next launch.
  */
 internal fun isProviderListed(
     descriptor: ProviderDescriptor,
@@ -177,7 +180,8 @@ internal fun hasUsableProviderConnection(
     if (!connection.isConfigured) return false
     val modelId = connection.selectedModelId.orEmpty().trim()
     if (requireModel && modelId.isEmpty()) return false
-    if (descriptor.wireFormat == WireFormat.GOOGLE_GENERATIVE && modelId.isEmpty()) return false
+    if (descriptor.needsModelInEndpoint && modelId.isEmpty()) return false
+    if (ProviderRegistry.needsManualModel(descriptor) && modelId.isEmpty()) return false
     if (descriptor.id == ProviderRegistry.CUSTOM && connection.customEndpoint.isNullOrBlank()) return false
     return true
 }

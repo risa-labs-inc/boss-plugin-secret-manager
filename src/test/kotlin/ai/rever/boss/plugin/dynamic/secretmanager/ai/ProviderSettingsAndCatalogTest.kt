@@ -484,9 +484,11 @@ class ProviderRegistryTest {
     @Test
     fun `google puts the model in the path and others do not`() {
         val google = ProviderRegistry.find(ProviderRegistry.GOOGLE)!!
+        assertTrue(google.needsModelInEndpoint)
         assertTrue(google.chatEndpointFor("gemini-3-pro").endsWith("/models/gemini-3-pro:generateContent"))
 
         val openai = ProviderRegistry.find(ProviderRegistry.OPENAI)!!
+        assertFalse(openai.needsModelInEndpoint)
         assertFalse(openai.chatEndpointFor("gpt-5").contains("gpt-5"))
     }
 

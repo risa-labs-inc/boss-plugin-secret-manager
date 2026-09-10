@@ -141,7 +141,8 @@ class LlmProviderSettingsApiImpl(
             when {
                 // A custom provider's endpoint is user-supplied; without it there is
                 // nothing to call.
-                descriptor.id == ProviderRegistry.CUSTOM -> connection.customEndpoint!!.trim()
+                descriptor.id == ProviderRegistry.CUSTOM ->
+                    connection.customEndpoint?.takeIf { it.isNotBlank() }?.trim() ?: return null
 
                 else -> descriptor.chatEndpointFor(modelId)
             }

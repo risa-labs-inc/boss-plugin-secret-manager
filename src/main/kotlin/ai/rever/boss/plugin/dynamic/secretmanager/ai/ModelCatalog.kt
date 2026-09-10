@@ -129,6 +129,8 @@ class ModelCatalog(
             return
         }
 
+        if (!force && !isStale(descriptor.id, nowEpochMs)) return
+
         // A provider that serves a fixed set has nothing to ask. This is not a return
         // to the hardcoded catalogue this class replaced: it covers only the case where
         // the provider itself offers one model to one scoped key, so there is no
@@ -144,8 +146,6 @@ class ModelCatalog(
             )
             return
         }
-
-        if (!force && !isStale(descriptor.id, nowEpochMs)) return
 
         // Carry the previous good list through a *chain* of failures, not just the first.
         // Before Failed survived seeding, re-entry converted it back to Loaded so this cast
