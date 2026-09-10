@@ -127,7 +127,16 @@ class AiProvidersPanelStateTest {
         vm.loaded()
 
         vm.installOllamaModel("llama3.2:3b")
-        withTimeout(TIMEOUT_MS) { vm.state.first { it.notice != null } }
+        // The success notice is published immediately before the finally block releases the
+        // pull guard and clears the busy tag. Await the complete terminal state rather than
+        // racing that cleanup on a faster CI dispatcher.
+        withTimeout(TIMEOUT_MS) {
+            vm.state.first {
+                it.notice == "Pulled llama3.2:3b." &&
+                    it.installingOllamaModelTag == null &&
+                    it.connectionOf(ProviderRegistry.OLLAMA).selectedModelId == "llama3.2:3b"
+            }
+        }
 
         val state = vm.state.value
         assertEquals("Pulled llama3.2:3b.", state.notice)
