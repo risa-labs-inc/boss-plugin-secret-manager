@@ -951,7 +951,6 @@ private fun ModelSectionContent(
                     when (catalog) {
                         is CatalogState.Loaded -> catalog
                         is CatalogState.Failed -> catalog.lastKnown
-                        else -> null
                     }
 
                 if (catalog is CatalogState.Failed) {
@@ -965,6 +964,12 @@ private fun ModelSectionContent(
                 if (loaded == null) {
                     Text(
                         text = "No models available yet.",
+                        style = SecretPanelType.meta,
+                        color = BossThemeColors.TextSecondary,
+                    )
+                } else if (loaded.models.isEmpty()) {
+                    Text(
+                        text = "${descriptor.displayName} reported no installed or available models.",
                         style = SecretPanelType.meta,
                         color = BossThemeColors.TextSecondary,
                     )

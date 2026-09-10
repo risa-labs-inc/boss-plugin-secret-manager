@@ -55,13 +55,32 @@ class ProviderNavigationTest {
         assertEquals(setOf("two"), navigation.state.value.keys)
     }
 
-    @Test fun `an unavailable AI section cannot be selected or consume navigation`() {
+    @Test fun `an unavailable AI section cannot be selected and drops the request`() {
         val navigation = ProviderNavigation()
         navigation.accept(request("one"))
         val token = navigation.state.value.getValue("one")
         assertFalse(navigation.consume("one", token, aiAvailable = false))
-        assertEquals(token, navigation.state.value["one"])
-        assertTrue(navigation.consume("one", token, aiAvailable = true))
+        assertTrue(navigation.state.value.isEmpty())
+        assertFalse(navigation.consume("one", token, aiAvailable = true))
+    }
+
+    @Test fun `an expired request cannot surprise a panel opened later`() {
+        var now = 1_000L
+        val navigation = ProviderNavigation(monotonicMillis = { now }, requestTtlMs = 100)
+        navigation.accept(request("one"))
+        val token = navigation.state.value.getValue("one")
+        now += 101
+        assertFalse(navigation.consume("one", token))
+        assertTrue(navigation.state.value.isEmpty())
+    }
+
+    @Test fun `accepting a request prunes expired windows`() {
+        var now = 1_000L
+        val navigation = ProviderNavigation(monotonicMillis = { now }, requestTtlMs = 100)
+        navigation.accept(request("one"))
+        now += 101
+        navigation.accept(request("two"))
+        assertEquals(setOf("two"), navigation.state.value.keys)
     }
 
     @Test fun `event flow failure is reported without cancelling shared plugin scope`() = runBlocking {

@@ -23,6 +23,7 @@ class ConsumerProviderDiscoveryTest {
     private class Harness(
         keys: Map<String, String> = mapOf("OPENROUTER_API_KEY" to "test-only-key"),
         response: Pair<Int, String> = 200 to """{"data":[{"id":"consumer/model","name":"Consumer model","context_length":131072}]}""",
+        responses: List<Pair<Int, String>> = emptyList(),
         probe: OllamaSystemCheck = noOllamaOnThisMachine(),
         val nowNanos: AtomicLong = AtomicLong(0),
     ) : AutoCloseable {
@@ -30,7 +31,7 @@ class ConsumerProviderDiscoveryTest {
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         val env = EnvResolver(root, processEnv = keys::get, systemProperty = { null }, useLaunchctl = false)
         val prefs = ActiveProviderPrefs(bossRootDir = root)
-        val http = QueuedHttpClient(emptyList(), always = response)
+        val http = QueuedHttpClient(responses, always = response)
         val catalog = ModelCatalog(ModelCatalogClient(http))
         val secrets = FakeSecretDataProvider(emptyList())
         val store = ProviderCredentialStore(secrets, env)
@@ -109,10 +110,38 @@ class ConsumerProviderDiscoveryTest {
     }
 
     @Test fun `Google without a selected model never exposes a malformed endpoint`() = runBlocking {
-        Harness(keys = mapOf("GOOGLE_API_KEY" to "test-only-key")).use { h ->
-            h.vm.ensureConnectionsLoaded()
-            withTimeout(5000) { h.vm.connectionsLoaded.first { it } }
+        Harness(
+            keys = mapOf("GOOGLE_API_KEY" to "test-only-key"),
+            response = 200 to """{"models":[{"name":"models/gemini-3"}]}""",
+        ).use { h ->
+            h.load()
             assertFalse(h.api.configuredProviders().any { it.providerId == ProviderRegistry.GOOGLE })
+            assertFalse(h.api.availableModels().any { it.providerId == ProviderRegistry.GOOGLE })
+        }
+    }
+
+    @Test fun `a failed refresh keeps the last known models available to consumers`() = runBlocking {
+        Harness(
+            responses = listOf(
+                200 to """{"data":[{"id":"known-model"}]}""",
+                503 to """{"error":"offline"}""",
+            ),
+        ).use { h ->
+            h.load()
+            val descriptor = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+            h.catalog.refresh(descriptor, "test-only-key", force = true)
+            assertTrue(h.catalog.stateOf(descriptor.id) is CatalogState.Failed)
+            assertEquals("known-model", h.api.availableModels().single().models.single().id)
+        }
+    }
+
+    @Test fun `adding an unreachable local provider stays a panel-only affordance`() = runBlocking {
+        Harness(keys = emptyMap()).use { h ->
+            h.vm.selectProvider(ProviderRegistry.OLLAMA)
+            h.load()
+            assertTrue(ProviderRegistry.OLLAMA in h.vm.state.value.addedProviderIds)
+            assertTrue(h.api.configuredProviders().isEmpty())
+            assertTrue(h.api.availableModels().isEmpty())
         }
     }
 
@@ -134,6 +163,24 @@ class ConsumerProviderDiscoveryTest {
                 h.vm.state.first { it.catalogOf(ProviderRegistry.OPENROUTER) is CatalogState.Loaded }
             }
             assertTrue(h.api.availableModels().any { it.providerId == ProviderRegistry.OPENROUTER })
+        }
+    }
+
+    @Test fun `a panel load keeps catalog refresh paired with later credential invalidation`() = runBlocking {
+        Harness(keys = emptyMap()).use { h ->
+            h.vm.load()
+            withTimeout(5000) { h.vm.catalogsLoaded.first { it } }
+            h.secrets.entries = listOf(SecretEntryData(
+                id = "panel-added-secret", website = ProviderRegistry.OPENROUTER,
+                username = "test-account", password = "new-test-key", notes = null,
+                tags = listOf(ProviderCredentialStore.TAG_AI_PROVIDER, ProviderRegistry.OPENROUTER),
+                createdAt = "2026-01-01", updatedAt = "2026-01-01",
+            ))
+            h.store.invalidate()
+            withTimeout(5000) {
+                h.vm.state.first { it.catalogOf(ProviderRegistry.OPENROUTER) is CatalogState.Loaded }
+            }
+            assertEquals(1, h.http.requests.size)
         }
     }
 

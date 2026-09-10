@@ -333,10 +333,12 @@ class ModelCatalogStateTest {
                     cacheDir = Files.createTempDirectory("catalog-transient").toFile(),
                 )
 
-            catalog.refresh(descriptor, apiKey = "good-key", force = true)
+            val failedAt = 10_000L
+            catalog.refresh(descriptor, apiKey = "good-key", force = true, nowEpochMs = failedAt)
             val failed = catalog.stateOf(descriptor.id) as CatalogState.Failed
             assertFalse(failed.permanent, "a 503 was treated as permanent")
-            assertTrue(catalog.isStale(descriptor.id, nowEpochMs = 0))
+            assertFalse(catalog.isStale(descriptor.id, failedAt + ModelCatalog.TRANSIENT_FAILURE_RETRY_MS - 1))
+            assertTrue(catalog.isStale(descriptor.id, failedAt + ModelCatalog.TRANSIENT_FAILURE_RETRY_MS))
         }
 
     @Test

@@ -298,5 +298,7 @@ sealed interface CatalogState {
          * attempt genuinely might succeed.
          */
         val permanent: Boolean = false,
+        /** When the failed request finished, used to bound retries of transient failures. */
+        val failedAtEpochMs: Long = 0,
     ) : CatalogState
 }

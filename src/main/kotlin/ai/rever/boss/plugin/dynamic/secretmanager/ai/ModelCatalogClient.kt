@@ -53,9 +53,12 @@ class ModelCatalogClient(
             )
 
         val first = fetchAllPages(descriptor, primary, apiKey)
-        if (first.isSuccess) return first
-
         val fallback = descriptor.modelsEndpointFallback ?: return first
+
+        // An explicit empty array is valid for an authoritative endpoint such as a fresh
+        // Ollama daemon. A provider with a fallback is different: its primary route is a
+        // best-effort guess, so an empty success is also a reason to ask the known fallback.
+        if (first.isSuccess && first.getOrThrow().isNotEmpty()) return first
 
         // xAI exposes a richer endpoint plus a minimal one; fall back rather than reporting
         // failure when only the richer route is unavailable.
@@ -65,7 +68,7 @@ class ModelCatalogClient(
         // retrying a 429 hits a provider that just asked us to slow down — twice per
         // refresh. An unrecognised envelope stays in scope because that is the other way a
         // wrong endpoint presents (a 200 that parses to nothing).
-        if (!worthRetryingOnFallback(first.exceptionOrNull())) return first
+        if (first.isFailure && !worthRetryingOnFallback(first.exceptionOrNull())) return first
         return fetchAllPages(descriptor, fallback, apiKey)
     }
 

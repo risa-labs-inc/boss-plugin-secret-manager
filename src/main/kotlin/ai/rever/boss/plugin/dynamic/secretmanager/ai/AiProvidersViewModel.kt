@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -172,6 +173,7 @@ class AiProvidersViewModel(
     private val ollamaModelInstaller: OllamaModelInstaller = OllamaModelInstaller(),
     private val catalogRefreshIntervalMs: Long = 30_000,
     private val monotonicNanos: () -> Long = System::nanoTime,
+    private val catalogConnectionWaitTimeoutMs: Long = CATALOG_CONNECTION_WAIT_TIMEOUT_MS,
 ) {
     private val logger = BossLogger.forComponent("AiProvidersViewModel")
 
@@ -246,7 +248,9 @@ class AiProvidersViewModel(
         store?.let { credentialStore ->
             scope.launch {
                 credentialStore.invalidations.drop(1).collect {
-                    if (connectionsLoadStarted.get()) reloadConnections()
+                    if (connectionsLoadStarted.get()) {
+                        reloadConnections()
+                    }
                 }
             }
         }
@@ -275,27 +279,39 @@ class AiProvidersViewModel(
         catalogsLoadStarted.set(true)
         // Consumer reads can be frequent. Re-check TTLs on demand, with a retry floor for
         // transient failures instead of a perpetual refresh coroutine or one-shot latch.
-        if (monotonicNanos() - lastCatalogRefreshNanos.get() < catalogRefreshIntervalMs * 1_000_000) return
+        if (monotonicNanos() - lastCatalogRefreshNanos.get() < catalogRefreshIntervalMs * NANOS_PER_MILLI) return
         if (!catalogRefreshInFlight.compareAndSet(false, true)) return
-        var completed = false
+        val attempted = AtomicBoolean(false)
+        val completed = AtomicBoolean(false)
         scope.launch(Dispatchers.IO) {
             try {
-                connectionsLoaded.first { it }
+                val connectionsReady =
+                    withTimeoutOrNull(catalogConnectionWaitTimeoutMs) {
+                        connectionsLoaded.first { it }
+                        true
+                    } == true
+                if (!connectionsReady) {
+                    logger.warn(LogCategory.NETWORK, "Timed out waiting to load AI provider connections")
+                    return@launch
+                }
+                attempted.set(true)
                 readOllamaSystemInfo()
                 catalog.seedFromCache()
                 refreshStale(state.value.connections)
-                completed = true
+                completed.set(true)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
                 logger.warn(LogCategory.NETWORK, "Could not refresh AI model catalogs")
             }
         }.invokeOnCompletion {
-            lastCatalogRefreshNanos.set(monotonicNanos())
+            // A job cancelled before its body ran, or a timed-out connection wait, did not
+            // contact a provider and must not suppress the next retry for a full interval.
+            if (attempted.get()) lastCatalogRefreshNanos.set(monotonicNanos())
             catalogRefreshInFlight.set(false)
             // Publish completion after the scheduling guards settle, so observers can
             // immediately advance to their next read without racing the completion handler.
-            if (completed) _catalogsLoaded.value = true
+            if (completed.get()) _catalogsLoaded.value = true
         }
     }
 
@@ -354,6 +370,8 @@ class AiProvidersViewModel(
     /** Load credentials, seed cached model lists, then refresh anything stale. */
     fun load() {
         connectionsLoadStarted.set(true)
+        catalogsLoadStarted.set(true)
+        _catalogsLoaded.value = false
         // Marked in flight synchronously, before the launch rather than inside it: `isLoading`
         // is the panel's own "this entry is still settling" signal, and a caller that returns
         // from load() to a state still reading `isLoading = false` is being told the load
@@ -406,6 +424,7 @@ class AiProvidersViewModel(
             }
 
             refreshStale(connections)
+            _catalogsLoaded.value = true
             checkLegacyImport()
         }
     }
@@ -1074,10 +1093,14 @@ class AiProvidersViewModel(
         val changed = _state.value.connections.filter { (id, connection) ->
             previous[id]?.apiKey != connection.apiKey || previous[id]?.customEndpoint != connection.customEndpoint
         }.keys
-        changed.forEach(catalog::markNotConfigured)
+        if (changed.isNotEmpty()) {
+            _catalogsLoaded.value = false
+            changed.forEach(catalog::markNotConfigured)
+        }
         if (catalogsLoadStarted.get() && changed.isNotEmpty()) {
             readOllamaSystemInfo()
             refreshStale(_state.value.connections)
+            _catalogsLoaded.value = true
         }
         scheduleBrokeredRenewal()
     }
@@ -1153,6 +1176,7 @@ class AiProvidersViewModel(
          */
         const val DEFAULT_MIN_BROKERED_REFRESH_INTERVAL_MS = 5_000L
         const val NANOS_PER_MILLI = 1_000_000L
+        const val CATALOG_CONNECTION_WAIT_TIMEOUT_MS = 30_000L
 
         /**
          * How far ahead of a brokered credential's reuse deadline to renew it.

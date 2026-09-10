@@ -12,17 +12,10 @@ import androidx.compose.ui.Modifier
 /**
  * Serves AI provider configuration to the host and to other plugins.
  *
- * **This is the only file in the plugin that references api symbols introduced in
- * 1.0.71** ([LlmProviderSettingsAPI], [LlmApiFormat.GOOGLE_GENERATIVE]). Keeping the
- * new-api surface confined here is what lets `SecretManagerDynamicPlugin` register it
- * inside a `LinkageError` guard: on a host shipping an older api jar this class fails
- * to link, registration is skipped, and everything else in the plugin still works.
- * Referencing those symbols from the registry or the panel would instead take the
- * whole plugin down on such a host.
- *
- * [availableModels] additionally references [AiProviderModels]/[AiAvailableModel],
- * which post-date 1.0.87 — every host currently released predates them, so this
- * override is exactly the case the guard above exists for, not a new one.
+ * [availableModels] references [AiProviderModels]/[AiAvailableModel], introduced in api
+ * 1.0.89. The manifest therefore declares 1.0.89 as its floor: a `LinkageError` guard
+ * around construction cannot protect a lazily resolved method signature or a host's
+ * pre-registration binary compatibility scan.
  *
  * Reads state from [AiProvidersViewModel] rather than the store directly, so the
  * panel and API can never disagree about which provider is active.
@@ -59,14 +52,26 @@ class LlmProviderSettingsApiImpl(
     }
 
     override fun configuredProviders(): List<LlmConfig> {
-        viewModel.ensureConnectionsLoaded()
+        // This also starts model discovery, so keyless providers do not appear or disappear
+        // depending on whether another consumer happened to ask for models first.
+        viewModel.ensureCatalogsLoaded()
         val state = viewModel.state.value
         // Consumers choosing a model may receive an empty modelId for model-independent
-        // endpoints. Legacy consumers must use activeConfig or filter for a chosen model.
-        return state.providers.filter { descriptor ->
-            isProviderListed(descriptor, state.connectionOf(descriptor.id), state.catalogOf(descriptor.id),
-                wasAddedByUser = descriptor.id in state.addedProviderIds)
-        }.mapNotNull { descriptor -> configFor(descriptor.id, requireModel = false) }
+        // endpoints. Consumers that need a ready-to-send default use activeConfig instead.
+        return state.providers.mapNotNull { descriptor ->
+            // Build first: configFor is also the bounded retry hook for a failed brokered
+            // mint. Filtering an unconfigured broker before this call made one failed mint
+            // terminal on the configuredProviders path.
+            val config = configFor(descriptor.id, requireModel = false) ?: return@mapNotNull null
+            if (isProviderListed(
+                    descriptor,
+                    state.connectionOf(descriptor.id),
+                    state.catalogOf(descriptor.id),
+                    // addedProviderIds is a panel-only affordance. A machine-readable list
+                    // must not publish an unreachable local daemon because the user clicked Add.
+                    wasAddedByUser = false,
+                )) config else null
+        }
     }
 
     /**
@@ -78,16 +83,22 @@ class LlmProviderSettingsApiImpl(
      * ([AiProvidersUiState.catalogs]), the same data the settings panel's picker reads.
      * A provider needing manual entry (only [ProviderRegistry.CUSTOM] today) has no
      * catalog to ask, so its one model comes from whatever the user typed instead.
-     * While [AiProvidersViewModel.catalogsLoaded] is false an empty result can mean loading;
-     * consumers should read again as discovery completes rather than caching absence forever.
+     * Discovery is asynchronous because this api is non-suspending. An empty result can mean
+     * that the first bounded sweep is still running, so consumers should read again rather than
+     * cache absence forever.
      */
     override fun availableModels(): List<AiProviderModels> {
         viewModel.ensureCatalogsLoaded()
         val state = viewModel.state.value
         return state.providers.mapNotNull { descriptor ->
             val connection = state.connectionOf(descriptor.id)
-            if (!isProviderListed(descriptor, connection, state.catalogOf(descriptor.id),
-                    wasAddedByUser = descriptor.id in state.addedProviderIds)) return@mapNotNull null
+            val catalog = state.catalogOf(descriptor.id)
+            if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
+                return@mapNotNull null
+            }
+            // Model-in-path formats need a resolved default to produce a usable endpoint.
+            // Keep the model and connection sets joinable instead of offering an uncallable row.
+            if (configFor(descriptor.id, requireModel = false) == null) return@mapNotNull null
 
             val models =
                 if (ProviderRegistry.needsManualModel(descriptor)) {
@@ -96,8 +107,11 @@ class LlmProviderSettingsApiImpl(
                         ?.let { listOf(AiAvailableModel(id = it, displayName = it)) }
                         ?: return@mapNotNull null
                 } else {
-                    (state.catalogOf(descriptor.id) as? CatalogState.Loaded)
-                        ?.models
+                    when (catalog) {
+                        is CatalogState.Loaded -> catalog.models
+                        is CatalogState.Failed -> catalog.lastKnown?.models
+                        else -> null
+                    }
                         ?.map { AiAvailableModel(id = it.id, displayName = it.displayName, contextLength = it.contextLength) }
                         ?: return@mapNotNull null
                 }
@@ -134,9 +148,7 @@ class LlmProviderSettingsApiImpl(
                 else -> descriptor.chatEndpointFor(modelId)
             }
 
-        // A format this host's api copy does not have is not a config a caller could
-        // send a request with, so it reports as unconfigured rather than half-usable.
-        val apiFormat = descriptor.wireFormat.toApiFormat() ?: return null
+        val apiFormat = descriptor.wireFormat.toApiFormat()
 
         return LlmConfig(
             providerId = descriptor.id,
@@ -151,32 +163,14 @@ class LlmProviderSettingsApiImpl(
     }
 
     /**
-     * Map the plugin-local wire format onto the api enum. Safe to reference
-     * [LlmApiFormat.GOOGLE_GENERATIVE] here: it shipped in the same api release as
-     * [LlmProviderSettingsAPI], so any host that could link this class has both.
-     *
-     * [LlmApiFormat.OPENAI_RESPONSES] is newer (1.0.74) and so is *not* covered by
-     * that argument: a host on 1.0.71 links this class but has no such constant, and
-     * reading it throws `NoSuchFieldError`. It is therefore resolved reflectively and
-     * the provider is reported as unusable rather than crashing the section. Only
-     * `RISA_GLM` speaks this format, and it needs a host new enough to have the
-     * broker relay anyway, so on an older host it could not have worked regardless.
+     * Map the plugin-local wire format onto the api enum. Every constant here predates
+     * the manifest's 1.0.89 floor, so reflective compatibility branches would be dead code.
      */
-    private fun WireFormat.toApiFormat(): LlmApiFormat? =
+    private fun WireFormat.toApiFormat(): LlmApiFormat =
         when (this) {
             WireFormat.ANTHROPIC_MESSAGES -> LlmApiFormat.ANTHROPIC_MESSAGES
             WireFormat.OPENAI_CHAT -> LlmApiFormat.OPENAI_CHAT
             WireFormat.GOOGLE_GENERATIVE -> LlmApiFormat.GOOGLE_GENERATIVE
-            WireFormat.OPENAI_RESPONSES -> openAiResponsesOrNull
+            WireFormat.OPENAI_RESPONSES -> LlmApiFormat.OPENAI_RESPONSES
         }
-
-    private val openAiResponsesOrNull: LlmApiFormat? by lazy {
-        try {
-            LlmApiFormat.valueOf("OPENAI_RESPONSES")
-        } catch (_: IllegalArgumentException) {
-            null
-        } catch (_: LinkageError) {
-            null
-        }
-    }
 }

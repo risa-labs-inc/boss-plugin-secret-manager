@@ -182,6 +182,23 @@ class ModelCatalogClientPagingTest {
         }
 
     @Test
+    fun `xai falls back when the guessed primary endpoint explicitly reports no models`() =
+        runTest {
+            val fake =
+                QueuedHttpClient(
+                    listOf(
+                        200 to """{"data":[]}""",
+                        200 to """{"data":[{"id":"grok-fallback","owned_by":"xai"}]}""",
+                    ),
+                )
+
+            val models = ModelCatalogClient(fake).fetch(descriptor(ProviderRegistry.XAI), "k").getOrThrow()
+
+            assertEquals(listOf("grok-fallback"), models.map { it.id })
+            assertEquals(2, fake.requests.size)
+        }
+
+    @Test
     fun `a rejected key does not trigger a second request against the fallback`() =
         runTest {
             // The fallback exists because the primary endpoint is a guess, not because the

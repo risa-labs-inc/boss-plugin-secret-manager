@@ -40,7 +40,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
 
     private companion object {
         /** api release that introduced LlmProviderSettingsAPI. */
-        const val REQUIRED_API_VERSION = "1.0.71"
+        const val REQUIRED_API_VERSION = "1.0.89"
 
         /**
          * Deliberately on the companion, not an instance property.
@@ -85,7 +85,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         }
 
         val navigation = ProviderNavigation()
-        // Verified against the declared API floor's v1.0.73 tag: PluginContext's
+        // Verified against the v1.0.73 tag (which predates the current 1.0.89 floor): PluginContext's
         // applicationEventBus, eventsOfType(Class<T>), and CustomPluginEvent's
         // eventName/payload all exist there, so this path needs no linkage adapter.
         context.applicationEventBus?.let { bus ->
@@ -154,11 +154,9 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
      * to the host's Settings → AI Providers section and to other plugins via
      * PluginContext.llmProvider.
      *
-     * Guarded: LlmProviderSettingsAPI is a shared-package (parent-first) class added in
-     * api 1.0.71, so on hosts that predate it LlmProviderSettingsApiImpl fails to link.
-     * Skipping registration there costs only the AI panel — secret management, MCP
-     * tools and everything else still work. This is why the plugin's declared
-     * apiVersion stays at its true floor instead of being raised to 1.0.71.
+     * Guarded as a final containment boundary for linkage failures. The declared api floor is
+     * still authoritative: it is 1.0.89 because [LlmProviderSettingsApiImpl.availableModels]
+     * exposes types introduced there, including in a lazily resolved method signature.
      */
     private fun registerAiProviderSettings(
         context: PluginContext,
@@ -190,13 +188,11 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     envResolver = envResolver,
                     splitViewOperations = context.splitViewOperations,
                     scope = pluginScope,
-                    // Inside the guard for the same reason the broker bridge above is: the
-                    // adapter names api types added in 1.0.78, so resolving it is exactly what
-                    // must not happen on an older host. Null there, which costs the Local CLI
-                    // section and nothing else.
+                    // The adapter names host types only at this boundary and resolves the
+                    // optional gateway per call. Null costs the Local CLI section and nothing else.
                     cliEngines = GatewayCliEngineAccess.orNull(context),
                     // Not guarded by anything: every symbol it touches (PluginLoaderDelegate,
-                    // PanelEventProvider, PanelId, openPanel) predates this plugin's 1.0.73 floor.
+                    // PanelEventProvider, PanelId, openPanel) predates this plugin's 1.0.89 floor.
                     // It lives inside the guard only because the ViewModel that holds it does.
                     gateway = GatewayPresence.from(context),
                 )
@@ -209,12 +205,11 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
             viewModel.ensureConnectionsLoaded()
             return viewModel
         } catch (_: LinkageError) {
-            // Host predates LlmProviderSettingsAPI — skip; everything else works.
-            // Logged rather than swallowed: without this, "the AI Providers section is
-            // missing" has no explanation anywhere.
+            // A malformed or unexpectedly old host api reached registration despite the
+            // manifest floor. Logged rather than swallowed so a missing AI section is visible.
             logger.info(
                 LogCategory.SYSTEM,
-                "AI provider settings not served — host api predates LlmProviderSettingsAPI",
+                "AI provider settings not served — host API linkage failed",
                 mapOf("requiredApiVersion" to REQUIRED_API_VERSION),
             )
             return null

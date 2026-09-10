@@ -288,6 +288,29 @@ class BrokeredReadPathTest {
         }
 
     @Test
+    fun `configuredProviders retries a failed initial mint before filtering`() =
+        runBlocking {
+            val failFirst =
+                CountingSource { issued ->
+                    if (issued == 1) Result.failure(IllegalStateException("broker unavailable"))
+                    else Result.success(BrokeredKey("sk-$issued", 3600, secondsFromNow(7200)))
+                }
+            val harness = harnessWith(failFirst)
+
+            harness.api.configuredProviders()
+            withTimeout(TIMEOUT_MS) { harness.viewModel.connectionsLoaded.first { it } }
+            val afterFailure = failFirst.settled()
+            withTimeout(TIMEOUT_MS) {
+                while (failFirst.calls <= afterFailure) {
+                    harness.api.configuredProviders()
+                    delay(RETRY_POLL_MS)
+                }
+            }
+
+            assertTrue(failFirst.calls > afterFailure, "the listing filter bypassed the retry hook")
+        }
+
+    @Test
     fun `the refresh interval floor bounds a permanently lapsed credential`() =
         runBlocking {
             // A window that collapses to zero makes the credential lapsed again immediately after

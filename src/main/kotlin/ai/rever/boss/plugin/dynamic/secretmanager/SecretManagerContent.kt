@@ -97,8 +97,8 @@ fun SecretManagerContent(
      * A **supplier**, not the value: it is built inside `registerAiProviderSettings`'s
      * `LinkageError` guard, which runs after `registerPanel`, so anything reading it at
      * registration time would read null forever. Resolved when the section is first shown
-     * instead. Null means the host's api predates `LlmProviderSettingsAPI` (1.0.71), and the tab
-     * is not offered at all - a tab whose only content is "not available here" is noise.
+     * instead. Null means AI settings registration could not link, and the tab is not offered
+     * at all - a tab whose only content is "not available here" is noise.
      */
     aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
 ) {
@@ -675,9 +675,9 @@ private fun SectionTabs(
                 badge = sharedCount,
                 modifier = Modifier.padding(start = 20.dp),
             )
-            // Absent, not disabled, on a host whose api predates LlmProviderSettingsAPI: the
-            // section cannot render there at all, and a tab that only ever says "not available"
-            // is worse than one tab fewer.
+            // Absent, not disabled, when AI settings registration could not link: the section
+            // cannot render there at all, and a tab that only ever says "not available" is worse
+            // than one tab fewer.
             if (showAiSection) {
                 SectionTab(
                     label = "AI",
