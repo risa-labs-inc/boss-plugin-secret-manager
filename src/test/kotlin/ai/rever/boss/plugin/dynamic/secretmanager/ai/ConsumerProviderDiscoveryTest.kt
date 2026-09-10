@@ -168,6 +168,11 @@ class ConsumerProviderDiscoveryTest {
             val descriptor = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
             h.catalog.refresh(descriptor, "test-only-key", force = true)
             assertTrue(h.catalog.stateOf(descriptor.id) is CatalogState.Failed)
+            // The API reads the ViewModel snapshot, whose catalog collector advances on a
+            // separate coroutine. Await that observable handoff instead of racing it.
+            withTimeout(5000) {
+                h.vm.state.first { it.catalogOf(descriptor.id) is CatalogState.Failed }
+            }
             assertEquals("known-model", h.api.availableModels().single().models.single().id)
         }
     }
