@@ -20,6 +20,17 @@ class ModelCatalogClientPagingTest {
     // ==================== Anthropic cursor ====================
 
     @Test
+    fun `an empty last page cannot hide undecodable entries on an earlier page`() = runTest {
+        val fake = QueuedHttpClient(listOf(
+            200 to """{"data":[{"unexpected":"value"}],"has_more":true,"last_id":"cursor"}""",
+            200 to """{"data":[],"has_more":false}""",
+        ))
+        val result = ModelCatalogClient(fake).fetch(descriptor(ProviderRegistry.ANTHROPIC), "k")
+        assertTrue(result.isFailure)
+        assertEquals(2, fake.requests.size)
+    }
+
+    @Test
     fun `follows has_more until the provider stops offering a cursor`() =
         runTest {
             val fake =

@@ -234,6 +234,22 @@ class ModelCatalogClientParseTest {
     // ==================== failure shapes ====================
 
     @Test
+    fun `an explicit empty catalog succeeds rather than being mistaken for an unknown envelope`() = runTest {
+        for (body in listOf("""{"data":[]}""", """{"models":[]}""", "[]")) {
+            val result = clientReturning(body).fetch(descriptor(ProviderRegistry.OPENAI), "k")
+            assertTrue(result.isSuccess, body)
+            assertTrue(result.getOrThrow().isEmpty(), body)
+        }
+    }
+
+    @Test
+    fun `unrecognisable entries do not masquerade as an explicitly empty catalog`() = runTest {
+        for (body in listOf("""{"data":[{"unexpected":"value"}]}""", """{"data":"not-an-array"}""")) {
+            assertTrue(clientReturning(body).fetch(descriptor(ProviderRegistry.OPENAI), "k").isFailure, body)
+        }
+    }
+
+    @Test
     fun `an unrecognised envelope fails instead of reporting an empty list`() =
         runTest {
             // A 200 that parses to nothing means the shape wasn't what we expected, not

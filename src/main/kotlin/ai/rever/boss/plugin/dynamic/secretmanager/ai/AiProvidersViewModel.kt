@@ -277,13 +277,14 @@ class AiProvidersViewModel(
         // transient failures instead of a perpetual refresh coroutine or one-shot latch.
         if (monotonicNanos() - lastCatalogRefreshNanos.get() < catalogRefreshIntervalMs * 1_000_000) return
         if (!catalogRefreshInFlight.compareAndSet(false, true)) return
+        var completed = false
         scope.launch(Dispatchers.IO) {
             try {
                 connectionsLoaded.first { it }
                 readOllamaSystemInfo()
                 catalog.seedFromCache()
                 refreshStale(state.value.connections)
-                _catalogsLoaded.value = true
+                completed = true
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -292,6 +293,9 @@ class AiProvidersViewModel(
         }.invokeOnCompletion {
             lastCatalogRefreshNanos.set(monotonicNanos())
             catalogRefreshInFlight.set(false)
+            // Publish completion after the scheduling guards settle, so observers can
+            // immediately advance to their next read without racing the completion handler.
+            if (completed) _catalogsLoaded.value = true
         }
     }
 

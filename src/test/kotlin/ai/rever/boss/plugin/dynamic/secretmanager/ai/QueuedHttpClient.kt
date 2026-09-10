@@ -16,12 +16,14 @@ import java.util.concurrent.CompletableFuture
 internal class QueuedHttpClient(
     private val responses: List<Pair<Int, String>>,
     private val always: Pair<Int, String>? = null,
+    private val beforeResponse: (HttpRequest) -> Unit = {},
 ) : HttpClient() {
     val requests = mutableListOf<String>()
 
     private fun next(request: HttpRequest): Pair<Int, String> {
         val index = requests.size
         requests += request.uri().toString()
+        beforeResponse(request)
         return responses.getOrNull(index)
             ?: always
             ?: responses.lastOrNull()

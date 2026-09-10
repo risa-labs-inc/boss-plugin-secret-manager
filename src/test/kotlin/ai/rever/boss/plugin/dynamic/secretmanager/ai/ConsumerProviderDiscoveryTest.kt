@@ -8,7 +8,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -134,8 +133,6 @@ class ConsumerProviderDiscoveryTest {
             h.catalog.refresh(descriptor, "test-only-key", force = true,
                 nowEpochMs = System.currentTimeMillis() - ModelCatalog.CACHE_TTL_MS - 1000)
             assertEquals(2, h.http.requests.size)
-            // Wait for the first sweep's completion handler before moving its clock.
-            delay(50)
             h.nowNanos.set(31_000_000_000L)
             h.api.availableModels()
             withTimeout(5000) {

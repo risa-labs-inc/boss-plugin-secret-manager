@@ -86,6 +86,7 @@ class ModelCatalogClient(
         var cursor: String? = null
         var pages = 0
         var explicitlyEmpty = false
+        var undecodedEntries = false
 
         while (pages < MAX_PAGES) {
             val page = requestPage(descriptor, endpoint, apiKey, cursor)
@@ -93,6 +94,7 @@ class ModelCatalogClient(
 
             collected += body.models
             explicitlyEmpty = explicitlyEmpty || body.explicitlyEmpty
+            undecodedEntries = undecodedEntries || (body.models.isEmpty() && !body.explicitlyEmpty)
             pages++
 
             // Assign before breaking: leaving the previous page's cursor in place made a
@@ -112,7 +114,7 @@ class ModelCatalogClient(
 
         // An explicit empty model array is a valid answer (e.g. a fresh local daemon).
         // An unknown shape or entries we cannot decode still must not masquerade as one.
-        if (collected.isEmpty() && !explicitlyEmpty) {
+        if (collected.isEmpty() && (!explicitlyEmpty || undecodedEntries)) {
             return Result.failure(
                 UnrecognisedEnvelope(
                     "${descriptor.displayName} returned no recognisable models — response format not recognised.",
