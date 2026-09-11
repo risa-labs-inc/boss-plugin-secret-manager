@@ -18,12 +18,18 @@ internal fun initialProviderId(
     ?: descriptors.firstOrNull { it.sharedDefault && connections[it.id]?.isConfigured == true }?.id
 
 /** The panel and inference API resolve a shared model selection identically. */
+internal fun usableSharedCatalog(catalog: CatalogState): CatalogState.Loaded? = when (catalog) {
+    is CatalogState.Loaded -> catalog
+    is CatalogState.Failed -> catalog.lastKnown.takeUnless { catalog.permanent }
+    else -> null
+}
+
 internal fun effectiveSharedConnection(connection: ProviderConnection, catalog: CatalogState): ProviderConnection {
     if (!SharedProviderDefinition.isShared(connection.providerId)) return connection
-    val models = (catalog as? CatalogState.Loaded)?.models.orEmpty()
+    val models = usableSharedCatalog(catalog)?.models.orEmpty()
     val preferred = connection.selectedModelId?.takeIf { it.isNotBlank() }
     val selected = if (preferred != null) models.firstOrNull { it.id == preferred }
-        else models.firstOrNull { it.isDefault } ?: models.firstOrNull()
+        else (models.firstOrNull { it.isDefault } ?: models.firstOrNull())
     return connection.copy(
         selectedModelId = selected?.id,
         maxTokens = selected?.maxOutputTokens?.let { minOf(it, connection.maxTokens) } ?: connection.maxTokens,

@@ -170,7 +170,7 @@ internal fun isProviderListed(
     wasAddedByUser: Boolean = false,
 ): Boolean =
     if (SharedProviderDefinition.isShared(descriptor.id)) {
-        connection.isConfigured && catalog is CatalogState.Loaded
+        connection.isConfigured && usableSharedCatalog(catalog) != null
     } else if (descriptor.requiresApiKey) {
         connection.isConfigured
     } else {

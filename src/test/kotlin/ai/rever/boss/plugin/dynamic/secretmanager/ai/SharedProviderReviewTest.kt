@@ -296,6 +296,71 @@ class SharedProviderReviewTest {
         } finally { scope.cancel(); root.deleteRecursively() }
     }
 
+    @Test fun `transient catalog failures keep known shared models but auth failures do not`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("shared-catalog-outage").toFile()
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val vault = Vault().also { it.entries = listOf(entry()) }
+        val store = ProviderCredentialStore(vault, env(root)).also { it.brokeredKeys = broker }
+        val catalog = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(
+            200 to """{"data":[{"id":"model","is_default":true}]}""", 503 to "unavailable", 401 to "expired",
+        ))))
+        try {
+            val vm = AiProvidersViewModel(
+                store = store, catalog = catalog, prefs = ActiveProviderPrefs(root), legacyImport = null,
+                splitViewOperations = null, scope = scope, envResolver = env(root),
+                ollamaSystemCheck = noOllamaOnThisMachine(),
+            )
+            val api = LlmProviderSettingsApiImpl(vm)
+            api.activeConfig()
+            withTimeout(10_000) { vm.catalogsLoaded.first { it } }
+            catalog.refresh(descriptor, "minted", force = true)
+            assertTrue(catalog.states.value[descriptor.id] is CatalogState.Failed)
+            assertEquals("model", api.activeConfig()?.modelId)
+            assertTrue(api.configuredProviders().any { it.providerId == descriptor.id })
+            assertTrue(api.availableModels().any { it.providerId == descriptor.id })
+            catalog.refresh(descriptor, "minted", force = true)
+            assertNull(api.activeConfig())
+            assertTrue(api.configuredProviders().none { it.providerId == descriptor.id })
+            assertTrue(api.availableModels().none { it.providerId == descriptor.id })
+        } finally { scope.cancel(); root.deleteRecursively() }
+    }
+
+    @Test fun `missing broker scope retains selection without credentials and recovers`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("shared-broker-outage").toFile()
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val advertised = java.util.concurrent.atomic.AtomicBoolean(true)
+        val vault = Vault().also { it.entries = listOf(entry()) }
+        val store = ProviderCredentialStore(vault, env(root)).also {
+            it.brokeredKeys = object : BrokeredKeySource by broker {
+                override fun permitsEndpoint(brokerId: String, endpoint: String) =
+                    advertised.get() && broker.permitsEndpoint(brokerId, endpoint)
+            }
+        }
+        val catalog = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(
+            200 to """{"data":[{"id":"model","is_default":true}]}""",
+        ))))
+        try {
+            val vm = AiProvidersViewModel(
+                store = store, catalog = catalog, prefs = ActiveProviderPrefs(root), legacyImport = null,
+                splitViewOperations = null, scope = scope, envResolver = env(root),
+                ollamaSystemCheck = noOllamaOnThisMachine(),
+            )
+            val api = LlmProviderSettingsApiImpl(vm)
+            api.activeConfig()
+            withTimeout(10_000) { vm.catalogsLoaded.first { it } }
+            advertised.set(false)
+            vm.refreshConnections()
+            withTimeout(10_000) { vm.state.first { it.sharedDiscoveryWarning != null } }
+            assertEquals(descriptor.id, vm.state.value.activeProviderId)
+            assertNull(api.activeConfig())
+            advertised.set(true)
+            vm.refreshConnections()
+            withTimeout(10_000) { vm.state.first { it.sharedDiscoveryWarning == null } }
+            withTimeout(10_000) { catalog.states.first { it[descriptor.id] is CatalogState.Loaded } }
+            assertEquals(descriptor.id, api.activeConfig()?.providerId)
+        } finally { scope.cancel(); root.deleteRecursively() }
+    }
+
     @Test fun `cancelled discovery propagates and does not cache a transient failure`() = runBlocking {
         val root = Files.createTempDirectory("shared-cancelled").toFile()
         val vault = Vault().also { it.entries = listOf(entry()) }

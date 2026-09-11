@@ -1224,6 +1224,8 @@ class AiProvidersViewModel(
                 connections = preferredConnections,
                 providers = reloaded.descriptors,
                 activeProviderId = current.activeProviderId?.takeUnless { activeRemoved },
+                selectedProviderId = current.selectedProviderId.takeIf { it in nextDescriptors }
+                    ?: ProviderRegistry.default.id,
                 storeAvailable = !reloaded.storeReadFailed,
                 sharedDiscoveryWarning = reloaded.sharedDiscoveryWarning,
                 providerSelectionWarning = if (activeRemoved) {

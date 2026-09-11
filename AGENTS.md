@@ -391,8 +391,11 @@ On a successful recheck,
 removal drops the connection and invalidates its catalog. Inference authorization
 is independently enforced by the server's live model permissions and allowances.
 
-The machine-facing listing predicate requires both a credential and a loaded
-shared catalog. The panel deliberately keeps an unavailable shared row visible
+The machine-facing listing predicate requires both a credential and a successfully
+fetched shared catalog. A transient catalog failure may reuse that same session's
+last-known list; 401/403 failures, missing credentials and missing initial catalogs
+remain unavailable. Metadata is not authorization: the broker enforces current
+model access on every inference request. The panel keeps an unavailable shared row visible
 so the user can check access. `activeConfig()` starts catalog discovery because
 shared model defaults cannot be resolved from a credential alone. Shared catalogs
 use `SHARED_CACHE_TTL_MS` (60 seconds); consumer polling can refresh them while the
@@ -415,6 +418,8 @@ a fabricated publisher-verification check.
 | Shared endpoint edited | Revalidate host scope and invalidate the catalog |
 | Complete scan proves the active share was removed | Clear active provider and catalog; ask the user to choose another, without silently rerouting |
 | Failed or capped scan omits the active share | Keep its selected id, fail closed without credentials, retry discovery on subsequent consumer reads |
+| Host scope cannot authorize a readable definition | Treat discovery as incomplete, withhold that credential, retain the selection for recovery |
+| Transient catalog failure after a successful fetch | Retain in-memory model choices; rejected credentials never use stale catalog fallback |
 | Account invalidated during discovery | Discard shared descriptors and credentials from that load |
 | Recipient selects a model | Write local prefs only; shared vault entry stays read-only |
 

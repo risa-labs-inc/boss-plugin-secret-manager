@@ -278,7 +278,12 @@ class ProviderCredentialStore(
                 val descriptor = definition.descriptor(entry.id)
                 val modelsEndpoint = descriptor.modelsEndpoint ?: continue
                 if (!broker.permitsEndpoint(definition.brokerId, descriptor.chatEndpoint) ||
-                    !broker.permitsEndpoint(definition.brokerId, modelsEndpoint)) continue
+                    !broker.permitsEndpoint(definition.brokerId, modelsEndpoint)) {
+                    // Scope refusal can mean an unavailable host broker, not vault revocation.
+                    // Omit credentials, but do not clear the user's selected id based on this scan.
+                    warning = "Some shared AI definitions are unavailable within this host's broker scopes."
+                    continue
+                }
                 found.putIfAbsent(descriptor.id, descriptor)
             }
             if (!page.hasMore || page.data.isEmpty()) break
