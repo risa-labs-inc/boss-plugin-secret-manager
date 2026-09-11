@@ -62,6 +62,7 @@ class ModelCatalog(
         _states.update { current ->
             val seeded = current.toMutableMap()
             cached.providers.forEach { (providerId, entry) ->
+                if (isManagedProvider(providerId)) return@forEach
                 // Seeding fills an *absence* — any state already present wins, whatever it is.
                 //
                 // Enumerating states to skip kept leaving holes. Skipping only Loaded let a
@@ -99,7 +100,8 @@ class ModelCatalog(
      */
     fun isStale(providerId: String, nowEpochMs: Long): Boolean =
         when (val state = _states.value[providerId]) {
-            is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs > CACHE_TTL_MS
+            is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs >
+                if (isManagedProvider(providerId)) SHARED_CACHE_TTL_MS else CACHE_TTL_MS
             // A permanent failure (rejected key) is not stale: nothing changes until the
             // credential does, and the panel re-enters this on every open. Saving a new key
             // calls refresh(force = true), so recovery does not depend on staleness.
@@ -244,6 +246,8 @@ class ModelCatalog(
         providerId: String,
         loaded: CatalogState.Loaded,
     ) = cacheMutex.withLock {
+        // This catalog carries account-specific permissions and usage. Never persist it.
+        if (isManagedProvider(providerId)) return@withLock
         withContext(Dispatchers.IO) {
             val file = cacheFile ?: return@withContext
             runCatching {
@@ -344,6 +348,8 @@ class ModelCatalog(
     companion object {
         /** Model lists are refreshed when older than this. */
         const val CACHE_TTL_MS: Long = 6 * 60 * 60 * 1000L
+        /** Account allowances change during use, including when the settings panel is closed. */
+        const val SHARED_CACHE_TTL_MS: Long = 60_000L
 
         /** Transient provider failures back off instead of retrying every consumer poll. */
         const val TRANSIENT_FAILURE_RETRY_MS: Long = 5 * 60 * 1000L

@@ -64,7 +64,7 @@ fun AiProvidersPanel(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsState()
-    val selected = ProviderRegistry.findOrDefault(state.selectedProviderId)
+    val selected = state.providers.firstOrNull { it.id == state.selectedProviderId } ?: ProviderRegistry.default
 
     // Scrolls itself: the host registers this as an embedded panel and does not wrap it
     // in a scroll container (nesting two would measure with infinite height and crash).
@@ -95,6 +95,11 @@ fun AiProvidersPanel(
             )
         }
         state.error?.let { MessageBanner(it, BossThemeColors.ErrorColor) }
+        state.sharedDiscoveryWarning?.let { MessageBanner(it, BossThemeColors.WarningColor) }
+        state.providerSelectionWarning?.let { MessageBanner(it, BossThemeColors.WarningColor) }
+        if (state.unavailableSharedModel) {
+            MessageBanner("The selected shared model is no longer published. Choose another model.", BossThemeColors.WarningColor)
+        }
         state.notice?.let { MessageBanner(it, BossThemeColors.SuccessColor) }
 
         // One heading for the whole surface: a CLI session and an HTTP provider are both
@@ -159,7 +164,8 @@ fun AiProvidersPanel(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 val listed =
                     state.providers.filter {
-                        isProviderListed(
+                        // The UI keeps unavailable shares visible; machine lists require readiness.
+                        isManagedProvider(it.id) || isProviderListed(
                             it,
                             state.connectionOf(it.id),
                             state.catalogOf(it.id),
@@ -447,12 +453,21 @@ private fun ProviderRow(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         StatusDot(connection.source, noKeyNeeded = !descriptor.requiresApiKey)
-        Text(
-            text = descriptor.displayName,
-            style = SecretPanelType.body,
-            color = BossThemeColors.TextPrimary,
-            modifier = Modifier.weight(1f),
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = descriptor.displayName,
+                style = SecretPanelType.body,
+                color = BossThemeColors.TextPrimary,
+            )
+            descriptor.sharedSourceLabel?.let { source ->
+                Text(
+                    text = source,
+                    style = SecretPanelType.caption,
+                    color = BossThemeColors.TextMuted,
+                    maxLines = 1,
+                )
+            }
+        }
         if (isActive) {
             Text(
                 text = "Active",
@@ -1076,12 +1091,16 @@ private fun ModelFacts(model: AiModel) {
             if (model.capabilities.isNotEmpty()) add(model.capabilities.joinToString(", "))
             model.ownedBy?.let { add(it) }
         }
-    if (facts.isEmpty()) return
-    Text(
-        text = facts.joinToString(" · "),
-        style = SecretPanelType.caption,
-        color = BossThemeColors.TextSecondary,
-    )
+    if (facts.isNotEmpty()) {
+        Text(
+            text = facts.joinToString(" · "),
+            style = SecretPanelType.caption,
+            color = BossThemeColors.TextSecondary,
+        )
+    }
+    model.allowanceSummary?.let {
+        Text(text = it, style = SecretPanelType.caption, color = BossThemeColors.TextSecondary)
+    }
 }
 
 private fun formatTokens(tokens: Int): String =

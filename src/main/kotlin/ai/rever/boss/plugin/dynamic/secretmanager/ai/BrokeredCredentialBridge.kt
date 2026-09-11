@@ -11,16 +11,33 @@ import ai.rever.boss.plugin.api.PluginContext
  * the manifest's 1.0.89 floor. The boundary still makes the store independently testable
  * and limits an incoherent host installation to AI settings registration. See AGENTS.md.
  *
- * Returns null when the host has no broker relay at all, so the caller can leave
- * [ProviderCredentialStore.brokeredKeys] unset and have brokered providers report
- * unconfigured rather than failing.
+ * BOSS AI uses the generic authenticated RPC API through [BossAiCredentialSource].
+ * The host broker relay remains only for legacy providers such as RISA GLM.
+ * Returns null only when neither facility is available.
  */
 internal object BrokeredCredentialBridge {
 
     fun from(context: PluginContext): BrokeredKeySource? {
-        val provider = context.brokeredCredentialProvider ?: return null
-        return BrokeredKeySource { brokerId ->
-            provider.exchange(brokerId).map { credential ->
+        val legacy = context.brokeredCredentialProvider?.let { from(it) }
+        return context.supabaseDataProvider?.let { BossAiCredentialSource(it, legacy) } ?: legacy
+    }
+
+    internal fun from(provider: BrokeredCredentialProvider): BrokeredKeySource {
+        return object : BrokeredKeySource {
+            override val supportsSharedProviders: Boolean = true
+            override fun canDiscoverSharedProviders(): Boolean =
+                provider.availableBrokers().any { !it.scopedTo.isNullOrBlank() }
+            override fun permitsEndpoint(brokerId: String, endpoint: String): Boolean =
+                SharedProviderDefinition.withinScope(
+                    endpoint, provider.availableBrokers().firstOrNull { it.id == brokerId }?.scopedTo,
+                )
+
+            override fun permitsEndpoints(brokerId: String, endpoints: List<String>): Boolean {
+                val scope = provider.availableBrokers().firstOrNull { it.id == brokerId }?.scopedTo
+                return endpoints.all { SharedProviderDefinition.withinScope(it, scope) }
+            }
+
+            override suspend fun fetch(brokerId: String): Result<BrokeredKey> = provider.exchange(brokerId).map { credential ->
                 BrokeredKey(
                     token = credential.token,
                     refreshAfterSeconds = credential.refreshAfterSeconds,
@@ -39,7 +56,9 @@ internal object BrokeredCredentialBridge {
      *
      * Lets the panel say "not available on this host" instead of offering an action
      * that can only fail. Absent from [BrokeredCredentialProvider.availableBrokers]
-     * covers both "this build has no such broker" and "no user is signed in".
+     * means this host does not currently advertise that broker. BOSS's current host
+     * keeps brokers listed while signed out and sets `available=false`; do not assume
+     * every host implementation advertises an unchanging list at registration.
      */
     fun isAvailable(
         context: PluginContext,

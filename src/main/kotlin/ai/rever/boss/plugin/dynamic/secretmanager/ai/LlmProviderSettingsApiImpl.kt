@@ -42,11 +42,15 @@ class LlmProviderSettingsApiImpl(
      * something a caller can send a request with, and returning a half-populated one
      * would push that check onto every consumer. [configuredProviders] deliberately has
      * a different contract for consumers that own model selection.
+     * Reads also request a stale-catalog sweep for all providers on the ViewModel's
+     * retry floor. Fresh catalogs do not make HTTP requests; this keeps non-shared
+     * model discovery current as well as discovering shared defaults.
      */
     override fun activeConfig(): LlmConfig? {
         // Callers can reach this before the settings panel has ever been rendered, so
-        // credentials are loaded on demand rather than only on panel entry.
-        viewModel.ensureConnectionsLoaded()
+        // credentials and catalogs are loaded on demand. Shared defaults are catalog-derived;
+        // loading credentials alone would leave the first consumer without a model forever.
+        viewModel.ensureCatalogsLoaded()
         val state = viewModel.state.value
         val providerId = state.activeProviderId ?: return null
         return configFor(providerId)
@@ -131,8 +135,9 @@ class LlmProviderSettingsApiImpl(
         // are not brokered, so the fan-out is safe.
         viewModel.refreshLapsedBrokeredCredential(providerId)
         val state = viewModel.state.value
-        val descriptor = ProviderRegistry.find(providerId) ?: return null
-        val connection = state.connections[providerId] ?: return null
+        val descriptor = viewModel.descriptorOf(providerId) ?: return null
+        val storedConnection = state.connections[providerId] ?: return null
+        val connection = effectiveSharedConnection(storedConnection, viewModel.catalogStateOf(providerId))
         if (!hasUsableProviderConnection(descriptor, connection, requireModel)) return null
 
         val modelId = connection.selectedModelId.orEmpty().trim()

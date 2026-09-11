@@ -11,6 +11,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -18,6 +19,10 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
 import java.time.Duration
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * Asks each provider what models the supplied credential can actually reach.
@@ -296,6 +301,7 @@ class ModelCatalogClient(
                     descriptor.id == ProviderRegistry.TOGETHER -> togetherModel(obj)
                     descriptor.id == ProviderRegistry.XAI -> xaiModel(obj)
                     descriptor.id == ProviderRegistry.OPENROUTER -> openRouterModel(obj)
+                    isManagedProvider(descriptor.id) -> bossAiModel(obj)
                     else -> openAiModel(obj)
                 }
             }
@@ -378,6 +384,33 @@ class ModelCatalogClient(
     private fun openAiModel(obj: JsonObject): AiModel? {
         val id = obj.str("id") ?: return null
         return AiModel(id = id, displayName = id, ownedBy = obj.str("owned_by"))
+    }
+
+    private fun bossAiModel(obj: JsonObject): AiModel? {
+        val id = obj.str("id") ?: return null
+        val allowance = obj["allowance"] as? JsonObject
+        val summary = listOf("day", "week", "month").mapNotNull { period ->
+            val window = allowance?.get(period) as? JsonObject ?: return@mapNotNull null
+            val remaining = (window["remaining"] as? JsonPrimitive)?.longOrNull
+                ?.takeIf { it >= 0 } ?: return@mapNotNull null
+            val limit = (window["limit"] as? JsonPrimitive)?.longOrNull
+                ?.takeIf { it >= 0 } ?: return@mapNotNull null
+            val reset = window.str("resets_at") ?: return@mapNotNull null
+            val resetLabel = runCatching {
+                OffsetDateTime.parse(reset).withOffsetSameInstant(ZoneOffset.UTC)
+                    .format(DateTimeFormatter.ofPattern("dd MMM HH:mm 'UTC'", Locale.ENGLISH))
+            }.getOrNull() ?: return@mapNotNull null
+            "$period: $remaining / $limit tokens remaining (resets $resetLabel)"
+        }.joinToString("\n").takeIf { it.isNotEmpty() }
+        return AiModel(
+            id = id,
+            displayName = obj.str("name") ?: id,
+            contextLength = obj.int("context_length"),
+            maxOutputTokens = obj.int("max_output_tokens"),
+            capabilities = obj.strList("capabilities"),
+            isDefault = obj.bool("is_default") == true,
+            allowanceSummary = summary,
+        )
     }
 
     private fun moonshotModel(obj: JsonObject): AiModel? {

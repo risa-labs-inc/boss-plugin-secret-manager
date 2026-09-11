@@ -20,6 +20,32 @@ import kotlin.test.assertTrue
  * no error — so the shapes are locked down here rather than discovered in the app.
  */
 class ModelCatalogClientParseTest {
+    @Test
+    fun `shared catalog parses bigint allowances and rejects non-string capabilities`() = runTest {
+        val shared = SharedProviderDefinition(
+            "boss-managed-provider-v1", "Shared", "managed", "https://api.example/v1",
+        ).descriptor("entry")
+        val body = """{"data":[{"id":"published","name":"Published","is_default":true,
+            "context_length":2048,"max_output_tokens":100,"capabilities":["text","tools",true,42],
+            "allowance":{
+              "day":{"remaining":3000000000,"limit":4000000000,"resets_at":"2026-09-12T00:00:00Z"},
+              "week":{"remaining":"5000","limit":"6000","resets_at":"2026-09-14T00:00:00+00:00"},
+              "month":{"remaining":true,"limit":9000,"resets_at":"invalid"}
+            }}]}"""
+        val model = clientReturning(body).fetch(shared, "minted").getOrThrow().single()
+        assertEquals("published", model.id)
+        assertEquals("Published", model.displayName)
+        assertEquals(2048, model.contextLength)
+        assertEquals(100, model.maxOutputTokens)
+        assertTrue(model.isDefault)
+        assertEquals(listOf("text", "tools"), model.capabilities)
+        assertEquals(
+            "day: 3000000000 / 4000000000 tokens remaining (resets 12 Sep 00:00 UTC)\n" +
+                "week: 5000 / 6000 tokens remaining (resets 14 Sep 00:00 UTC)",
+            model.allowanceSummary,
+        )
+    }
+
     /** Returns [body] for every request, so only parsing is under test. */
     private fun clientReturning(
         body: String,

@@ -366,6 +366,166 @@ ignores the field anyway (`missingFor` matches on id alone). This exact trap was
 
 ## AI Providers (`ai/` package)
 
+### Automatic BOSS AI discovery
+
+BOSS AI is plugin-owned. `BossAiCredentialSource` uses the existing generic
+`SupabaseDataProvider.rpc("boss_ai_create_exchange_ticket")` to request an AI-only,
+single-use ticket for the authenticated user. It exchanges that ticket at the fixed
+BOSS AI `/auth/exchange` endpoint; no host broker registration, login-token exposure,
+or user-created vault entry is required. RISA GLM and optional legacy shares still
+use the host broker bridge.
+
+`BossAiDiscovery` reads authenticated `/v1/provider` metadata. The provider publishes
+its name, base URL and default recommendation; `/v1/models` publishes model names,
+capabilities, defaults, limits and allowances. The credential source owns the trusted
+bootstrap scope and rejects metadata outside it. HTTP redirects are not followed.
+`managed:boss-ai` is the stable provider id. Never write its credentials, metadata or
+account-specific catalog to disk; only explicit provider/model preferences persist.
+The managed-provider predicates include both this id and legacy `shared:` ids.
+
+Discovery failures keep a display-only BOSS AI row with a retry message, never a
+configured connection. Metadata caches are generation-scoped, expire after five minutes
+(or 15 seconds on failure), and are invalidated by sign-out and Refresh. Automatic
+BOSS AI suppresses duplicate legacy BOSS AI shares. A server-recommended default fills
+an absent preference, including recovery after initial authentication failure; it
+never overrides an explicit provider/model choice or an active CLI engine.
+The backend migration and function must be deployed, but no desktop host upgrade is
+required. `BossAiDiscoveryTest` covers the first consumer read with no host broker,
+a failed vault read, endpoint confinement, retry, local preference storage and
+credential/catalog disk isolation.
+
+### Legacy shared managed provider definitions
+
+Provider definitions tagged `ai-provider-definition` are discovered through
+`getUserSecretsWithSharingInfo`, including existing role and organisation shares.
+`SharedProviderDefinition` parses their versioned notes and derives stable provider
+ids from secret UUIDs. They are per-ViewModel descriptors, never mutations to the
+process-global `ProviderRegistry`. The owner controls the shared configuration;
+recipients keep model selections in local preferences and never write the share.
+
+Legacy definitions can still be published with the permission-checked
+`managed_ai_provider_publish` MCP tool. BOSS AI itself is automatic; its former
+"Add BOSS AI provider" vault action has been removed.
+
+The host broker owns the credential destination. Both catalog and inference URLs
+must fit its `BrokerInfo.scopedTo` boundary before minting. Shared definitions
+contain no upstream key; broker credentials stay in memory. Account-specific
+catalogs are not persisted. Discovery caches only descriptors (including an empty
+result) for five minutes, rechecking on the next credential reload after expiry;
+invalidation and the panel's Refresh clear it immediately. Refresh only expires
+the shared-definition cache, not minted credentials or the account generation.
+Failed scans retry no
+sooner than 15 seconds. A per-scan mutex coalesces renewals and a generation stamp
+prevents a pre-sign-out scan from repopulating the cache. No decrypted vault rows
+are retained by this cache. A capped scan retains the discovered prefix and shows
+a separate shared-discovery warning, never a false credential-storage failure.
+On a successful recheck,
+removal drops the connection and invalidates its catalog. Inference authorization
+is independently enforced by the server's live model permissions and allowances.
+
+The machine-facing listing predicate requires both a credential and a successfully
+fetched shared catalog. A transient catalog failure may reuse that same session's
+last-known list; 401/403 failures, missing credentials and missing initial catalogs
+remain unavailable. Metadata is not authorization: the broker enforces current
+model access on every inference request. The panel keeps an unavailable shared row visible
+so the user can check access. `activeConfig()` starts catalog discovery because
+shared model defaults cannot be resolved from a credential alone. Shared catalogs
+use `SHARED_CACHE_TTL_MS` (60 seconds); consumer polling can refresh them while the
+panel is closed, bounded by the existing 30-second sweep floor. This is intentional
+for changing allowances, not a vault rescan on every consumer read.
+
+Trust is attached to the host's broker scope, not to the note author's display
+name. Any readable definition, including a direct share, may name a trusted broker;
+names and default recommendations are publisher-supplied, not an official-identity
+badge. Role-wide publishing remains gated by the existing `secret.share.role` RPC.
+Deploy the official definition from an admin-owned entry. Neither `isOwner` nor
+`accessLevel` proves that another entry's author is an admin, so neither is used as
+a fabricated publisher-verification check.
+
+| Transition | What may change |
+|---|---|
+| First discovery with no saved or configured provider | Shared default recommendation may select a provider |
+| Existing explicit provider/model choice | Keep the user's preference |
+| Startup with a saved id absent from a complete discovery | Ignore the stale id for this session; prefer an existing configured provider |
+| Shared endpoint edited | Revalidate host scope and invalidate the catalog |
+| Complete scan proves the active share was removed | Clear active provider and catalog; ask the user to choose another, without silently rerouting |
+| Failed or capped scan omits the active share | Keep its selected id, fail closed without credentials, retry discovery on subsequent consumer reads |
+| Host scope cannot authorize a readable definition | Treat discovery as incomplete, withhold that credential, retain the selection for recovery |
+| Transient catalog failure after a successful fetch | Retain in-memory model choices; rejected credentials never use stale catalog fallback |
+| Account invalidated during discovery | Discard shared descriptors and credentials from that load |
+| Recipient selects a model | Write local prefs only; shared vault entry stays read-only |
+
+Review-round state rules: an incomplete or failed scan does not revoke the active
+selection; unavailable credentials fail closed while a later successful discovery
+restores the same selection. A generation-invalidated first load retries instead
+of reporting a vault outage. Manual discovery refresh does not invalidate session
+credentials. Exhausted startup retries report a retryable error and must not run
+an empty catalog sweep or publish readiness. Cancelled discovery is rethrown,
+never cached as a vault failure. Model-limit clamping is read-only; writers use raw connections.
+Successful shared-token rotation within one invalidation generation preserves its
+catalog; an account/secret invalidation still discards it, even if a token string
+is reused. Failed discovery may retain bounded display-only rows from that same
+generation, never credentials. A new generation cannot inherit old display metadata.
+Consumer discovery retries have an in-flight guard and a completion-based rate floor;
+exhausted initial loads are also paced. Manual Refresh may retry immediately.
+Catalog HTTP work is limited to four concurrent requests, and at most 32 shared
+definitions are admitted (UUID order, deterministic when defaults tie).
+Incomplete same-generation discovery may additionally retain up to 32 display-only
+rows, prioritizing active/open selections. Removing the token-rotation exemption,
+display-row retention, or discovery rate floor each fails its corresponding
+SharedProviderReviewTest regression (mutation-verified).
+When shared discovery is enabled, its sharing-aware RPC is the single cold vault
+scan: owned provider credentials and managed definitions are derived from that one
+snapshot, while a failed sharing scan falls back to the narrower owned-secret RPC.
+Rows label their provenance (shared by, organisation, or the user's vault), and
+publisher names are stripped of control characters before display. Broker scope
+checks for both endpoints use one host-registry snapshot. The 32-provider admission
+cap warns but remains an authoritative completed scan; the 2000-row scan cap and a
+scope refusal remain incomplete. Startup warns before falling back from a revoked
+saved share, and a Refresh job completes only after its initial load completes.
+The single-scan path, publisher-name sanitization, and startup fallback warning are
+mutation-verified by the shared-provider regression tests.
+Host broker exceptions are converted to a failed, unconfigured provider while coroutine
+cancellation still propagates, so the initial consumer load cannot cancel a non-supervisor
+plugin scope merely because a host bridge violated its Result-returning contract.
+The unavailable-model banner and effective shared connection both resolve transient
+catalog fallback through `usableSharedCatalog`; they cannot disagree about whether a
+saved model disappeared. `connectionsLoaded` is a one-way "loaded at least once" latch,
+so an exhausted later refresh reports its error without making waiting consumers regress.
+Only explicit `owner` and `org` access levels can supply personal provider credentials;
+unknown levels remain read-only and cannot silently become the user's API key.
+Replacing the banner's fallback resolver with a Loaded-only cast fails the dedicated
+transient-fallback regression (mutation-verified).
+The sharing-aware RPC necessarily decrypts bounded pages containing readable shares;
+the store immediately projects them to non-secret provider metadata and retains no shared
+password. A host with no currently scoped broker skips that wider scan entirely. Competing
+default recommendations rank own-vault, then organisation, then direct-share provenance;
+that provenance is presentation/default ordering only and never an authorization signal.
+
+Review regressions were mutation-checked: reading the derived connection in
+`selectModel` fails the default consumer test (100 instead of the original 2000
+token preference); removing the discovery scope guard fails the malicious-share
+assertion. The malicious id sorts inside the 32-provider cap, so the cap cannot
+make that security assertion pass accidentally.
+
+Absent shared preference entries are retained, not pruned on discovery: a transient
+read failure or capped scan cannot prove revocation, and deleting them would lose
+the user's model choice if access returns. `readModels` filters a view; it never
+pruned the on-disk preference file even before shared ids were introduced.
+
+`SharedProviderReviewTest` covers scan caching/expiry/invalidation, unsupported
+hosts, capped scans, separate error reporting, startup selection, disk isolation,
+and active-share removal. `ModelCatalogClientParseTest` uses the backend's numeric
+bigint allowance shape as well as string-encoded counts and malformed capabilities.
+Mutation-verified: removing scope confinement fails both original scope tests;
+removing each disk guard fails its separate write/seed test; accepting stale saved
+ids fails startup selection; unconditional machine listing fails its gate test;
+and restoring string-only allowance parsing fails the numeric-envelope test.
+
+The deployment/definition schema is documented in the host repository at
+`supabase/functions/boss-ai/README.md`. A host release must register the trusted
+broker for legacy shares; automatic BOSS AI uses the plugin-owned ticket flow instead.
+
 This plugin owns **all** AI provider configuration. The host has none: its
 `Settings → AI Providers` section renders `LlmProviderSettingsPanel` through
 `LlmProviderSettingsAPI`, and `PluginContext.llmProvider` is relayed from the same
@@ -672,6 +832,11 @@ rule for the next component: check the tag, not the jar, and add it here.
 The cross-plugin navigation path was checked against **v1.0.73**, not the newest jar:
 `PluginContext.applicationEventBus`, `ApplicationEventBus.eventsOfType(Class)`, and
 `CustomPluginEvent.eventName`/`payload` are all present there and therefore below today's floor.
+
+`BrokerInfo.scopedTo` is also read by `BrokeredCredentialBridge`. Verified against
+the released `v1.0.74` source, it predates the 1.0.89 floor. Scope is looked up live:
+the current host lists signed-out brokers with `available=false`, but the API does
+not promise every host keeps the same list throughout registration and sign-in.
 
 `LlmProviderSettingsApiImpl`, `BrokeredCredentialBridge` and `GatewayCliEngineAccess` remain the
 only files that name the newer AI API types (`LlmProviderSettingsAPI` and
