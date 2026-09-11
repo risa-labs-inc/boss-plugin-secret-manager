@@ -165,7 +165,7 @@ fun AiProvidersPanel(
                 val listed =
                     state.providers.filter {
                         // The UI keeps unavailable shares visible; machine lists require readiness.
-                        SharedProviderDefinition.isShared(it.id) || isProviderListed(
+                        isManagedProvider(it.id) || isProviderListed(
                             it,
                             state.connectionOf(it.id),
                             state.catalogOf(it.id),

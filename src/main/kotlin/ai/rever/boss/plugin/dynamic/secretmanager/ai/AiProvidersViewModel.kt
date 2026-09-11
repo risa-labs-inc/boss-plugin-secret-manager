@@ -130,7 +130,7 @@ data class AiProvidersUiState(
 
     val unavailableSharedModel: Boolean get() {
         val id = activeProviderId ?: return false
-        if (!SharedProviderDefinition.isShared(id)) return false
+        if (!isManagedProvider(id)) return false
         val selected = connections[id]?.selectedModelId?.takeIf { it.isNotBlank() } ?: return false
         val loaded = usableSharedCatalog(catalogOf(id)) ?: return false
         return loaded.models.none { it.id == selected }
@@ -415,7 +415,7 @@ class AiProvidersViewModel(
             }
             val descriptors = snapshot?.descriptors ?: ProviderRegistry.all
             if (connectionGeneration != null && connectionGeneration != startedAt) {
-                _state.value.providers.filter { SharedProviderDefinition.isShared(it.id) }
+                _state.value.providers.filter { isManagedProvider(it.id) }
                     .forEach { catalog.markNotConfigured(it.id) }
             }
             connectionGeneration = startedAt
@@ -423,13 +423,13 @@ class AiProvidersViewModel(
             _state.update { current ->
                 val preferred = current.activeProviderId ?: storedActive
                 val savedShareRemoved = snapshot?.sharedDiscoveryComplete != false &&
-                    preferred?.let(SharedProviderDefinition::isShared) == true &&
+                    preferred?.let(::isManagedProvider) == true &&
                     descriptors.none { it.id == preferred }
                 current.copy(
                     connections = connections,
                     providers = descriptors,
                     activeProviderId = if (snapshot?.sharedDiscoveryComplete == false &&
-                        preferred?.let(SharedProviderDefinition::isShared) == true) {
+                        preferred?.let(::isManagedProvider) == true) {
                         preferred
                     } else initialProviderId(preferred, descriptors, connections),
                     storeAvailable = store != null && snapshot?.storeReadFailed != true,
@@ -942,7 +942,7 @@ class AiProvidersViewModel(
         }
 
         scope.launch {
-            if (SharedProviderDefinition.isShared(providerId)) {
+            if (isManagedProvider(providerId)) {
                 prefs.writeModel(providerId, modelId)
                 return@launch
             }
@@ -979,7 +979,7 @@ class AiProvidersViewModel(
 
     /** Persist a custom provider's endpoint, which has no models endpoint to discover. */
     fun setCustomEndpoint(providerId: String, endpoint: String) {
-        if (SharedProviderDefinition.isShared(providerId)) return
+        if (isManagedProvider(providerId)) return
         val existing = _state.value.rawConnectionOf(providerId)
         val trimmed = endpoint.trim()
         _state.update {
@@ -1236,7 +1236,7 @@ class AiProvidersViewModel(
         // receive no connection and cannot authorize inference. Bound retained rows too.
         val retained = if (!reloaded.sharedDiscoveryComplete && sameGeneration) {
             previousDescriptors.values.filter { old ->
-                SharedProviderDefinition.isShared(old.id) && reloaded.descriptors.none { it.id == old.id }
+                isManagedProvider(old.id) && reloaded.descriptors.none { it.id == old.id }
             }.sortedBy { if (it.id == _state.value.activeProviderId || it.id == _state.value.selectedProviderId) 0 else 1 }
                 .take(ProviderCredentialStore.MAX_SHARED_PROVIDERS)
         } else emptyList()
@@ -1245,15 +1245,21 @@ class AiProvidersViewModel(
         if (credentials.invalidations.value != startedAt) return@withLock
         connectionGeneration = startedAt
         val removed = previous.keys - preferredConnections.keys
+        val savedActive = prefs.read()
         removed.forEach(catalog::markNotConfigured)
         _state.update { current ->
             val activeRemoved = reloaded.sharedDiscoveryComplete &&
-                current.activeProviderId?.let(SharedProviderDefinition::isShared) == true &&
+                current.activeProviderId?.let(::isManagedProvider) == true &&
                 current.activeProviderId !in preferredConnections
             current.copy(
                 connections = preferredConnections,
                 providers = nextDescriptors.values.toList(),
-                activeProviderId = current.activeProviderId?.takeUnless { activeRemoved },
+                activeProviderId = current.activeProviderId?.takeUnless { activeRemoved }
+                    ?: if (!activeRemoved && savedActive == null && current.activeCliEngineId == null) {
+                        nextDescriptors[BossAiDiscovery.PROVIDER_ID]?.takeIf {
+                            it.sharedDefault && preferredConnections[it.id]?.isConfigured == true
+                        }?.id
+                    } else null,
                 selectedProviderId = current.selectedProviderId.takeIf { it in nextDescriptors }
                     ?: ProviderRegistry.default.id,
                 storeAvailable = !reloaded.storeReadFailed,
@@ -1266,8 +1272,8 @@ class AiProvidersViewModel(
         // Re-arm promptly; a catalog sweep can wait behind another provider's network timeout.
         scheduleBrokeredRenewal()
         val changed = _state.value.connections.filter { (id, connection) ->
-            val before = previous[id] ?: return@filter SharedProviderDefinition.isShared(id)
-            val shared = SharedProviderDefinition.isShared(id)
+            val before = previous[id] ?: return@filter isManagedProvider(id)
+            val shared = isManagedProvider(id)
             if (shared && !sameGeneration) return@filter true
             if (shared && previousDescriptors[id] == nextDescriptors[id] &&
                 before.customEndpoint == connection.customEndpoint &&

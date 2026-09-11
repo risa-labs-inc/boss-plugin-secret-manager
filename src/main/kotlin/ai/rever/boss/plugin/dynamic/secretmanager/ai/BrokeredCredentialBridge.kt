@@ -11,15 +11,15 @@ import ai.rever.boss.plugin.api.PluginContext
  * the manifest's 1.0.89 floor. The boundary still makes the store independently testable
  * and limits an incoherent host installation to AI settings registration. See AGENTS.md.
  *
- * Returns null when the host has no broker relay at all, so the caller can leave
- * [ProviderCredentialStore.brokeredKeys] unset and have brokered providers report
- * unconfigured rather than failing.
+ * BOSS AI uses the generic authenticated RPC API through [BossAiCredentialSource].
+ * The host broker relay remains only for legacy providers such as RISA GLM.
+ * Returns null only when neither facility is available.
  */
 internal object BrokeredCredentialBridge {
 
     fun from(context: PluginContext): BrokeredKeySource? {
-        val provider = context.brokeredCredentialProvider ?: return null
-        return from(provider)
+        val legacy = context.brokeredCredentialProvider?.let { from(it) }
+        return context.supabaseDataProvider?.let { BossAiCredentialSource(it, legacy) } ?: legacy
     }
 
     internal fun from(provider: BrokeredCredentialProvider): BrokeredKeySource {

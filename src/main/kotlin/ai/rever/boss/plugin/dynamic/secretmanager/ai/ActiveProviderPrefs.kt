@@ -31,7 +31,7 @@ class ActiveProviderPrefs(
     /** The stored active provider id, or null when none has been chosen yet. */
     suspend fun read(): String? =
         readPrefs().activeProviderId?.takeIf {
-            ProviderRegistry.find(it) != null || SharedProviderDefinition.isShared(it)
+            ProviderRegistry.find(it) != null || isManagedProvider(it)
         }
 
     /**
@@ -44,7 +44,7 @@ class ActiveProviderPrefs(
      */
     suspend fun readModels(): Map<String, String> =
         readPrefs().modelByProvider.filterKeys {
-            ProviderRegistry.find(it) != null || SharedProviderDefinition.isShared(it)
+            ProviderRegistry.find(it) != null || isManagedProvider(it)
         }
 
     /** Persist [providerId] as the active provider. */

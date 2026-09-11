@@ -71,6 +71,7 @@ class ProviderCredentialStore(
      */
     private val mintRetryBackoffMs: Long = DEFAULT_MINT_RETRY_BACKOFF_MS,
     private val monotonicNanos: () -> Long = System::nanoTime,
+    private val bossAiDiscovery: BossAiDiscovery = BossAiDiscovery(),
 ) {
     private val logger = BossLogger.forComponent("AiCredentialStore")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -169,10 +170,50 @@ class ProviderCredentialStore(
     private val sharedMutex = Mutex()
     @Volatile private var cachedShared: CachedSharedDefinitions? = null
 
+    private data class CachedBossAi(
+        val result: Result<ProviderDescriptor>,
+        val scope: String?,
+        val generation: Long,
+        val fetchedAtNanos: Long,
+    )
+    private val bossAiMutex = Mutex()
+    @Volatile private var cachedBossAi: CachedBossAi? = null
+
+    private suspend fun loadBossAi(): Result<ProviderDescriptor>? = bossAiMutex.withLock {
+        val broker = brokeredKeys?.takeIf { it.discoversBossAi } ?: return@withLock null
+        val startedAt = generation.get()
+        val scope = broker.bossAiScope()
+        cachedBossAi?.takeIf {
+            it.scope == scope && it.generation == startedAt && monotonicNanos() - it.fetchedAtNanos <
+                (if (it.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS)
+        }?.let { return@withLock it.result }
+        val result = when {
+            scope == null -> Result.failure(IllegalStateException("BOSS AI authentication is unavailable."))
+            !SharedProviderDefinition.withinScope(scope, scope) ->
+                Result.failure(IllegalStateException("BOSS AI is unavailable within its trusted API scope."))
+            else -> {
+                val token = resolveBrokered(BossAiDiscovery.BROKER_ID)
+                if (token.isBlank()) Result.failure(IllegalStateException("Sign in to BOSS and retry BOSS AI using Refresh."))
+                else bossAiDiscovery.fetch(scope, token)
+            }
+        }
+        if (generation.get() == startedAt) cachedBossAi = CachedBossAi(result, scope, startedAt, monotonicNanos())
+        result
+    }
+
     /** A manual discovery refresh is not a sign-out and must not discard minted keys. */
-    suspend fun expireSharedDefinitions() = sharedMutex.withLock { cachedShared = null }
+    suspend fun expireSharedDefinitions() {
+        sharedMutex.withLock { cachedShared = null }
+        bossAiMutex.withLock { cachedBossAi = null }
+    }
 
     fun sharedDefinitionsStale(): Boolean {
+        if (brokeredKeys?.discoversBossAi == true) {
+            val cache = cachedBossAi
+            if (cache == null || cache.generation != generation.get() ||
+                monotonicNanos() - cache.fetchedAtNanos >=
+                (if (cache.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS)) return true
+        }
         if (brokeredKeys?.canDiscoverSharedProviders() != true) return false
         val cache = cachedShared ?: return true
         val ttl = if (cache.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS
@@ -206,6 +247,7 @@ class ProviderCredentialStore(
         generation.incrementAndGet()
         cached = null
         cachedShared = null
+        cachedBossAi = null
         // Brokered credentials go too. Sign-out is one of the things that invalidates,
         // and a credential minted for the previous session must not outlive it.
         brokeredCache.clear()
@@ -217,6 +259,7 @@ class ProviderCredentialStore(
     /** Read every provider's effective connection. */
     suspend fun loadAll(): ConnectionsSnapshot {
         val startedAt = generation.get()
+        val bossAi = loadBossAi()
         val shared = loadSharedDefinitions()
         // The sharing RPC is a superset of the owned-secret list. A successful shared
         // scan therefore supplies both views and avoids a second full-vault traversal.
@@ -227,17 +270,25 @@ class ProviderCredentialStore(
             loadStoredSecrets()
         }
         val stored = storedResult.getOrElse { emptyMap() }
-        val descriptors = ProviderRegistry.all + shared.getOrNull()?.descriptors.orEmpty()
+        val automatic = if (bossAi != null) listOf(bossAi.getOrElse { BossAiDiscovery.unavailableDescriptor() })
+            else emptyList()
+        // A legacy shared BOSS definition must not duplicate the automatically discovered provider.
+        val sharedDescriptors = shared.getOrNull()?.descriptors.orEmpty().filterNot {
+            bossAi != null && it.brokerId == BossAiDiscovery.BROKER_ID
+        }
+        val descriptors = automatic + ProviderRegistry.all + sharedDescriptors
 
         val connections =
             descriptors.associate { descriptor ->
-                descriptor.id to resolveConnection(descriptor, stored[descriptor.id])
+                descriptor.id to if (descriptor.id == BossAiDiscovery.PROVIDER_ID && bossAi?.isSuccess != true) {
+                    ProviderConnection(descriptor.id, "", CredentialSource.NONE)
+                } else resolveConnection(descriptor, stored[descriptor.id])
             }
 
         // Preserve the pre-existing direct-caller contract for static providers. The
         // ViewModel's reload path additionally guards the whole snapshot against invalidation.
         if (startedAt != generation.get()) return ConnectionsSnapshot(
-            connections = connections.filterKeys { !SharedProviderDefinition.isShared(it) },
+            connections = connections.filterKeys { !isManagedProvider(it) },
             storeReadFailed = storedResult.isFailure,
             invalidatedDuringLoad = true,
             sharedDiscoveryComplete = false,
@@ -248,9 +299,11 @@ class ProviderCredentialStore(
             storeReadFailed = storedResult.isFailure,
             descriptors = descriptors,
             sharedDiscoveryComplete = shared.isSuccess && shared.getOrNull()?.removalAuthoritative == true,
-            sharedDiscoveryWarning = if (shared.isFailure) {
-                "Shared AI providers could not be refreshed. Retry using Refresh."
-            } else shared.getOrNull()?.warning,
+            sharedDiscoveryWarning = listOfNotNull(
+                bossAi?.exceptionOrNull()?.message,
+                if (shared.isFailure) "Shared AI providers could not be refreshed. Retry using Refresh."
+                else shared.getOrNull()?.warning,
+            ).takeIf { it.isNotEmpty() }?.joinToString(" "),
         )
     }
 

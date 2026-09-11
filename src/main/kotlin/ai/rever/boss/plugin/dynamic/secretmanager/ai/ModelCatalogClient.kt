@@ -301,7 +301,7 @@ class ModelCatalogClient(
                     descriptor.id == ProviderRegistry.TOGETHER -> togetherModel(obj)
                     descriptor.id == ProviderRegistry.XAI -> xaiModel(obj)
                     descriptor.id == ProviderRegistry.OPENROUTER -> openRouterModel(obj)
-                    SharedProviderDefinition.isShared(descriptor.id) -> bossAiModel(obj)
+                    isManagedProvider(descriptor.id) -> bossAiModel(obj)
                     else -> openAiModel(obj)
                 }
             }

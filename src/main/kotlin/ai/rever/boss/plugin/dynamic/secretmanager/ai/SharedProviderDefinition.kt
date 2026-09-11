@@ -12,7 +12,10 @@ internal fun initialProviderId(
     connections: Map<String, ProviderConnection>,
 ): String? = preferred?.takeIf { id -> descriptors.any { it.id == id } }
     ?: descriptors.firstOrNull {
-        !SharedProviderDefinition.isShared(it.id) && connections[it.id]?.let { connection ->
+        it.id == BossAiDiscovery.PROVIDER_ID && it.sharedDefault && connections[it.id]?.isConfigured == true
+    }?.id
+    ?: descriptors.firstOrNull {
+        !isManagedProvider(it.id) && connections[it.id]?.let { connection ->
             connection.isConfigured && (it.requiresApiKey || !connection.selectedModelId.isNullOrBlank())
         } == true
     }?.id
@@ -27,7 +30,7 @@ internal fun usableSharedCatalog(catalog: CatalogState): CatalogState.Loaded? = 
 }
 
 internal fun effectiveSharedConnection(connection: ProviderConnection, catalog: CatalogState): ProviderConnection {
-    if (!SharedProviderDefinition.isShared(connection.providerId)) return connection
+    if (!isManagedProvider(connection.providerId)) return connection
     val models = usableSharedCatalog(catalog)?.models.orEmpty()
     val preferred = connection.selectedModelId?.takeIf { it.isNotBlank() }
     val selected = if (preferred != null) models.firstOrNull { it.id == preferred }

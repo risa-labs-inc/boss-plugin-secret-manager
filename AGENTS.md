@@ -366,7 +366,35 @@ ignores the field anyway (`missingFor` matches on id alone). This exact trap was
 
 ## AI Providers (`ai/` package)
 
-### Shared managed provider definitions
+### Automatic BOSS AI discovery
+
+BOSS AI is plugin-owned. `BossAiCredentialSource` uses the existing generic
+`SupabaseDataProvider.rpc("boss_ai_create_exchange_ticket")` to request an AI-only,
+single-use ticket for the authenticated user. It exchanges that ticket at the fixed
+BOSS AI `/auth/exchange` endpoint; no host broker registration, login-token exposure,
+or user-created vault entry is required. RISA GLM and optional legacy shares still
+use the host broker bridge.
+
+`BossAiDiscovery` reads authenticated `/v1/provider` metadata. The provider publishes
+its name, base URL and default recommendation; `/v1/models` publishes model names,
+capabilities, defaults, limits and allowances. The credential source owns the trusted
+bootstrap scope and rejects metadata outside it. HTTP redirects are not followed.
+`managed:boss-ai` is the stable provider id. Never write its credentials, metadata or
+account-specific catalog to disk; only explicit provider/model preferences persist.
+The managed-provider predicates include both this id and legacy `shared:` ids.
+
+Discovery failures keep a display-only BOSS AI row with a retry message, never a
+configured connection. Metadata caches are generation-scoped, expire after five minutes
+(or 15 seconds on failure), and are invalidated by sign-out and Refresh. Automatic
+BOSS AI suppresses duplicate legacy BOSS AI shares. A server-recommended default fills
+an absent preference, including recovery after initial authentication failure; it
+never overrides an explicit provider/model choice or an active CLI engine.
+The backend migration and function must be deployed, but no desktop host upgrade is
+required. `BossAiDiscoveryTest` covers the first consumer read with no host broker,
+a failed vault read, endpoint confinement, retry, local preference storage and
+credential/catalog disk isolation.
+
+### Legacy shared managed provider definitions
 
 Provider definitions tagged `ai-provider-definition` are discovered through
 `getUserSecretsWithSharingInfo`, including existing role and organisation shares.
@@ -375,17 +403,9 @@ ids from secret UUIDs. They are per-ViewModel descriptors, never mutations to th
 process-global `ProviderRegistry`. The owner controls the shared configuration;
 recipients keep model selections in local preferences and never write the share.
 
-**Publishing has a supported path; the tag is not an operator-only database trick.** The Add
-menu's `Add BOSS AI provider` action creates the canonical inert vault entry (or repairs the
-matching hand-created entry) with the `ai-provider-definition` tag. Distribution still uses the
-existing Share dialog, so its `secret.share.role` UI gate and the server's role-share authorization
-remain the authority. The MCP equivalent is deliberately narrow: `managed_ai_provider_publish`
-takes an existing owned entry and an exact role name (resolved internally to its id), accepts only a valid `boss-managed-provider-v1`
-definition whose password is exactly the inert `Managed by BOSS` placeholder, canonicalizes its
-notes, adds the tag, then calls the same share API. It never exposes a general agent-directed way
-to share arbitrary secrets. Creation and sharing cannot be one generic `secret_create` call because
-the host API returns `Unit`, not the new secret id; the explicit existing id makes retries
-deterministic and the server's share upsert makes them idempotent.
+Legacy definitions can still be published with the permission-checked
+`managed_ai_provider_publish` MCP tool. BOSS AI itself is automatic; its former
+"Add BOSS AI provider" vault action has been removed.
 
 The host broker owns the credential destination. Both catalog and inference URLs
 must fit its `BrokerInfo.scopedTo` boundary before minting. Shared definitions
@@ -504,7 +524,7 @@ and restoring string-only allowance parsing fails the numeric-envelope test.
 
 The deployment/definition schema is documented in the host repository at
 `supabase/functions/boss-ai/README.md`. A host release must register the trusted
-broker, but the provider itself is distributed through vault sharing.
+broker for legacy shares; automatic BOSS AI uses the plugin-owned ticket flow instead.
 
 This plugin owns **all** AI provider configuration. The host has none: its
 `Settings → AI Providers` section renders `LlmProviderSettingsPanel` through
