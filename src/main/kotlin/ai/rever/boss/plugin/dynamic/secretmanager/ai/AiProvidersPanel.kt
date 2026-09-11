@@ -64,7 +64,7 @@ fun AiProvidersPanel(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsState()
-    val selected = ProviderRegistry.findOrDefault(state.selectedProviderId)
+    val selected = state.providers.firstOrNull { it.id == state.selectedProviderId } ?: ProviderRegistry.default
 
     // Scrolls itself: the host registers this as an embedded panel and does not wrap it
     // in a scroll container (nesting two would measure with infinite height and crash).
@@ -1074,6 +1074,7 @@ private fun ModelFacts(model: AiModel) {
             model.contextLength?.let { add("${formatTokens(it)} context") }
             model.maxOutputTokens?.let { add("${formatTokens(it)} max output") }
             if (model.capabilities.isNotEmpty()) add(model.capabilities.joinToString(", "))
+            model.allowanceSummary?.let { add(it) }
             model.ownedBy?.let { add(it) }
         }
     if (facts.isEmpty()) return

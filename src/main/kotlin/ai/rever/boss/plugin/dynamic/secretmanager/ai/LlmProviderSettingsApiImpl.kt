@@ -46,7 +46,7 @@ class LlmProviderSettingsApiImpl(
     override fun activeConfig(): LlmConfig? {
         // Callers can reach this before the settings panel has ever been rendered, so
         // credentials are loaded on demand rather than only on panel entry.
-        viewModel.ensureConnectionsLoaded()
+        viewModel.ensureCatalogsLoaded()
         val state = viewModel.state.value
         val providerId = state.activeProviderId ?: return null
         return configFor(providerId)
@@ -94,6 +94,8 @@ class LlmProviderSettingsApiImpl(
         return state.providers.mapNotNull { descriptor ->
             val connection = state.connectionOf(descriptor.id)
             val catalog = viewModel.catalogStateOf(descriptor.id)
+            if (SharedProviderDefinition.isShared(descriptor.id) &&
+                (!connection.isConfigured || catalog !is CatalogState.Loaded)) return@mapNotNull null
             if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
                 return@mapNotNull null
             }
@@ -131,8 +133,9 @@ class LlmProviderSettingsApiImpl(
         // are not brokered, so the fan-out is safe.
         viewModel.refreshLapsedBrokeredCredential(providerId)
         val state = viewModel.state.value
-        val descriptor = ProviderRegistry.find(providerId) ?: return null
-        val connection = state.connections[providerId] ?: return null
+        val descriptor = viewModel.descriptorOf(providerId) ?: return null
+        val storedConnection = state.connections[providerId] ?: return null
+        val connection = effectiveSharedConnection(storedConnection, viewModel.catalogStateOf(providerId))
         if (!hasUsableProviderConnection(descriptor, connection, requireModel)) return null
 
         val modelId = connection.selectedModelId.orEmpty().trim()

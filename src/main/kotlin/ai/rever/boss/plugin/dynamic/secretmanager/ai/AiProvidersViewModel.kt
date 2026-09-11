@@ -116,8 +116,10 @@ data class AiProvidersUiState(
     val legacyOffer: LegacyImportOffer? = null,
 ) {
     fun connectionOf(providerId: String): ProviderConnection =
-        connections[providerId]
-            ?: ProviderConnection(providerId = providerId, apiKey = "", source = CredentialSource.NONE)
+        effectiveSharedConnection(
+            connections[providerId] ?: ProviderConnection(providerId = providerId, apiKey = "", source = CredentialSource.NONE),
+            catalogOf(providerId),
+        )
 
     fun catalogOf(providerId: String): CatalogState = catalogs[providerId] ?: CatalogState.NotConfigured
 
@@ -198,6 +200,8 @@ class AiProvidersViewModel(
 
     /** The catalog source of truth; unlike the UI mirror, this cannot lag a completed sweep. */
     fun catalogStateOf(providerId: String): CatalogState = catalog.stateOf(providerId)
+
+    fun descriptorOf(providerId: String): ProviderDescriptor? = state.value.providers.firstOrNull { it.id == providerId }
 
     /** The armed renewal, replaced on each reload rather than stacked. */
     private var brokeredRenewalJob: Job? = null
@@ -381,7 +385,9 @@ class AiProvidersViewModel(
         _state.update { current ->
             current.copy(
                 connections = connections,
-                activeProviderId = current.activeProviderId ?: storedActive ?: firstConfigured(connections),
+                providers = snapshot?.descriptors ?: ProviderRegistry.all,
+                activeProviderId = current.activeProviderId ?: storedActive ?:
+                    snapshot?.descriptors?.firstOrNull { it.sharedDefault }?.id ?: firstConfigured(connections),
                 storeAvailable = store != null && snapshot?.storeReadFailed != true,
             )
         }
@@ -454,7 +460,7 @@ class AiProvidersViewModel(
                     // LaunchedEffect on every entry into the section, so resetting the
                     // selection here discarded their place each time.
                     selectedProviderId =
-                        current.selectedProviderId.takeIf { ProviderRegistry.find(it) != null }
+                        current.selectedProviderId.takeIf { descriptorOf(it) != null }
                             ?: current.activeProviderId
                             ?: firstConfigured(connections)
                             ?: ProviderRegistry.default.id,
@@ -514,7 +520,7 @@ class AiProvidersViewModel(
     private suspend fun refreshStale(connections: Map<String, ProviderConnection>) =
         coroutineScope {
             val localDaemonAbsent = _state.value.ollamaSystemInfo?.binaryFound == false
-            ProviderRegistry.all.map { descriptor ->
+            state.value.providers.map { descriptor ->
                 async {
                     val connection = connections[descriptor.id] ?: return@async
                     // A keyless provider is unconditionally `isConfigured`, so without this
@@ -868,6 +874,10 @@ class AiProvidersViewModel(
         }
 
         scope.launch {
+            if (SharedProviderDefinition.isShared(providerId)) {
+                prefs.writeModel(providerId, modelId)
+                return@launch
+            }
             val settings =
                 ProviderSettings(
                     selectedModelId = modelId,
@@ -983,7 +993,7 @@ class AiProvidersViewModel(
     fun testConnection(providerId: String) {
         scope.launch {
             withBusy(providerId) {
-                val descriptor = ProviderRegistry.find(providerId) ?: return@withBusy
+                val descriptor = descriptorOf(providerId) ?: return@withBusy
                 val connection = _state.value.connectionOf(providerId)
                 if (!connection.isConfigured) {
                     _state.update { it.copy(error = "Add an API key first.") }
@@ -1008,7 +1018,7 @@ class AiProvidersViewModel(
 
     /** Open the provider's console so the user can create a key. */
     fun openProviderConsole(providerId: String) {
-        val descriptor = ProviderRegistry.find(providerId) ?: return
+        val descriptor = descriptorOf(providerId) ?: return
         val url = descriptor.consoleUrl
         if (url == null) {
             _state.update { it.copy(error = "${descriptor.displayName} has no key console.") }
@@ -1086,7 +1096,7 @@ class AiProvidersViewModel(
      * A no-op for providers that are not brokered, and while a refresh is already running.
      */
     fun refreshLapsedBrokeredCredential(providerId: String) {
-        val brokerId = ProviderRegistry.find(providerId)?.brokerId ?: return
+        val brokerId = descriptorOf(providerId)?.brokerId ?: return
         val credentials = store ?: return
         if (!credentials.brokeredCredentialLapsed(brokerId)) return
         if (System.nanoTime() - lastBrokeredRefreshNanos.get() < minBrokeredRefreshIntervalMs * NANOS_PER_MILLI) {
@@ -1140,12 +1150,17 @@ class AiProvidersViewModel(
         val reloaded = credentials.loadAll()
         if (credentials.invalidations.value != startedAt) return
         val previous = _state.value.connections
-        _state.update { it.copy(connections = withPreferredModels(reloaded.connections)) }
+        val previousDescriptors = _state.value.providers.associateBy { it.id }
+        val preferredConnections = withPreferredModels(reloaded.connections)
+        if (credentials.invalidations.value != startedAt) return
+        val removed = previous.keys - preferredConnections.keys
+        removed.forEach(catalog::markNotConfigured)
+        _state.update { it.copy(connections = preferredConnections, providers = reloaded.descriptors) }
         // Re-arm promptly; a catalog sweep can wait behind another provider's network timeout.
         scheduleBrokeredRenewal()
         val changed = _state.value.connections.filter { (id, connection) ->
-            val before = previous[id] ?: return@filter false
-            catalogInputChanged(id, before, connection)
+            val before = previous[id] ?: return@filter true
+            previousDescriptors[id] != descriptorOf(id) || catalogInputChanged(id, before, connection)
         }.keys
         if (changed.isNotEmpty()) {
             val generation = catalogRefreshGeneration.incrementAndGet()
@@ -1175,7 +1190,7 @@ class AiProvidersViewModel(
         before: ProviderConnection,
         after: ProviderConnection,
     ): Boolean {
-        val descriptor = ProviderRegistry.find(providerId) ?: return false
+        val descriptor = descriptorOf(providerId) ?: return false
         // Fixed catalogs (including the brokered GLM provider) do not depend on a minted token,
         // and manual providers have no catalog endpoint to invalidate.
         if (!ProviderRegistry.hasKnownModels(descriptor) || ProviderRegistry.fixedModels.containsKey(providerId)) {
@@ -1222,7 +1237,7 @@ class AiProvidersViewModel(
     }
 
     private suspend fun refreshOne(providerId: String, force: Boolean) {
-        val descriptor = ProviderRegistry.find(providerId) ?: return
+        val descriptor = descriptorOf(providerId) ?: return
         val connection = _state.value.connectionOf(providerId)
         if (!connection.isConfigured) {
             catalog.markNotConfigured(providerId)

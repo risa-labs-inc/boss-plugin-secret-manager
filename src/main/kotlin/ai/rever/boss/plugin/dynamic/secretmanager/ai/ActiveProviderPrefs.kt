@@ -30,7 +30,7 @@ class ActiveProviderPrefs(
 
     /** The stored active provider id, or null when none has been chosen yet. */
     suspend fun read(): String? =
-        readPrefs().activeProviderId?.takeIf { ProviderRegistry.find(it) != null }
+        readPrefs().activeProviderId?.takeIf { ProviderRegistry.find(it) != null || SharedProviderDefinition.isShared(it) }
 
     /**
      * Model selections held here rather than on a secret.
@@ -41,7 +41,7 @@ class ActiveProviderPrefs(
      * AI-provider card in the secret list. The choice lives here instead.
      */
     suspend fun readModels(): Map<String, String> =
-        readPrefs().modelByProvider.filterKeys { ProviderRegistry.find(it) != null }
+        readPrefs().modelByProvider.filterKeys { ProviderRegistry.find(it) != null || SharedProviderDefinition.isShared(it) }
 
     /** Persist [providerId] as the active provider. */
     suspend fun write(providerId: String) {

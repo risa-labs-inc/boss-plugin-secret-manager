@@ -10,6 +10,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import java.net.URI
 import java.net.URLEncoder
@@ -296,6 +297,7 @@ class ModelCatalogClient(
                     descriptor.id == ProviderRegistry.TOGETHER -> togetherModel(obj)
                     descriptor.id == ProviderRegistry.XAI -> xaiModel(obj)
                     descriptor.id == ProviderRegistry.OPENROUTER -> openRouterModel(obj)
+                    SharedProviderDefinition.isShared(descriptor.id) -> bossAiModel(obj)
                     else -> openAiModel(obj)
                 }
             }
@@ -378,6 +380,27 @@ class ModelCatalogClient(
     private fun openAiModel(obj: JsonObject): AiModel? {
         val id = obj.str("id") ?: return null
         return AiModel(id = id, displayName = id, ownedBy = obj.str("owned_by"))
+    }
+
+    private fun bossAiModel(obj: JsonObject): AiModel? {
+        val id = obj.str("id") ?: return null
+        val allowance = obj["allowance"] as? JsonObject
+        val summary = listOf("day", "week", "month").mapNotNull { period ->
+            val window = allowance?.get(period) as? JsonObject ?: return@mapNotNull null
+            val remaining = window.str("remaining") ?: return@mapNotNull null
+            val limit = window.str("limit") ?: return@mapNotNull null
+            val reset = window.str("resets_at") ?: return@mapNotNull null
+            "$period: $remaining / $limit tokens remaining (resets $reset)"
+        }.joinToString("\n").takeIf { it.isNotEmpty() }
+        return AiModel(
+            id = id,
+            displayName = obj.str("name") ?: id,
+            contextLength = obj.int("context_length"),
+            maxOutputTokens = obj.int("max_output_tokens"),
+            capabilities = (obj["capabilities"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty(),
+            isDefault = obj.bool("is_default") == true,
+            allowanceSummary = summary,
+        )
     }
 
     private fun moonshotModel(obj: JsonObject): AiModel? {

@@ -24,6 +24,7 @@ import kotlinx.serialization.json.Json
 data class ConnectionsSnapshot(
     val connections: Map<String, ProviderConnection>,
     val storeReadFailed: Boolean,
+    val descriptors: List<ProviderDescriptor> = ProviderRegistry.all,
 )
 
 /**
@@ -181,18 +182,48 @@ class ProviderCredentialStore(
 
     /** Read every provider's effective connection. */
     suspend fun loadAll(): ConnectionsSnapshot {
+        val startedAt = generation.get()
         val storedResult = loadStoredSecrets()
         val stored = storedResult.getOrElse { emptyMap() }
+        val shared = loadSharedDefinitions()
+        val descriptors = ProviderRegistry.all + shared.getOrDefault(emptyList())
 
         val connections =
-            ProviderRegistry.all.associate { descriptor ->
+            descriptors.associate { descriptor ->
                 descriptor.id to resolveConnection(descriptor, stored[descriptor.id])
             }
 
+        if (startedAt != generation.get()) return ConnectionsSnapshot(
+            connections.filterKeys { !SharedProviderDefinition.isShared(it) }, true,
+        )
+
         return ConnectionsSnapshot(
             connections = connections,
-            storeReadFailed = storedResult.isFailure,
+            storeReadFailed = storedResult.isFailure || shared.isFailure,
+            descriptors = descriptors,
         )
+    }
+
+    private suspend fun loadSharedDefinitions(): Result<List<ProviderDescriptor>> = runCatching {
+        if (brokeredKeys?.supportsSharedProviders != true) return@runCatching emptyList()
+        val found = mutableMapOf<String, ProviderDescriptor>()
+        var offset = 0
+        while (true) {
+            val page = secrets.getUserSecretsWithSharingInfo(limit = PAGE_SIZE, offset = offset).getOrThrow()
+            for (entry in page.data) {
+                if (!entry.tags.contains(SharedProviderDefinition.TAG)) continue
+                val definition = SharedProviderDefinition.parse(entry.notes) ?: continue
+                val descriptor = definition.descriptor(entry.id)
+                val broker = brokeredKeys ?: continue
+                if (!broker.permitsEndpoint(definition.brokerId, descriptor.chatEndpoint) ||
+                    !broker.permitsEndpoint(definition.brokerId, descriptor.modelsEndpoint!!)) continue
+                found.putIfAbsent(descriptor.id, descriptor)
+            }
+            if (!page.hasMore || page.data.isEmpty()) break
+            offset += PAGE_SIZE
+            check(offset < MAX_SCANNED) { "Shared provider discovery exceeded its page limit." }
+        }
+        found.values.sortedBy { it.id }
     }
 
     /**

@@ -19,8 +19,12 @@ internal object BrokeredCredentialBridge {
 
     fun from(context: PluginContext): BrokeredKeySource? {
         val provider = context.brokeredCredentialProvider ?: return null
-        return BrokeredKeySource { brokerId ->
-            provider.exchange(brokerId).map { credential ->
+        return object : BrokeredKeySource {
+            override val supportsSharedProviders: Boolean = true
+            override fun permitsEndpoint(brokerId: String, endpoint: String): Boolean =
+                SharedProviderDefinition.withinScope(endpoint, provider.availableBrokers().firstOrNull { it.id == brokerId }?.scopedTo)
+
+            override suspend fun fetch(brokerId: String): Result<BrokeredKey> = provider.exchange(brokerId).map { credential ->
                 BrokeredKey(
                     token = credential.token,
                     refreshAfterSeconds = credential.refreshAfterSeconds,

@@ -126,6 +126,8 @@ data class ProviderDescriptor(
      * provider reports unconfigured on a host that does not.
      */
     val brokerId: String? = null,
+    /** Only shared provider definitions can supply this recommendation. */
+    val sharedDefault: Boolean = false,
 ) {
     /** Whether a model id is embedded into [chatEndpoint] rather than sent in the body. */
     val needsModelInEndpoint: Boolean
@@ -167,7 +169,9 @@ internal fun isProviderListed(
     catalog: CatalogState,
     wasAddedByUser: Boolean = false,
 ): Boolean =
-    if (descriptor.requiresApiKey) {
+    if (SharedProviderDefinition.isShared(descriptor.id)) {
+        true
+    } else if (descriptor.requiresApiKey) {
         connection.isConfigured
     } else {
         catalog is CatalogState.Loaded || wasAddedByUser
@@ -206,6 +210,10 @@ data class AiModel(
     val capabilities: List<String> = emptyList(),
     /** Owning organisation, when reported. */
     val ownedBy: String? = null,
+    /** Published by BOSS AI; never inferred from display order. */
+    val isDefault: Boolean = false,
+    /** Server-reported remaining allowance and UTC reset times. */
+    val allowanceSummary: String? = null,
 )
 
 /** Where a provider's credential came from, which decides whether it is editable. */
@@ -261,6 +269,9 @@ data class BrokeredKey(
  */
 fun interface BrokeredKeySource {
     suspend fun fetch(brokerId: String): Result<BrokeredKey>
+    val supportsSharedProviders: Boolean get() = false
+    /** Host-owned destination check, mandatory for descriptors read from shared notes. */
+    fun permitsEndpoint(brokerId: String, endpoint: String): Boolean = false
 }
 
 /**

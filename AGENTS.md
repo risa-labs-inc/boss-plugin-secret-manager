@@ -366,6 +366,35 @@ ignores the field anyway (`missingFor` matches on id alone). This exact trap was
 
 ## AI Providers (`ai/` package)
 
+### Shared managed provider definitions
+
+Provider definitions tagged `ai-provider-definition` are discovered through
+`getUserSecretsWithSharingInfo`, including existing role and organisation shares.
+`SharedProviderDefinition` parses their versioned notes and derives stable provider
+ids from secret UUIDs. They are per-ViewModel descriptors, never mutations to the
+process-global `ProviderRegistry`. The owner controls the shared configuration;
+recipients keep model selections in local preferences and never write the share.
+
+The host broker owns the credential destination. Both catalog and inference URLs
+must fit its `BrokerInfo.scopedTo` boundary before minting. Shared definitions
+contain no upstream key; broker credentials stay in memory. Account-specific
+catalogs are not persisted. Discovery rechecks shares on credential reload, and
+removal drops the connection and invalidates its catalog. Inference authorization
+is independently enforced by the server's live model permissions and allowances.
+
+| Transition | What may change |
+|---|---|
+| First discovery with no saved provider | Shared default recommendation may select a provider |
+| Existing explicit provider/model choice | Keep the user's preference |
+| Shared endpoint edited | Revalidate host scope and invalidate the catalog |
+| Share removed or unreadable | Remove shared connection; never substitute a different credential |
+| Account invalidated during discovery | Discard shared descriptors and credentials from that load |
+| Recipient selects a model | Write local prefs only; shared vault entry stays read-only |
+
+The deployment/definition schema is documented in the host repository at
+`supabase/functions/boss-ai/README.md`. A host release must register the trusted
+broker, but the provider itself is distributed through vault sharing.
+
 This plugin owns **all** AI provider configuration. The host has none: its
 `Settings → AI Providers` section renders `LlmProviderSettingsPanel` through
 `LlmProviderSettingsAPI`, and `PluginContext.llmProvider` is relayed from the same

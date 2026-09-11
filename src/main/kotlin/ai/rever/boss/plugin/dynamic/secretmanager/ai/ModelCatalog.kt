@@ -62,6 +62,7 @@ class ModelCatalog(
         _states.update { current ->
             val seeded = current.toMutableMap()
             cached.providers.forEach { (providerId, entry) ->
+                if (SharedProviderDefinition.isShared(providerId)) return@forEach
                 // Seeding fills an *absence* — any state already present wins, whatever it is.
                 //
                 // Enumerating states to skip kept leaving holes. Skipping only Loaded let a
@@ -99,7 +100,8 @@ class ModelCatalog(
      */
     fun isStale(providerId: String, nowEpochMs: Long): Boolean =
         when (val state = _states.value[providerId]) {
-            is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs > CACHE_TTL_MS
+            is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs >
+                if (SharedProviderDefinition.isShared(providerId)) 60_000L else CACHE_TTL_MS
             // A permanent failure (rejected key) is not stale: nothing changes until the
             // credential does, and the panel re-enters this on every open. Saving a new key
             // calls refresh(force = true), so recovery does not depend on staleness.
@@ -244,6 +246,8 @@ class ModelCatalog(
         providerId: String,
         loaded: CatalogState.Loaded,
     ) = cacheMutex.withLock {
+        // This catalog carries account-specific permissions and usage. Never persist it.
+        if (SharedProviderDefinition.isShared(providerId)) return@withLock
         withContext(Dispatchers.IO) {
             val file = cacheFile ?: return@withContext
             runCatching {
