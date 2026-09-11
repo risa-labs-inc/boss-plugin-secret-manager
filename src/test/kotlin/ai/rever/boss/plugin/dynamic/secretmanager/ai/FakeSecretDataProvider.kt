@@ -2,9 +2,11 @@ package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
 import ai.rever.boss.plugin.api.CreateSecretRequestData
 import ai.rever.boss.plugin.api.PaginatedSecretsData
+import ai.rever.boss.plugin.api.PaginatedSecretsWithAccessData
 import ai.rever.boss.plugin.api.PaginatedSecretsWithSharingData
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.api.SecretEntryWithAccessData
 import ai.rever.boss.plugin.api.SecretShareData
 import ai.rever.boss.plugin.api.ShareSecretRequestData
 import ai.rever.boss.plugin.api.UnshareSecretRequestData
@@ -39,6 +41,17 @@ internal class FakeSecretDataProvider(
         val page = entries.drop(offset).take(limit)
         return Result.success(PaginatedSecretsData(page, hasMore = offset + page.size < entries.size))
     }
+
+    override suspend fun getUserSecretsWithAccess(
+        limit: Int,
+        offset: Int,
+    ): Result<PaginatedSecretsWithAccessData> =
+        getUserSecrets(limit, offset).map { page ->
+            PaginatedSecretsWithAccessData(
+                data = page.data.map { SecretEntryWithAccessData(secret = it, canManage = true) },
+                hasMore = page.hasMore,
+            )
+        }
 
     override suspend fun createSecret(request: CreateSecretRequestData): Result<Unit> {
         if (failWrites) return Result.failure(IllegalStateException("read-only store"))

@@ -4,8 +4,10 @@ import ai.rever.boss.plugin.api.AuthDataProvider
 import ai.rever.boss.plugin.api.QueryFilter
 import ai.rever.boss.plugin.api.QueryRange
 import ai.rever.boss.plugin.api.PaginatedSecretsData
+import ai.rever.boss.plugin.api.PaginatedSecretsWithAccessData
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
+import ai.rever.boss.plugin.api.SecretEntryWithAccessData
 import ai.rever.boss.plugin.api.ShareSecretRequestData
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.api.UserData
@@ -319,7 +321,7 @@ class RoleShareGateTest {
     ): Pair<SecretManagerViewModel, FakeAuth> {
         val auth = FakeAuth(permissions, isAdmin)
         val vm = SecretManagerViewModel(
-            secretDataProvider = secrets,
+            secretDataProvider = secrets ?: FakeSecretDataProvider(listOf(SECRET)),
             supabaseDataProvider = supabase,
             pluginStoreApiKeyProvider = null,
             scope = TestScope(StandardTestDispatcher(test.testScheduler)),
@@ -329,7 +331,7 @@ class RoleShareGateTest {
     }
 
     /** Records what actually reached the provider, so a refusal can be told from a no-op. */
-    private class RecordingShares : SecretDataProvider by FakeSecretDataProvider(emptyList()) {
+    private class RecordingShares : SecretDataProvider by FakeSecretDataProvider(listOf(SECRET)) {
         val shares = mutableListOf<ShareSecretRequestData>()
 
         override suspend fun shareSecret(request: ShareSecretRequestData): Result<Unit> {
@@ -346,6 +348,19 @@ class RoleShareGateTest {
         override suspend fun getUserSecrets(limit: Int, offset: Int): Result<PaginatedSecretsData> {
             gate.await()
             return Result.success(PaginatedSecretsData(listOf(secret), hasMore = false))
+        }
+
+        override suspend fun getUserSecretsWithAccess(
+            limit: Int,
+            offset: Int,
+        ): Result<PaginatedSecretsWithAccessData> {
+            gate.await()
+            return Result.success(
+                PaginatedSecretsWithAccessData(
+                    listOf(SecretEntryWithAccessData(secret, canManage = true)),
+                    hasMore = false,
+                ),
+            )
         }
     }
 
