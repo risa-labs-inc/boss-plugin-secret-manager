@@ -430,8 +430,18 @@ of reporting a vault outage. Manual discovery refresh does not invalidate sessio
 credentials. Exhausted startup retries report a retryable error and must not run
 an empty catalog sweep or publish readiness. Cancelled discovery is rethrown,
 never cached as a vault failure. Model-limit clamping is read-only; writers use raw connections.
+Successful shared-token rotation within one invalidation generation preserves its
+catalog; an account/secret invalidation still discards it, even if a token string
+is reused. Failed discovery may retain bounded display-only rows from that same
+generation, never credentials. A new generation cannot inherit old display metadata.
+Consumer discovery retries have an in-flight guard and a completion-based rate floor;
+exhausted initial loads are also paced. Manual Refresh may retry immediately.
 Catalog HTTP work is limited to four concurrent requests, and at most 32 shared
 definitions are admitted (UUID order, deterministic when defaults tie).
+Incomplete same-generation discovery may additionally retain up to 32 display-only
+rows, prioritizing active/open selections. Removing the token-rotation exemption,
+display-row retention, or discovery rate floor each fails its corresponding
+SharedProviderReviewTest regression (mutation-verified).
 
 Review regressions were mutation-checked: reading the derived connection in
 `selectModel` fails the default consumer test (100 instead of the original 2000

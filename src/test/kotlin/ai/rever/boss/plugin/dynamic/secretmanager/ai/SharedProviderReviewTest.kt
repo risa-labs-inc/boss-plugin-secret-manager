@@ -273,10 +273,13 @@ class SharedProviderReviewTest {
             api.activeConfig()
             withTimeout(10_000) { vm.catalogsLoaded.first { it } }
             assertNotNull(api.activeConfig())
+            vm.selectProvider(descriptor.id)
             vault.fail = true
             vm.refreshConnections()
             withTimeout(10_000) { vm.state.first { it.sharedDiscoveryWarning != null } }
             assertEquals(descriptor.id, vm.state.value.activeProviderId)
+            assertEquals(descriptor.id, vm.state.value.selectedProviderId)
+            assertTrue(vm.state.value.providers.any { it.id == descriptor.id })
             assertNull(api.activeConfig(), "Missing fresh credentials fail closed")
             vault.fail = false
             now = 16 * 1_000_000_000L
@@ -294,6 +297,56 @@ class SharedProviderReviewTest {
             assertNull(vm.state.value.activeProviderId, "A complete scan after failure confirms revocation")
             assertNotNull(vm.state.value.providerSelectionWarning)
         } finally { scope.cancel(); root.deleteRecursively() }
+    }
+
+    @Test fun `shared token rotation preserves catalog but account invalidation discards it`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("shared-token-rotation").toFile()
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val mint = java.util.concurrent.atomic.AtomicInteger()
+        val vault = Vault().also { it.entries = listOf(entry()) }
+        val store = ProviderCredentialStore(vault, env(root)).also {
+            it.brokeredKeys = object : BrokeredKeySource by broker {
+                override suspend fun fetch(brokerId: String) = if (brokerId == "managed") {
+                    Result.success(BrokeredKey("token-${mint.incrementAndGet()}", 600))
+                } else broker.fetch(brokerId)
+            }
+        }
+        val catalog = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(
+            200 to """{"data":[{"id":"model","is_default":true}]}""", 503 to "unavailable",
+        ))))
+        try {
+            val vm = AiProvidersViewModel(
+                store = store, catalog = catalog, prefs = ActiveProviderPrefs(root), legacyImport = null,
+                splitViewOperations = null, scope = scope, envResolver = env(root),
+                ollamaSystemCheck = noOllamaOnThisMachine(),
+            )
+            val api = LlmProviderSettingsApiImpl(vm)
+            api.activeConfig()
+            withTimeout(10_000) { vm.catalogsLoaded.first { it } }
+            assertEquals("token-1", api.activeConfig()?.apiKey)
+            store.expireBrokeredCache()
+            withTimeout(10_000) { vm.refreshConnections().join() }
+            assertEquals("token-2", api.activeConfig()?.apiKey)
+            assertEquals("model", api.activeConfig()?.modelId)
+            assertTrue(catalog.states.value[descriptor.id] is CatalogState.Loaded)
+            store.invalidate()
+            withTimeout(10_000) { catalog.states.first { it[descriptor.id] is CatalogState.Failed } }
+            assertNull(api.activeConfig(), "Never reuse previous-account metadata after invalidation")
+        } finally { scope.cancel(); root.deleteRecursively() }
+    }
+
+    @Test fun `discovery retries require both completion and an elapsed rate floor`() {
+        var now = 0L
+        val throttle = DiscoveryRefreshThrottle(5000) { now }
+        assertTrue(throttle.begin())
+        now = 10_000_000_000L
+        assertFalse(throttle.begin(), "An old in-flight request still owns the slot")
+        throttle.finish()
+        assertFalse(throttle.begin(), "Invalidated cache must not allow back-to-back attempts")
+        now += 4_999_000_000L
+        assertFalse(throttle.begin())
+        now += 1_000_000L
+        assertTrue(throttle.begin())
     }
 
     @Test fun `transient catalog failures keep known shared models but auth failures do not`() = runBlocking<Unit> {

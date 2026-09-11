@@ -249,7 +249,10 @@ class AiProvidersViewModel(
     private val _connectionsLoaded = MutableStateFlow(false)
     private val connectionLoadMutex = Mutex()
     private val catalogFetchSlots = Semaphore(MAX_CONCURRENT_CATALOG_FETCHES)
-    private val discoveryRefreshInFlight = AtomicBoolean(false)
+    private val discoveryRefreshThrottle = DiscoveryRefreshThrottle(minBrokeredRefreshIntervalMs, monotonicNanos)
+    private val lastConnectionLoadFailureNanos = AtomicLong(Long.MIN_VALUE / 2)
+    /** Guarded by connectionLoadMutex; a token rotation is not an account invalidation. */
+    private var connectionGeneration: Long? = null
 
     init {
         scope.launch { catalog.states.collect { states -> _state.update { it.copy(catalogs = states) } } }
@@ -307,6 +310,7 @@ class AiProvidersViewModel(
      * yet" rather than "nothing configured".
      */
     fun ensureConnectionsLoaded() {
+        if (monotonicNanos() - lastConnectionLoadFailureNanos.get() < minBrokeredRefreshIntervalMs * NANOS_PER_MILLI) return
         if (!connectionsLoadStarted.compareAndSet(false, true)) return
         scope.launch { loadConnections() }
     }
@@ -315,9 +319,9 @@ class AiProvidersViewModel(
     fun ensureCatalogsLoaded() {
         ensureConnectionsLoaded()
         if (_connectionsLoaded.value && store?.sharedDefinitionsStale() == true &&
-            discoveryRefreshInFlight.compareAndSet(false, true)) {
+            discoveryRefreshThrottle.begin()) {
             scope.launch(Dispatchers.IO) { reloadConnectionsSafely() }
-                .invokeOnCompletion { discoveryRefreshInFlight.set(false) }
+                .invokeOnCompletion { discoveryRefreshThrottle.finish() }
         }
         catalogsLoadStarted.set(true)
         // Consumer reads can be frequent. Re-check TTLs on demand, with a retry floor for
@@ -410,6 +414,11 @@ class AiProvidersViewModel(
                 return@repeat
             }
             val descriptors = snapshot?.descriptors ?: ProviderRegistry.all
+            if (connectionGeneration != null && connectionGeneration != startedAt) {
+                _state.value.providers.filter { SharedProviderDefinition.isShared(it.id) }
+                    .forEach { catalog.markNotConfigured(it.id) }
+            }
+            connectionGeneration = startedAt
 
             _state.update { current ->
                 val preferred = current.activeProviderId ?: storedActive
@@ -431,6 +440,7 @@ class AiProvidersViewModel(
             return@withLock connections
         }
         // A busy invalidation stream must not wedge the one-shot consumer load latch.
+        lastConnectionLoadFailureNanos.set(monotonicNanos())
         connectionsLoadStarted.set(false)
         _connectionsLoaded.value = false
         _catalogsLoaded.value = false
@@ -1181,11 +1191,9 @@ class AiProvidersViewModel(
      * `listSecrets` that throws instead of returning a failed `Result` would escape and cancel a
      * scope that is not a supervisor, silently killing every later launch in the plugin.
      */
-    fun refreshConnections() {
-        scope.launch(Dispatchers.IO) {
-            store?.expireSharedDefinitions()
-            if (!_connectionsLoaded.value) load() else reloadConnectionsSafely()
-        }
+    fun refreshConnections(): Job = scope.launch(Dispatchers.IO) {
+        store?.expireSharedDefinitions()
+        if (!_connectionsLoaded.value) load() else reloadConnectionsSafely()
     }
 
     private suspend fun reloadConnectionsSafely() {
@@ -1211,9 +1219,19 @@ class AiProvidersViewModel(
         if (reloaded.invalidatedDuringLoad || credentials.invalidations.value != startedAt) return@withLock
         val previous = _state.value.connections
         val previousDescriptors = _state.value.providers.associateBy { it.id }
-        val nextDescriptors = reloaded.descriptors.associateBy { it.id }
+        val sameGeneration = connectionGeneration == startedAt
+        // Retain display metadata only within the same account generation. These rows
+        // receive no connection and cannot authorize inference. Bound retained rows too.
+        val retained = if (!reloaded.sharedDiscoveryComplete && sameGeneration) {
+            previousDescriptors.values.filter { old ->
+                SharedProviderDefinition.isShared(old.id) && reloaded.descriptors.none { it.id == old.id }
+            }.sortedBy { if (it.id == _state.value.activeProviderId || it.id == _state.value.selectedProviderId) 0 else 1 }
+                .take(ProviderCredentialStore.MAX_SHARED_PROVIDERS)
+        } else emptyList()
+        val nextDescriptors = (reloaded.descriptors + retained).associateBy { it.id }
         val preferredConnections = withPreferredModels(reloaded.connections)
         if (credentials.invalidations.value != startedAt) return@withLock
+        connectionGeneration = startedAt
         val removed = previous.keys - preferredConnections.keys
         removed.forEach(catalog::markNotConfigured)
         _state.update { current ->
@@ -1222,7 +1240,7 @@ class AiProvidersViewModel(
                 current.activeProviderId !in preferredConnections
             current.copy(
                 connections = preferredConnections,
-                providers = reloaded.descriptors,
+                providers = nextDescriptors.values.toList(),
                 activeProviderId = current.activeProviderId?.takeUnless { activeRemoved },
                 selectedProviderId = current.selectedProviderId.takeIf { it in nextDescriptors }
                     ?: ProviderRegistry.default.id,
@@ -1237,6 +1255,13 @@ class AiProvidersViewModel(
         scheduleBrokeredRenewal()
         val changed = _state.value.connections.filter { (id, connection) ->
             val before = previous[id] ?: return@filter SharedProviderDefinition.isShared(id)
+            val shared = SharedProviderDefinition.isShared(id)
+            if (shared && !sameGeneration) return@filter true
+            if (shared && previousDescriptors[id] == nextDescriptors[id] &&
+                before.customEndpoint == connection.customEndpoint &&
+                before.apiKey.isNotBlank() && connection.apiKey.isNotBlank() &&
+                before.source == CredentialSource.BROKERED && connection.source == CredentialSource.BROKERED &&
+                usableSharedCatalog(catalog.stateOf(id)) != null) return@filter false
             previousDescriptors[id] != nextDescriptors[id] || catalogInputChanged(id, before, connection)
         }.keys
         if (changed.isNotEmpty()) {
