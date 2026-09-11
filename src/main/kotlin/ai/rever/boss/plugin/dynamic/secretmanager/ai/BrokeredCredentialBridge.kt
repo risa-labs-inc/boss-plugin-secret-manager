@@ -25,6 +25,8 @@ internal object BrokeredCredentialBridge {
     internal fun from(provider: BrokeredCredentialProvider): BrokeredKeySource {
         return object : BrokeredKeySource {
             override val supportsSharedProviders: Boolean = true
+            override fun canDiscoverSharedProviders(): Boolean =
+                provider.availableBrokers().any { !it.scopedTo.isNullOrBlank() }
             override fun permitsEndpoint(brokerId: String, endpoint: String): Boolean =
                 SharedProviderDefinition.withinScope(
                     endpoint, provider.availableBrokers().firstOrNull { it.id == brokerId }?.scopedTo,

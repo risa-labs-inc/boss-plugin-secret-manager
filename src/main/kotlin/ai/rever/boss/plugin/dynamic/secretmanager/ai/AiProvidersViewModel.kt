@@ -132,7 +132,7 @@ data class AiProvidersUiState(
         val id = activeProviderId ?: return false
         if (!SharedProviderDefinition.isShared(id)) return false
         val selected = connections[id]?.selectedModelId?.takeIf { it.isNotBlank() } ?: return false
-        val loaded = catalogOf(id) as? CatalogState.Loaded ?: return false
+        val loaded = usableSharedCatalog(catalogOf(id)) ?: return false
         return loaded.models.none { it.id == selected }
     }
 
@@ -447,10 +447,15 @@ class AiProvidersViewModel(
             return@withLock connections
         }
         // A busy invalidation stream must not wedge the one-shot consumer load latch.
+        val hadLoaded = _connectionsLoaded.value
         lastConnectionLoadFailureNanos.set(monotonicNanos())
         connectionsLoadStarted.set(false)
-        _connectionsLoaded.value = false
-        _catalogsLoaded.value = false
+        // connectionsLoaded means "loaded at least once". Do not make an already
+        // satisfied consumer wait regress to false because a later refresh raced edits.
+        if (!hadLoaded) {
+            _connectionsLoaded.value = false
+            _catalogsLoaded.value = false
+        }
         logger.warn(LogCategory.NETWORK, "AI provider load invalidated repeatedly; retry required")
         _state.update { it.copy(error = LOAD_RETRY_MESSAGE) }
         null

@@ -456,6 +456,19 @@ mutation-verified by the shared-provider regression tests.
 Host broker exceptions are converted to a failed, unconfigured provider while coroutine
 cancellation still propagates, so the initial consumer load cannot cancel a non-supervisor
 plugin scope merely because a host bridge violated its Result-returning contract.
+The unavailable-model banner and effective shared connection both resolve transient
+catalog fallback through `usableSharedCatalog`; they cannot disagree about whether a
+saved model disappeared. `connectionsLoaded` is a one-way "loaded at least once" latch,
+so an exhausted later refresh reports its error without making waiting consumers regress.
+Only explicit `owner` and `org` access levels can supply personal provider credentials;
+unknown levels remain read-only and cannot silently become the user's API key.
+Replacing the banner's fallback resolver with a Loaded-only cast fails the dedicated
+transient-fallback regression (mutation-verified).
+The sharing-aware RPC necessarily decrypts bounded pages containing readable shares;
+the store immediately projects them to non-secret provider metadata and retains no shared
+password. A host with no currently scoped broker skips that wider scan entirely. Competing
+default recommendations rank own-vault, then organisation, then direct-share provenance;
+that provenance is presentation/default ordering only and never an authorization signal.
 
 Review regressions were mutation-checked: reading the derived connection in
 `selectModel` fails the default consumer test (100 instead of the original 2000

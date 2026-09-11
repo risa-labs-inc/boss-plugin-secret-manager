@@ -76,6 +76,19 @@ class SharedProviderReviewTest {
         assertFalse(isProviderListed(descriptor, connection, CatalogState.Loading))
     }
 
+    @Test fun `unavailable shared model banner uses the same transient fallback as configuration`() {
+        val lastKnown = CatalogState.Loaded(listOf(AiModel("other", "Other")), 1)
+        val state = AiProvidersUiState(
+            activeProviderId = descriptor.id,
+            connections = mapOf(descriptor.id to connection.copy(selectedModelId = "removed")),
+            catalogs = mapOf(
+                descriptor.id to CatalogState.Failed("temporary outage", lastKnown, permanent = false),
+            ),
+        )
+        assertTrue(state.unavailableSharedModel)
+        assertNull(state.connectionOf(descriptor.id).selectedModelId)
+    }
+
     @Test fun `stale ids cannot wedge startup and shared defaults do not preempt configured keys`() {
         val openai = ProviderRegistry.find(ProviderRegistry.OPENAI)!!
         val own = ProviderConnection(openai.id, "own-key", CredentialSource.STORED, selectedModelId = "own")
@@ -85,6 +98,16 @@ class SharedProviderReviewTest {
         assertEquals(openai.id, initialProviderId(null, descriptors, connections))
         assertEquals(descriptor.id, initialProviderId(descriptor.id, descriptors, connections))
         assertEquals(descriptor.id, initialProviderId(null, descriptors, mapOf(descriptor.id to connection)))
+        val direct = descriptor.copy(id = "shared:direct", sharedProvenance = SharedProviderProvenance.DIRECT_SHARE)
+        val organisation = descriptor.copy(id = "shared:org", sharedProvenance = SharedProviderProvenance.ORGANISATION)
+        assertEquals(
+            organisation.id,
+            initialProviderId(
+                null,
+                listOf(direct, organisation),
+                mapOf(direct.id to connection.copy(providerId = direct.id), organisation.id to connection.copy(providerId = organisation.id)),
+            ),
+        )
     }
 
     @Test fun `revoked saved share warns before startup falls back`() = runBlocking<Unit> {
@@ -247,7 +270,9 @@ class SharedProviderReviewTest {
                 Result.success(ai.rever.boss.plugin.api.BrokeredCredential("minted", 600))
         })
         assertFalse(source.permitsEndpoint("managed", descriptor.chatEndpoint))
+        assertFalse(source.canDiscoverSharedProviders())
         advertised = listOf(ai.rever.boss.plugin.api.BrokerInfo("managed", "Managed", scopedTo = definition.baseUrl))
+        assertTrue(source.canDiscoverSharedProviders())
         assertTrue(source.permitsEndpoint("managed", descriptor.chatEndpoint))
         reads = 0
         assertTrue(source.permitsEndpoints("managed", listOf(descriptor.chatEndpoint, descriptor.modelsEndpoint!!)))

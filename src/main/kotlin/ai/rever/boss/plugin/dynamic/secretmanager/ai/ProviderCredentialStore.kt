@@ -157,6 +157,7 @@ class ProviderCredentialStore(
         val warning: String? = null,
         val stored: Map<String, StoredProvider> = emptyMap(),
         val removalAuthoritative: Boolean = true,
+        val usedSharingSnapshot: Boolean = false,
     )
 
     private data class CachedSharedDefinitions(
@@ -172,7 +173,7 @@ class ProviderCredentialStore(
     suspend fun expireSharedDefinitions() = sharedMutex.withLock { cachedShared = null }
 
     fun sharedDefinitionsStale(): Boolean {
-        if (brokeredKeys?.supportsSharedProviders != true) return false
+        if (brokeredKeys?.canDiscoverSharedProviders() != true) return false
         val cache = cachedShared ?: return true
         val ttl = if (cache.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS
         return cache.generation != generation.get() || monotonicNanos() - cache.fetchedAtNanos >= ttl
@@ -220,7 +221,7 @@ class ProviderCredentialStore(
         // The sharing RPC is a superset of the owned-secret list. A successful shared
         // scan therefore supplies both views and avoids a second full-vault traversal.
         // On failure, fall back to the narrower API so personal credentials still work.
-        val storedResult = if (shared.isSuccess && brokeredKeys?.supportsSharedProviders == true) {
+        val storedResult = if (shared.getOrNull()?.usedSharingSnapshot == true) {
             Result.success(shared.getOrThrow().stored)
         } else {
             loadStoredSecrets()
@@ -255,7 +256,7 @@ class ProviderCredentialStore(
 
     private suspend fun loadSharedDefinitions(): Result<SharedDefinitions> = sharedMutex.withLock {
         val broker = brokeredKeys
-        if (broker?.supportsSharedProviders != true) {
+        if (broker?.canDiscoverSharedProviders() != true) {
             return@withLock Result.success(SharedDefinitions(emptyList()))
         }
         val startedAt = generation.get()
@@ -286,7 +287,9 @@ class ProviderCredentialStore(
         while (true) {
             val page = secrets.getUserSecretsWithSharingInfo(limit = PAGE_SIZE, offset = offset).getOrThrow()
             for (entry in page.data) {
-                if (!SecretAccess.isShare(entry.accessLevel) && entry.tags.contains(TAG_AI_PROVIDER)) {
+                if ((entry.accessLevel.equals(SecretAccess.OWNER, ignoreCase = true) ||
+                        entry.accessLevel.equals(SecretAccess.ORG, ignoreCase = true)) &&
+                    entry.tags.contains(TAG_AI_PROVIDER)) {
                     val providerId = providerIdOf(entry.website, entry.tags) ?: continue
                     stored.putIfAbsent(
                         providerId,
@@ -296,14 +299,18 @@ class ProviderCredentialStore(
                 if (!entry.tags.contains(SharedProviderDefinition.TAG)) continue
                 val definition = SharedProviderDefinition.parse(entry.notes) ?: continue
                 val sharedBy = entry.sharedByEmail?.filterNot(Char::isISOControl)?.trim()?.take(100)
-                val source = when {
-                    SecretAccess.isShare(entry.accessLevel) && !sharedBy.isNullOrBlank() ->
-                        "Shared by $sharedBy"
-                    SecretAccess.isShare(entry.accessLevel) -> "Shared with you"
-                    entry.accessLevel.equals(SecretAccess.ORG, ignoreCase = true) -> "Managed by your organisation"
-                    else -> "Managed from your vault"
+                val provenance = when {
+                    entry.accessLevel.equals(SecretAccess.OWNER, ignoreCase = true) -> SharedProviderProvenance.OWNED
+                    entry.accessLevel.equals(SecretAccess.ORG, ignoreCase = true) -> SharedProviderProvenance.ORGANISATION
+                    else -> SharedProviderProvenance.DIRECT_SHARE
                 }
-                val descriptor = definition.descriptor(entry.id, source)
+                val source = when (provenance) {
+                    SharedProviderProvenance.OWNED -> "Managed from your vault"
+                    SharedProviderProvenance.ORGANISATION -> "Managed by your organisation"
+                    SharedProviderProvenance.DIRECT_SHARE ->
+                        if (sharedBy.isNullOrBlank()) "Shared with you" else "Shared by $sharedBy"
+                }
+                val descriptor = definition.descriptor(entry.id, source, provenance)
                 val modelsEndpoint = descriptor.modelsEndpoint ?: continue
                 if (!broker.permitsEndpoints(
                         definition.brokerId,
@@ -335,6 +342,7 @@ class ProviderCredentialStore(
             stored = stored.toMap(),
             // A provider over the admission cap is unavailable by policy, not unknown.
             removalAuthoritative = removalAuthoritative,
+            usedSharingSnapshot = true,
         )
     }
 

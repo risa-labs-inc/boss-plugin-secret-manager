@@ -15,7 +15,8 @@ internal fun initialProviderId(
             connection.isConfigured && (it.requiresApiKey || !connection.selectedModelId.isNullOrBlank())
         } == true
     }?.id
-    ?: descriptors.firstOrNull { it.sharedDefault && connections[it.id]?.isConfigured == true }?.id
+    ?: descriptors.filter { it.sharedDefault && connections[it.id]?.isConfigured == true }
+        .minByOrNull { it.sharedProvenance?.ordinal ?: Int.MAX_VALUE }?.id
 
 /** The panel and inference API resolve a shared model selection identically. */
 internal fun usableSharedCatalog(catalog: CatalogState): CatalogState.Loaded? = when (catalog) {
@@ -45,7 +46,11 @@ internal data class SharedProviderDefinition(
     val baseUrl: String,
     val defaultForNewUsers: Boolean = false,
 ) {
-    fun descriptor(secretId: String, sourceLabel: String = "Shared with you"): ProviderDescriptor = ProviderDescriptor(
+    fun descriptor(
+        secretId: String,
+        sourceLabel: String = "Shared with you",
+        provenance: SharedProviderProvenance = SharedProviderProvenance.DIRECT_SHARE,
+    ): ProviderDescriptor = ProviderDescriptor(
         id = "shared:$secretId",
         displayName = name,
         wireFormat = WireFormat.OPENAI_CHAT,
@@ -58,6 +63,7 @@ internal data class SharedProviderDefinition(
         brokerId = brokerId,
         sharedDefault = defaultForNewUsers,
         sharedSourceLabel = sourceLabel,
+        sharedProvenance = provenance,
     )
 
     companion object {

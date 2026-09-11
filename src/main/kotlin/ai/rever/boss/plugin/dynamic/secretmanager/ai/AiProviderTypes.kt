@@ -63,6 +63,13 @@ enum class CredentialTransport {
     QUERY_KEY_PARAM,
 }
 
+/** Trust-neutral source ordering for competing shared default recommendations. */
+enum class SharedProviderProvenance {
+    OWNED,
+    ORGANISATION,
+    DIRECT_SHARE,
+}
+
 /**
  * Static description of one AI provider: where its endpoints are, how it wants the
  * credential, and where a user goes to obtain one.
@@ -130,6 +137,8 @@ data class ProviderDescriptor(
     val sharedDefault: Boolean = false,
     /** Untrusted provenance label shown for a vault-delivered definition. */
     val sharedSourceLabel: String? = null,
+    /** Typed provenance used for deterministic default ordering, never as authorization. */
+    val sharedProvenance: SharedProviderProvenance? = null,
 ) {
     /** Whether a model id is embedded into [chatEndpoint] rather than sent in the body. */
     val needsModelInEndpoint: Boolean
@@ -272,6 +281,8 @@ data class BrokeredKey(
 fun interface BrokeredKeySource {
     suspend fun fetch(brokerId: String): Result<BrokeredKey>
     val supportsSharedProviders: Boolean get() = false
+    /** Whether this host currently exposes at least one scoped broker. */
+    fun canDiscoverSharedProviders(): Boolean = supportsSharedProviders
     /** Host-owned destination check, mandatory for descriptors read from shared notes. */
     fun permitsEndpoint(brokerId: String, endpoint: String): Boolean = false
     /** Check one definition against a single snapshot of the host broker registry. */
