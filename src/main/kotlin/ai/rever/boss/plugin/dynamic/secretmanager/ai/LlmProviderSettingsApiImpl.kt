@@ -45,7 +45,8 @@ class LlmProviderSettingsApiImpl(
      */
     override fun activeConfig(): LlmConfig? {
         // Callers can reach this before the settings panel has ever been rendered, so
-        // credentials are loaded on demand rather than only on panel entry.
+        // credentials and catalogs are loaded on demand. Shared defaults are catalog-derived;
+        // loading credentials alone would leave the first consumer without a model forever.
         viewModel.ensureCatalogsLoaded()
         val state = viewModel.state.value
         val providerId = state.activeProviderId ?: return null
@@ -94,8 +95,6 @@ class LlmProviderSettingsApiImpl(
         return state.providers.mapNotNull { descriptor ->
             val connection = state.connectionOf(descriptor.id)
             val catalog = viewModel.catalogStateOf(descriptor.id)
-            if (SharedProviderDefinition.isShared(descriptor.id) &&
-                (!connection.isConfigured || catalog !is CatalogState.Loaded)) return@mapNotNull null
             if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
                 return@mapNotNull null
             }

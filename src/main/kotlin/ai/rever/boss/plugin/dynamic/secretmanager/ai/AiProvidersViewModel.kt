@@ -111,6 +111,7 @@ data class AiProvidersUiState(
     val isLoading: Boolean = false,
     /** False when the secret store is unavailable — env keys still work. */
     val storeAvailable: Boolean = true,
+    val sharedDiscoveryWarning: String? = null,
     val error: String? = null,
     val notice: String? = null,
     val legacyOffer: LegacyImportOffer? = null,
@@ -381,14 +382,15 @@ class AiProvidersViewModel(
         val storedActive = prefs.read()
         val snapshot = store?.loadAll()
         val connections = withPreferredModels(snapshot?.connections ?: envOnlyConnections())
+        val descriptors = snapshot?.descriptors ?: ProviderRegistry.all
 
         _state.update { current ->
             current.copy(
                 connections = connections,
-                providers = snapshot?.descriptors ?: ProviderRegistry.all,
-                activeProviderId = current.activeProviderId ?: storedActive ?:
-                    snapshot?.descriptors?.firstOrNull { it.sharedDefault }?.id ?: firstConfigured(connections),
+                providers = descriptors,
+                activeProviderId = initialProviderId(current.activeProviderId ?: storedActive, descriptors, connections),
                 storeAvailable = store != null && snapshot?.storeReadFailed != true,
+                sharedDiscoveryWarning = snapshot?.sharedDiscoveryWarning,
             )
         }
         _connectionsLoaded.value = true
@@ -1135,7 +1137,10 @@ class AiProvidersViewModel(
      * scope that is not a supervisor, silently killing every later launch in the plugin.
      */
     fun refreshConnections() {
-        scope.launch(Dispatchers.IO) { runCatching { reloadConnections() } }
+        scope.launch(Dispatchers.IO) {
+            store?.invalidate()
+            runCatching { reloadConnections() }
+        }
     }
 
     private suspend fun reloadConnections() {
@@ -1151,16 +1156,29 @@ class AiProvidersViewModel(
         if (credentials.invalidations.value != startedAt) return
         val previous = _state.value.connections
         val previousDescriptors = _state.value.providers.associateBy { it.id }
+        val nextDescriptors = reloaded.descriptors.associateBy { it.id }
         val preferredConnections = withPreferredModels(reloaded.connections)
         if (credentials.invalidations.value != startedAt) return
         val removed = previous.keys - preferredConnections.keys
         removed.forEach(catalog::markNotConfigured)
-        _state.update { it.copy(connections = preferredConnections, providers = reloaded.descriptors) }
+        _state.update { current ->
+            val activeRemoved = current.activeProviderId in removed
+            current.copy(
+                connections = preferredConnections,
+                providers = reloaded.descriptors,
+                activeProviderId = current.activeProviderId?.takeUnless { it in removed },
+                storeAvailable = !reloaded.storeReadFailed,
+                sharedDiscoveryWarning = reloaded.sharedDiscoveryWarning,
+                error = if (activeRemoved) {
+                    "The selected shared AI provider is unavailable. Choose an available provider in AI settings."
+                } else current.error,
+            )
+        }
         // Re-arm promptly; a catalog sweep can wait behind another provider's network timeout.
         scheduleBrokeredRenewal()
         val changed = _state.value.connections.filter { (id, connection) ->
-            val before = previous[id] ?: return@filter true
-            previousDescriptors[id] != descriptorOf(id) || catalogInputChanged(id, before, connection)
+            val before = previous[id] ?: return@filter SharedProviderDefinition.isShared(id)
+            previousDescriptors[id] != nextDescriptors[id] || catalogInputChanged(id, before, connection)
         }.keys
         if (changed.isNotEmpty()) {
             val generation = catalogRefreshGeneration.incrementAndGet()

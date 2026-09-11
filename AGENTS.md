@@ -378,18 +378,56 @@ recipients keep model selections in local preferences and never write the share.
 The host broker owns the credential destination. Both catalog and inference URLs
 must fit its `BrokerInfo.scopedTo` boundary before minting. Shared definitions
 contain no upstream key; broker credentials stay in memory. Account-specific
-catalogs are not persisted. Discovery rechecks shares on credential reload, and
+catalogs are not persisted. Discovery caches only descriptors (including an empty
+result) for five minutes, rechecking on the next credential reload after expiry;
+invalidation and the panel's Refresh clear it immediately. Failed scans retry no
+sooner than 15 seconds. A per-scan mutex coalesces renewals and a generation stamp
+prevents a pre-sign-out scan from repopulating the cache. No decrypted vault rows
+are retained by this cache. A capped scan retains the discovered prefix and shows
+a separate shared-discovery warning, never a false credential-storage failure.
+On a successful recheck,
 removal drops the connection and invalidates its catalog. Inference authorization
 is independently enforced by the server's live model permissions and allowances.
 
+The machine-facing listing predicate requires both a credential and a loaded
+shared catalog. The panel deliberately keeps an unavailable shared row visible
+so the user can check access. `activeConfig()` starts catalog discovery because
+shared model defaults cannot be resolved from a credential alone. Shared catalogs
+use `SHARED_CACHE_TTL_MS` (60 seconds); consumer polling can refresh them while the
+panel is closed, bounded by the existing 30-second sweep floor. This is intentional
+for changing allowances, not a vault rescan on every consumer read.
+
+Trust is attached to the host's broker scope, not to the note author's display
+name. Any readable definition, including a direct share, may name a trusted broker;
+names and default recommendations are publisher-supplied, not an official-identity
+badge. Role-wide publishing remains gated by the existing `secret.share.role` RPC.
+Deploy the official definition from an admin-owned entry. Neither `isOwner` nor
+`accessLevel` proves that another entry's author is an admin, so neither is used as
+a fabricated publisher-verification check.
+
 | Transition | What may change |
 |---|---|
-| First discovery with no saved provider | Shared default recommendation may select a provider |
+| First discovery with no saved or configured provider | Shared default recommendation may select a provider |
 | Existing explicit provider/model choice | Keep the user's preference |
+| Startup with a saved id absent from discovery | Ignore the stale id for this session; prefer an existing configured provider |
 | Shared endpoint edited | Revalidate host scope and invalidate the catalog |
-| Share removed or unreadable | Remove shared connection; never substitute a different credential |
+| Active share removed or unreadable during the session | Clear active provider and catalog; explain how to refresh or choose another, without silently rerouting |
 | Account invalidated during discovery | Discard shared descriptors and credentials from that load |
 | Recipient selects a model | Write local prefs only; shared vault entry stays read-only |
+
+Absent shared preference entries are retained, not pruned on discovery: a transient
+read failure or capped scan cannot prove revocation, and deleting them would lose
+the user's model choice if access returns. `readModels` filters a view; it never
+pruned the on-disk preference file even before shared ids were introduced.
+
+`SharedProviderReviewTest` covers scan caching/expiry/invalidation, unsupported
+hosts, capped scans, separate error reporting, startup selection, disk isolation,
+and active-share removal. `ModelCatalogClientParseTest` uses the backend's numeric
+bigint allowance shape as well as string-encoded counts and malformed capabilities.
+Mutation-verified: removing scope confinement fails both original scope tests;
+removing each disk guard fails its separate write/seed test; accepting stale saved
+ids fails startup selection; unconditional machine listing fails its gate test;
+and restoring string-only allowance parsing fails the numeric-envelope test.
 
 The deployment/definition schema is documented in the host repository at
 `supabase/functions/boss-ai/README.md`. A host release must register the trusted

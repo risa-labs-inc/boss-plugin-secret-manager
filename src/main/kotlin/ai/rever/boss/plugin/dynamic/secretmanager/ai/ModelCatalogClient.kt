@@ -10,10 +10,14 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import java.net.URI
 import java.net.URLEncoder
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -387,17 +391,23 @@ class ModelCatalogClient(
         val allowance = obj["allowance"] as? JsonObject
         val summary = listOf("day", "week", "month").mapNotNull { period ->
             val window = allowance?.get(period) as? JsonObject ?: return@mapNotNull null
-            val remaining = window.str("remaining") ?: return@mapNotNull null
-            val limit = window.str("limit") ?: return@mapNotNull null
+            val remaining = (window["remaining"] as? JsonPrimitive)?.longOrNull
+                ?.takeIf { it >= 0 } ?: return@mapNotNull null
+            val limit = (window["limit"] as? JsonPrimitive)?.longOrNull
+                ?.takeIf { it >= 0 } ?: return@mapNotNull null
             val reset = window.str("resets_at") ?: return@mapNotNull null
-            "$period: $remaining / $limit tokens remaining (resets $reset)"
+            val resetLabel = runCatching {
+                OffsetDateTime.parse(reset).withOffsetSameInstant(ZoneOffset.UTC)
+                    .format(DateTimeFormatter.ofPattern("dd MMM HH:mm 'UTC'", Locale.ENGLISH))
+            }.getOrNull() ?: return@mapNotNull null
+            "$period: $remaining / $limit tokens remaining (resets $resetLabel)"
         }.joinToString("\n").takeIf { it.isNotEmpty() }
         return AiModel(
             id = id,
             displayName = obj.str("name") ?: id,
             contextLength = obj.int("context_length"),
             maxOutputTokens = obj.int("max_output_tokens"),
-            capabilities = (obj["capabilities"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty(),
+            capabilities = obj.strList("capabilities"),
             isDefault = obj.bool("is_default") == true,
             allowanceSummary = summary,
         )

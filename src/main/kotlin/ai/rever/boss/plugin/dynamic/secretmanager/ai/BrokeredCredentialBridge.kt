@@ -19,10 +19,13 @@ internal object BrokeredCredentialBridge {
 
     fun from(context: PluginContext): BrokeredKeySource? {
         val provider = context.brokeredCredentialProvider ?: return null
+        // Broker destinations are fixed by this host build. Availability is dynamic and is
+        // checked by exchange; an unavailable broker must still have a visible settings row.
+        val scopes = provider.availableBrokers().associate { it.id to it.scopedTo }
         return object : BrokeredKeySource {
             override val supportsSharedProviders: Boolean = true
             override fun permitsEndpoint(brokerId: String, endpoint: String): Boolean =
-                SharedProviderDefinition.withinScope(endpoint, provider.availableBrokers().firstOrNull { it.id == brokerId }?.scopedTo)
+                SharedProviderDefinition.withinScope(endpoint, scopes[brokerId])
 
             override suspend fun fetch(brokerId: String): Result<BrokeredKey> = provider.exchange(brokerId).map { credential ->
                 BrokeredKey(

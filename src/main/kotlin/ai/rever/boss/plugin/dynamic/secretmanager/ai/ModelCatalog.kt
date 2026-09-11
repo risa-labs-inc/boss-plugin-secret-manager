@@ -101,7 +101,7 @@ class ModelCatalog(
     fun isStale(providerId: String, nowEpochMs: Long): Boolean =
         when (val state = _states.value[providerId]) {
             is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs >
-                if (SharedProviderDefinition.isShared(providerId)) 60_000L else CACHE_TTL_MS
+                if (SharedProviderDefinition.isShared(providerId)) SHARED_CACHE_TTL_MS else CACHE_TTL_MS
             // A permanent failure (rejected key) is not stale: nothing changes until the
             // credential does, and the panel re-enters this on every open. Saving a new key
             // calls refresh(force = true), so recovery does not depend on staleness.
@@ -348,6 +348,8 @@ class ModelCatalog(
     companion object {
         /** Model lists are refreshed when older than this. */
         const val CACHE_TTL_MS: Long = 6 * 60 * 60 * 1000L
+        /** Account allowances change during use, including when the settings panel is closed. */
+        const val SHARED_CACHE_TTL_MS: Long = 60_000L
 
         /** Transient provider failures back off instead of retrying every consumer poll. */
         const val TRANSIENT_FAILURE_RETRY_MS: Long = 5 * 60 * 1000L

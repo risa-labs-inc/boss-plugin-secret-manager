@@ -4,6 +4,19 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.net.URI
 
+/** Validate persisted ids against this discovery, retaining already configured providers first. */
+internal fun initialProviderId(
+    preferred: String?,
+    descriptors: List<ProviderDescriptor>,
+    connections: Map<String, ProviderConnection>,
+): String? = preferred?.takeIf { id -> descriptors.any { it.id == id } }
+    ?: descriptors.firstOrNull {
+        !SharedProviderDefinition.isShared(it.id) && connections[it.id]?.let { connection ->
+            connection.isConfigured && (it.requiresApiKey || !connection.selectedModelId.isNullOrBlank())
+        } == true
+    }?.id
+    ?: descriptors.firstOrNull { it.sharedDefault && connections[it.id]?.isConfigured == true }?.id
+
 /** The panel and inference API resolve a shared model selection identically. */
 internal fun effectiveSharedConnection(connection: ProviderConnection, catalog: CatalogState): ProviderConnection {
     if (!SharedProviderDefinition.isShared(connection.providerId)) return connection

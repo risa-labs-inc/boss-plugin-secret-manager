@@ -25,6 +25,7 @@ data class ConnectionsSnapshot(
     val connections: Map<String, ProviderConnection>,
     val storeReadFailed: Boolean,
     val descriptors: List<ProviderDescriptor> = ProviderRegistry.all,
+    val sharedDiscoveryWarning: String? = null,
 )
 
 /**
@@ -65,6 +66,7 @@ class ProviderCredentialStore(
      * to outwait it, which is how an untested guard ends up wrong.
      */
     private val mintRetryBackoffMs: Long = DEFAULT_MINT_RETRY_BACKOFF_MS,
+    private val monotonicNanos: () -> Long = System::nanoTime,
 ) {
     private val logger = BossLogger.forComponent("AiCredentialStore")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -146,6 +148,20 @@ class ProviderCredentialStore(
     @Volatile
     private var cached: Map<String, StoredProvider>? = null
 
+    private data class SharedDefinitions(
+        val descriptors: List<ProviderDescriptor>,
+        val warning: String? = null,
+    )
+
+    private data class CachedSharedDefinitions(
+        val result: Result<SharedDefinitions>,
+        val generation: Long,
+        val fetchedAtNanos: Long,
+    )
+
+    private val sharedMutex = Mutex()
+    @Volatile private var cachedShared: CachedSharedDefinitions? = null
+
     /**
      * Bumped by every [invalidate]; a load only seats its result if the generation it
      * started in is still current.
@@ -172,6 +188,7 @@ class ProviderCredentialStore(
         // provider for the rest of the session — the exact thing invalidate() prevents.
         generation.incrementAndGet()
         cached = null
+        cachedShared = null
         // Brokered credentials go too. Sign-out is one of the things that invalidates,
         // and a credential minted for the previous session must not outlive it.
         brokeredCache.clear()
@@ -186,44 +203,71 @@ class ProviderCredentialStore(
         val storedResult = loadStoredSecrets()
         val stored = storedResult.getOrElse { emptyMap() }
         val shared = loadSharedDefinitions()
-        val descriptors = ProviderRegistry.all + shared.getOrDefault(emptyList())
+        val descriptors = ProviderRegistry.all + shared.getOrNull()?.descriptors.orEmpty()
 
         val connections =
             descriptors.associate { descriptor ->
                 descriptor.id to resolveConnection(descriptor, stored[descriptor.id])
             }
 
+        // Preserve the pre-existing direct-caller contract for static providers. The
+        // ViewModel's reload path additionally guards the whole snapshot against invalidation.
         if (startedAt != generation.get()) return ConnectionsSnapshot(
-            connections.filterKeys { !SharedProviderDefinition.isShared(it) }, true,
+            connections = connections.filterKeys { !SharedProviderDefinition.isShared(it) },
+            storeReadFailed = true,
         )
 
         return ConnectionsSnapshot(
             connections = connections,
-            storeReadFailed = storedResult.isFailure || shared.isFailure,
+            storeReadFailed = storedResult.isFailure,
             descriptors = descriptors,
+            sharedDiscoveryWarning = if (shared.isFailure) {
+                "Shared AI providers could not be refreshed. Retry using Refresh."
+            } else shared.getOrNull()?.warning,
         )
     }
 
-    private suspend fun loadSharedDefinitions(): Result<List<ProviderDescriptor>> = runCatching {
-        if (brokeredKeys?.supportsSharedProviders != true) return@runCatching emptyList()
+    private suspend fun loadSharedDefinitions(): Result<SharedDefinitions> = sharedMutex.withLock {
+        val broker = brokeredKeys
+        if (broker?.supportsSharedProviders != true) {
+            return@withLock Result.success(SharedDefinitions(emptyList()))
+        }
+        val startedAt = generation.get()
+        cachedShared?.takeIf {
+            it.generation == startedAt && monotonicNanos() - it.fetchedAtNanos <
+                (if (it.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS)
+        }?.let { return@withLock it.result }
+        val result = runCatching { scanSharedDefinitions(broker) }
+        if (generation.get() == startedAt) {
+            cachedShared = CachedSharedDefinitions(result, startedAt, monotonicNanos())
+        }
+        result
+    }
+
+    private suspend fun scanSharedDefinitions(broker: BrokeredKeySource): SharedDefinitions {
         val found = mutableMapOf<String, ProviderDescriptor>()
         var offset = 0
+        var warning: String? = null
         while (true) {
             val page = secrets.getUserSecretsWithSharingInfo(limit = PAGE_SIZE, offset = offset).getOrThrow()
             for (entry in page.data) {
                 if (!entry.tags.contains(SharedProviderDefinition.TAG)) continue
                 val definition = SharedProviderDefinition.parse(entry.notes) ?: continue
                 val descriptor = definition.descriptor(entry.id)
-                val broker = brokeredKeys ?: continue
+                val modelsEndpoint = descriptor.modelsEndpoint ?: continue
                 if (!broker.permitsEndpoint(definition.brokerId, descriptor.chatEndpoint) ||
-                    !broker.permitsEndpoint(definition.brokerId, descriptor.modelsEndpoint!!)) continue
+                    !broker.permitsEndpoint(definition.brokerId, modelsEndpoint)) continue
                 found.putIfAbsent(descriptor.id, descriptor)
             }
             if (!page.hasMore || page.data.isEmpty()) break
-            offset += PAGE_SIZE
-            check(offset < MAX_SCANNED) { "Shared provider discovery exceeded its page limit." }
+            offset += page.data.size
+            if (offset >= MAX_SCANNED) {
+                warning = "Shared AI discovery reached its scan limit; some providers may not be listed."
+                logger.warn(LogCategory.NETWORK, warning)
+                break
+            }
         }
-        found.values.sortedBy { it.id }
+        return SharedDefinitions(found.values.sortedBy { it.id }, warning)
     }
 
     /**
@@ -741,6 +785,8 @@ class ProviderCredentialStore(
 
         private const val PAGE_SIZE = 100
         private const val MAX_SCANNED = 2000
+        private const val SHARED_DISCOVERY_TTL_NANOS = 5 * 60 * 1_000_000_000L
+        private const val SHARED_RETRY_NANOS = 15 * 1_000_000_000L
         private const val MILLIS_PER_SECOND = 1000L
         private const val NANOS_PER_MILLI = 1_000_000L
 

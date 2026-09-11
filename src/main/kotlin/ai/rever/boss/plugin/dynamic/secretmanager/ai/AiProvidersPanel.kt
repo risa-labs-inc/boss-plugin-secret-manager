@@ -95,6 +95,7 @@ fun AiProvidersPanel(
             )
         }
         state.error?.let { MessageBanner(it, BossThemeColors.ErrorColor) }
+        state.sharedDiscoveryWarning?.let { MessageBanner(it, BossThemeColors.WarningColor) }
         state.notice?.let { MessageBanner(it, BossThemeColors.SuccessColor) }
 
         // One heading for the whole surface: a CLI session and an HTTP provider are both
@@ -159,7 +160,7 @@ fun AiProvidersPanel(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 val listed =
                     state.providers.filter {
-                        isProviderListed(
+                        SharedProviderDefinition.isShared(it.id) || isProviderListed(
                             it,
                             state.connectionOf(it.id),
                             state.catalogOf(it.id),
@@ -1074,15 +1075,16 @@ private fun ModelFacts(model: AiModel) {
             model.contextLength?.let { add("${formatTokens(it)} context") }
             model.maxOutputTokens?.let { add("${formatTokens(it)} max output") }
             if (model.capabilities.isNotEmpty()) add(model.capabilities.joinToString(", "))
-            model.allowanceSummary?.let { add(it) }
             model.ownedBy?.let { add(it) }
         }
-    if (facts.isEmpty()) return
-    Text(
+    if (facts.isNotEmpty()) Text(
         text = facts.joinToString(" · "),
         style = SecretPanelType.caption,
         color = BossThemeColors.TextSecondary,
     )
+    model.allowanceSummary?.let {
+        Text(text = it, style = SecretPanelType.caption, color = BossThemeColors.TextSecondary)
+    }
 }
 
 private fun formatTokens(tokens: Int): String =

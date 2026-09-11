@@ -10,6 +10,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -66,6 +67,7 @@ class SharedProviderTest {
             assertEquals("session-derived", snapshot.connections["shared:60"]?.apiKey)
             assertEquals(CredentialSource.BROKERED, snapshot.connections["shared:60"]?.source)
             vault.entries = emptyList()
+            store.invalidate()
             assertFalse(store.loadAll().connections.containsKey("shared:60"))
             assertTrue(fake.created.isEmpty())
             assertTrue(fake.updated.isEmpty())
@@ -85,10 +87,9 @@ class SharedProviderTest {
                 legacyImport = null, splitViewOperations = null, scope = scope, envResolver = env(root),
                 ollamaSystemCheck = noOllamaOnThisMachine())
             val api = LlmProviderSettingsApiImpl(vm)
-            val config = withTimeout(10_000) {
-                while (api.activeConfig() == null) delay(10)
-                api.activeConfig()
-            }
+            api.activeConfig()
+            withTimeout(10_000) { vm.catalogsLoaded.first { it } }
+            val config = api.activeConfig()
             assertNotNull(config)
             assertEquals("shared:secret-id", config.providerId)
             assertEquals("z", config.modelId)
