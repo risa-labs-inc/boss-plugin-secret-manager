@@ -14,15 +14,15 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import java.net.URI
 import java.net.URLEncoder
-import java.time.OffsetDateTime
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
 import java.time.Duration
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * Asks each provider what models the supplied credential can actually reach.

@@ -26,6 +26,8 @@ data class ConnectionsSnapshot(
     val storeReadFailed: Boolean,
     val descriptors: List<ProviderDescriptor> = ProviderRegistry.all,
     val sharedDiscoveryWarning: String? = null,
+    val sharedDiscoveryComplete: Boolean = true,
+    val invalidatedDuringLoad: Boolean = false,
 )
 
 /**
@@ -162,6 +164,16 @@ class ProviderCredentialStore(
     private val sharedMutex = Mutex()
     @Volatile private var cachedShared: CachedSharedDefinitions? = null
 
+    /** A manual discovery refresh is not a sign-out and must not discard minted keys. */
+    suspend fun expireSharedDefinitions() = sharedMutex.withLock { cachedShared = null }
+
+    fun sharedDefinitionsStale(): Boolean {
+        if (brokeredKeys?.supportsSharedProviders != true) return false
+        val cache = cachedShared ?: return true
+        val ttl = if (cache.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS
+        return cache.generation != generation.get() || monotonicNanos() - cache.fetchedAtNanos >= ttl
+    }
+
     /**
      * Bumped by every [invalidate]; a load only seats its result if the generation it
      * started in is still current.
@@ -214,13 +226,16 @@ class ProviderCredentialStore(
         // ViewModel's reload path additionally guards the whole snapshot against invalidation.
         if (startedAt != generation.get()) return ConnectionsSnapshot(
             connections = connections.filterKeys { !SharedProviderDefinition.isShared(it) },
-            storeReadFailed = true,
+            storeReadFailed = storedResult.isFailure,
+            invalidatedDuringLoad = true,
+            sharedDiscoveryComplete = false,
         )
 
         return ConnectionsSnapshot(
             connections = connections,
             storeReadFailed = storedResult.isFailure,
             descriptors = descriptors,
+            sharedDiscoveryComplete = shared.isSuccess && shared.getOrNull()?.warning == null,
             sharedDiscoveryWarning = if (shared.isFailure) {
                 "Shared AI providers could not be refreshed. Retry using Refresh."
             } else shared.getOrNull()?.warning,
@@ -267,7 +282,10 @@ class ProviderCredentialStore(
                 break
             }
         }
-        return SharedDefinitions(found.values.sortedBy { it.id }, warning)
+        if (found.size > MAX_SHARED_PROVIDERS) {
+            warning = "Shared AI discovery reached its provider limit; some providers may not be listed."
+        }
+        return SharedDefinitions(found.values.sortedBy { it.id }.take(MAX_SHARED_PROVIDERS), warning)
     }
 
     /**
@@ -785,6 +803,7 @@ class ProviderCredentialStore(
 
         private const val PAGE_SIZE = 100
         private const val MAX_SCANNED = 2000
+        internal const val MAX_SHARED_PROVIDERS = 32
         private const val SHARED_DISCOVERY_TTL_NANOS = 5 * 60 * 1_000_000_000L
         private const val SHARED_RETRY_NANOS = 15 * 1_000_000_000L
         private const val MILLIS_PER_SECOND = 1000L

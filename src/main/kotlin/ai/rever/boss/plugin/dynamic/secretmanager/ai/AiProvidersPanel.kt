@@ -96,6 +96,10 @@ fun AiProvidersPanel(
         }
         state.error?.let { MessageBanner(it, BossThemeColors.ErrorColor) }
         state.sharedDiscoveryWarning?.let { MessageBanner(it, BossThemeColors.WarningColor) }
+        state.providerSelectionWarning?.let { MessageBanner(it, BossThemeColors.WarningColor) }
+        if (state.unavailableSharedModel) {
+            MessageBanner("The selected shared model is no longer published. Choose another model.", BossThemeColors.WarningColor)
+        }
         state.notice?.let { MessageBanner(it, BossThemeColors.SuccessColor) }
 
         // One heading for the whole surface: a CLI session and an HTTP provider are both
@@ -160,6 +164,7 @@ fun AiProvidersPanel(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 val listed =
                     state.providers.filter {
+                        // The UI keeps unavailable shares visible; machine lists require readiness.
                         SharedProviderDefinition.isShared(it.id) || isProviderListed(
                             it,
                             state.connectionOf(it.id),
@@ -1077,11 +1082,13 @@ private fun ModelFacts(model: AiModel) {
             if (model.capabilities.isNotEmpty()) add(model.capabilities.joinToString(", "))
             model.ownedBy?.let { add(it) }
         }
-    if (facts.isNotEmpty()) Text(
-        text = facts.joinToString(" · "),
-        style = SecretPanelType.caption,
-        color = BossThemeColors.TextSecondary,
-    )
+    if (facts.isNotEmpty()) {
+        Text(
+            text = facts.joinToString(" · "),
+            style = SecretPanelType.caption,
+            color = BossThemeColors.TextSecondary,
+        )
+    }
     model.allowanceSummary?.let {
         Text(text = it, style = SecretPanelType.caption, color = BossThemeColors.TextSecondary)
     }

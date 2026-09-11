@@ -380,7 +380,9 @@ must fit its `BrokerInfo.scopedTo` boundary before minting. Shared definitions
 contain no upstream key; broker credentials stay in memory. Account-specific
 catalogs are not persisted. Discovery caches only descriptors (including an empty
 result) for five minutes, rechecking on the next credential reload after expiry;
-invalidation and the panel's Refresh clear it immediately. Failed scans retry no
+invalidation and the panel's Refresh clear it immediately. Refresh only expires
+the shared-definition cache, not minted credentials or the account generation.
+Failed scans retry no
 sooner than 15 seconds. A per-scan mutex coalesces renewals and a generation stamp
 prevents a pre-sign-out scan from repopulating the cache. No decrypted vault rows
 are retained by this cache. A capped scan retains the discovered prefix and shows
@@ -409,11 +411,26 @@ a fabricated publisher-verification check.
 |---|---|
 | First discovery with no saved or configured provider | Shared default recommendation may select a provider |
 | Existing explicit provider/model choice | Keep the user's preference |
-| Startup with a saved id absent from discovery | Ignore the stale id for this session; prefer an existing configured provider |
+| Startup with a saved id absent from a complete discovery | Ignore the stale id for this session; prefer an existing configured provider |
 | Shared endpoint edited | Revalidate host scope and invalidate the catalog |
-| Active share removed or unreadable during the session | Clear active provider and catalog; explain how to refresh or choose another, without silently rerouting |
+| Complete scan proves the active share was removed | Clear active provider and catalog; ask the user to choose another, without silently rerouting |
+| Failed or capped scan omits the active share | Keep its selected id, fail closed without credentials, retry discovery on subsequent consumer reads |
 | Account invalidated during discovery | Discard shared descriptors and credentials from that load |
 | Recipient selects a model | Write local prefs only; shared vault entry stays read-only |
+
+Review-round state rules: an incomplete or failed scan does not revoke the active
+selection; unavailable credentials fail closed while a later successful discovery
+restores the same selection. A generation-invalidated first load retries instead
+of reporting a vault outage. Manual discovery refresh does not invalidate session
+credentials. Model-limit clamping is read-only; writers use raw connections.
+Catalog HTTP work is limited to four concurrent requests, and at most 32 shared
+definitions are admitted (UUID order, deterministic when defaults tie).
+
+Review regressions were mutation-checked: reading the derived connection in
+`selectModel` fails the default consumer test (100 instead of the original 2000
+token preference); removing the discovery scope guard fails the malicious-share
+assertion. The malicious id sorts inside the 32-provider cap, so the cap cannot
+make that security assertion pass accidentally.
 
 Absent shared preference entries are retained, not pruned on discovery: a transient
 read failure or capped scan cannot prove revocation, and deleting them would lose
@@ -739,6 +756,11 @@ rule for the next component: check the tag, not the jar, and add it here.
 The cross-plugin navigation path was checked against **v1.0.73**, not the newest jar:
 `PluginContext.applicationEventBus`, `ApplicationEventBus.eventsOfType(Class)`, and
 `CustomPluginEvent.eventName`/`payload` are all present there and therefore below today's floor.
+
+`BrokerInfo.scopedTo` is also read by `BrokeredCredentialBridge`. Verified against
+the released `v1.0.74` source, it predates the 1.0.89 floor. Scope is looked up live:
+the current host lists signed-out brokers with `available=false`, but the API does
+not promise every host keeps the same list throughout registration and sign-in.
 
 `LlmProviderSettingsApiImpl`, `BrokeredCredentialBridge` and `GatewayCliEngineAccess` remain the
 only files that name the newer AI API types (`LlmProviderSettingsAPI` and

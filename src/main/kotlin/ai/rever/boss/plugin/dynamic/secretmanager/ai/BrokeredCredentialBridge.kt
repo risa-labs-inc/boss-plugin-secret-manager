@@ -19,13 +19,16 @@ internal object BrokeredCredentialBridge {
 
     fun from(context: PluginContext): BrokeredKeySource? {
         val provider = context.brokeredCredentialProvider ?: return null
-        // Broker destinations are fixed by this host build. Availability is dynamic and is
-        // checked by exchange; an unavailable broker must still have a visible settings row.
-        val scopes = provider.availableBrokers().associate { it.id to it.scopedTo }
+        return from(provider)
+    }
+
+    internal fun from(provider: BrokeredCredentialProvider): BrokeredKeySource {
         return object : BrokeredKeySource {
             override val supportsSharedProviders: Boolean = true
             override fun permitsEndpoint(brokerId: String, endpoint: String): Boolean =
-                SharedProviderDefinition.withinScope(endpoint, scopes[brokerId])
+                SharedProviderDefinition.withinScope(
+                    endpoint, provider.availableBrokers().firstOrNull { it.id == brokerId }?.scopedTo,
+                )
 
             override suspend fun fetch(brokerId: String): Result<BrokeredKey> = provider.exchange(brokerId).map { credential ->
                 BrokeredKey(
@@ -46,7 +49,9 @@ internal object BrokeredCredentialBridge {
      *
      * Lets the panel say "not available on this host" instead of offering an action
      * that can only fail. Absent from [BrokeredCredentialProvider.availableBrokers]
-     * covers both "this build has no such broker" and "no user is signed in".
+     * means this host does not currently advertise that broker. BOSS's current host
+     * keeps brokers listed while signed out and sets `available=false`; do not assume
+     * every host implementation advertises an unchanging list at registration.
      */
     fun isAvailable(
         context: PluginContext,

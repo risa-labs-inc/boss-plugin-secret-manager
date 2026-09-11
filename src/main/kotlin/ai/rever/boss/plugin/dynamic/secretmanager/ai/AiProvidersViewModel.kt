@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -112,15 +114,27 @@ data class AiProvidersUiState(
     /** False when the secret store is unavailable — env keys still work. */
     val storeAvailable: Boolean = true,
     val sharedDiscoveryWarning: String? = null,
+    val providerSelectionWarning: String? = null,
     val error: String? = null,
     val notice: String? = null,
     val legacyOffer: LegacyImportOffer? = null,
 ) {
+    fun rawConnectionOf(providerId: String): ProviderConnection = connections[providerId]
+        ?: ProviderConnection(providerId = providerId, apiKey = "", source = CredentialSource.NONE)
+
     fun connectionOf(providerId: String): ProviderConnection =
         effectiveSharedConnection(
-            connections[providerId] ?: ProviderConnection(providerId = providerId, apiKey = "", source = CredentialSource.NONE),
+            rawConnectionOf(providerId),
             catalogOf(providerId),
         )
+
+    val unavailableSharedModel: Boolean get() {
+        val id = activeProviderId ?: return false
+        if (!SharedProviderDefinition.isShared(id)) return false
+        val selected = connections[id]?.selectedModelId?.takeIf { it.isNotBlank() } ?: return false
+        val loaded = catalogOf(id) as? CatalogState.Loaded ?: return false
+        return loaded.models.none { it.id == selected }
+    }
 
     fun catalogOf(providerId: String): CatalogState = catalogs[providerId] ?: CatalogState.NotConfigured
 
@@ -233,6 +247,9 @@ class AiProvidersViewModel(
     private val lastBrokeredRefreshNanos = AtomicLong(Long.MIN_VALUE / 2)
 
     private val _connectionsLoaded = MutableStateFlow(false)
+    private val connectionLoadMutex = Mutex()
+    private val catalogFetchSlots = Semaphore(MAX_CONCURRENT_CATALOG_FETCHES)
+    private val discoveryRefreshInFlight = AtomicBoolean(false)
 
     init {
         scope.launch { catalog.states.collect { states -> _state.update { it.copy(catalogs = states) } } }
@@ -297,6 +314,11 @@ class AiProvidersViewModel(
     /** Consumers need model metadata even when the settings panel has never been opened. */
     fun ensureCatalogsLoaded() {
         ensureConnectionsLoaded()
+        if (_connectionsLoaded.value && store?.sharedDefinitionsStale() == true &&
+            discoveryRefreshInFlight.compareAndSet(false, true)) {
+            scope.launch(Dispatchers.IO) { runCatching { reloadConnections() } }
+                .invokeOnCompletion { discoveryRefreshInFlight.set(false) }
+        }
         catalogsLoadStarted.set(true)
         // Consumer reads can be frequent. Re-check TTLs on demand, with a retry floor for
         // transient failures instead of a perpetual refresh coroutine or one-shot latch.
@@ -378,27 +400,38 @@ class AiProvidersViewModel(
      */
     val connectionsLoaded: StateFlow<Boolean> = _connectionsLoaded.asStateFlow()
 
-    private suspend fun loadConnections(): Map<String, ProviderConnection> {
-        val storedActive = prefs.read()
-        val snapshot = store?.loadAll()
-        val connections = withPreferredModels(snapshot?.connections ?: envOnlyConnections())
-        val descriptors = snapshot?.descriptors ?: ProviderRegistry.all
+    private suspend fun loadConnections(): Map<String, ProviderConnection> = connectionLoadMutex.withLock {
+        repeat(3) {
+            val startedAt = store?.invalidations?.value
+            val storedActive = prefs.read()
+            val snapshot = store?.loadAll()
+            val connections = withPreferredModels(snapshot?.connections ?: envOnlyConnections())
+            if (snapshot?.invalidatedDuringLoad == true || startedAt != store?.invalidations?.value) {
+                return@repeat
+            }
+            val descriptors = snapshot?.descriptors ?: ProviderRegistry.all
 
-        _state.update { current ->
-            current.copy(
-                connections = connections,
-                providers = descriptors,
-                activeProviderId = initialProviderId(current.activeProviderId ?: storedActive, descriptors, connections),
-                storeAvailable = store != null && snapshot?.storeReadFailed != true,
-                sharedDiscoveryWarning = snapshot?.sharedDiscoveryWarning,
-            )
+            _state.update { current ->
+                val preferred = current.activeProviderId ?: storedActive
+                current.copy(
+                    connections = connections,
+                    providers = descriptors,
+                    activeProviderId = if (snapshot?.sharedDiscoveryComplete == false &&
+                        preferred?.let(SharedProviderDefinition::isShared) == true) {
+                        preferred
+                    } else initialProviderId(preferred, descriptors, connections),
+                    storeAvailable = store != null && snapshot?.storeReadFailed != true,
+                    sharedDiscoveryWarning = snapshot?.sharedDiscoveryWarning,
+                )
+            }
+            _connectionsLoaded.value = true
+            // Arm renewal on the first load too, even if no settings panel ever opens.
+            scheduleBrokeredRenewal()
+            return@withLock connections
         }
-        _connectionsLoaded.value = true
-        // Arm the renewal from the *first* load too, not only from later reloads: this is the path
-        // a consumer's very first `activeConfig()` takes, and without this the timer would only
-        // start once something else happened to reload.
-        scheduleBrokeredRenewal()
-        return connections
+        // A busy invalidation stream must not wedge the one-shot consumer load latch.
+        connectionsLoadStarted.set(false)
+        emptyMap()
     }
 
     /**
@@ -541,7 +574,9 @@ class AiProvidersViewModel(
                         return@async
                     }
                     if (!ProviderRegistry.hasKnownModels(descriptor)) return@async
-                    catalog.refresh(descriptor, connection.apiKey, force = false)
+                    catalogFetchSlots.withPermit {
+                        catalog.refresh(descriptor, connection.apiKey, force = false)
+                    }
                 }
             }.awaitAll()
             Unit
@@ -594,6 +629,7 @@ class AiProvidersViewModel(
             _state.update {
                 it.copy(
                     activeProviderId = providerId,
+                    providerSelectionWarning = null,
                     // Only clear what we actually released. A gateway that refused leaves the
                     // engine serving requests, and showing it as inactive would be the exact
                     // disagreement this method exists to prevent.
@@ -864,7 +900,7 @@ class AiProvidersViewModel(
         if (modelId.isBlank()) return
 
         val currentStore = store
-        val existing = _state.value.connectionOf(providerId)
+        val existing = _state.value.rawConnectionOf(providerId)
 
         // Reflect immediately; persistence follows. The picker should not appear to
         // reject a choice while a round-trip to the store completes.
@@ -913,7 +949,8 @@ class AiProvidersViewModel(
 
     /** Persist a custom provider's endpoint, which has no models endpoint to discover. */
     fun setCustomEndpoint(providerId: String, endpoint: String) {
-        val existing = _state.value.connectionOf(providerId)
+        if (SharedProviderDefinition.isShared(providerId)) return
+        val existing = _state.value.rawConnectionOf(providerId)
         val trimmed = endpoint.trim()
         _state.update {
             it.copy(connections = it.connections + (providerId to existing.copy(customEndpoint = trimmed)))
@@ -1138,13 +1175,13 @@ class AiProvidersViewModel(
      */
     fun refreshConnections() {
         scope.launch(Dispatchers.IO) {
-            store?.invalidate()
+            store?.expireSharedDefinitions()
             runCatching { reloadConnections() }
         }
     }
 
-    private suspend fun reloadConnections() {
-        val credentials = store ?: return
+    private suspend fun reloadConnections() = connectionLoadMutex.withLock {
+        val credentials = store ?: return@withLock
         // Mirrors the store's own generation guard, one layer up. The store refuses to seat a
         // `cached`/`brokeredCache` value from before an `invalidate()`, but the value consumers
         // actually read is `_state.connections`, and that write was unguarded: a refresh already
@@ -1153,25 +1190,27 @@ class AiProvidersViewModel(
         // consumer read can start a reload.
         val startedAt = credentials.invalidations.value
         val reloaded = credentials.loadAll()
-        if (credentials.invalidations.value != startedAt) return
+        if (reloaded.invalidatedDuringLoad || credentials.invalidations.value != startedAt) return@withLock
         val previous = _state.value.connections
         val previousDescriptors = _state.value.providers.associateBy { it.id }
         val nextDescriptors = reloaded.descriptors.associateBy { it.id }
         val preferredConnections = withPreferredModels(reloaded.connections)
-        if (credentials.invalidations.value != startedAt) return
+        if (credentials.invalidations.value != startedAt) return@withLock
         val removed = previous.keys - preferredConnections.keys
         removed.forEach(catalog::markNotConfigured)
         _state.update { current ->
-            val activeRemoved = current.activeProviderId in removed
+            val activeRemoved = reloaded.sharedDiscoveryComplete &&
+                current.activeProviderId?.let(SharedProviderDefinition::isShared) == true &&
+                current.activeProviderId !in preferredConnections
             current.copy(
                 connections = preferredConnections,
                 providers = reloaded.descriptors,
-                activeProviderId = current.activeProviderId?.takeUnless { it in removed },
+                activeProviderId = current.activeProviderId?.takeUnless { activeRemoved },
                 storeAvailable = !reloaded.storeReadFailed,
                 sharedDiscoveryWarning = reloaded.sharedDiscoveryWarning,
-                error = if (activeRemoved) {
+                providerSelectionWarning = if (activeRemoved) {
                     "The selected shared AI provider is unavailable. Choose an available provider in AI settings."
-                } else current.error,
+                } else if (current.activeProviderId in preferredConnections) null else current.providerSelectionWarning,
             )
         }
         // Re-arm promptly; a catalog sweep can wait behind another provider's network timeout.
@@ -1266,7 +1305,9 @@ class AiProvidersViewModel(
         // then hides — noise with no symptom. A provider with a FIXED list is not skipped:
         // it has models to seat, just no endpoint to ask.
         if (!ProviderRegistry.hasKnownModels(descriptor)) return
-        catalog.refresh(descriptor, connection.apiKey, force = force)
+        catalogFetchSlots.withPermit {
+            catalog.refresh(descriptor, connection.apiKey, force = force)
+        }
     }
 
     private suspend fun withBusy(providerId: String, block: suspend () -> Unit) {
@@ -1279,6 +1320,7 @@ class AiProvidersViewModel(
     }
 
     private companion object {
+        const val MAX_CONCURRENT_CATALOG_FETCHES = 4
         /**
          * Floor on how often a brokered refresh may run.
          *

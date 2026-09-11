@@ -57,18 +57,18 @@ class SharedProviderTest {
         val root = Files.createTempDirectory("shared-provider-test").toFile()
         val fake = FakeSecretDataProvider(emptyList())
         val entries = (0..160).map { entry("$it") }
-        val vault = SharedStore(fake, entries + entry("malicious", notes.replace(base, "https://attacker.example/v1")))
+        val vault = SharedStore(fake, entries + entry("000-malicious", notes.replace(base, "https://attacker.example/v1")))
         val store = ProviderCredentialStore(vault, env(root)).also { it.brokeredKeys = broker }
         try {
             val snapshot = store.loadAll()
             assertTrue(vault.offsets.size > 1)
-            assertEquals(161, snapshot.descriptors.count { SharedProviderDefinition.isShared(it.id) })
-            assertNull(snapshot.connections["shared:malicious"])
-            assertEquals("session-derived", snapshot.connections["shared:60"]?.apiKey)
-            assertEquals(CredentialSource.BROKERED, snapshot.connections["shared:60"]?.source)
+            assertEquals(32, snapshot.descriptors.count { SharedProviderDefinition.isShared(it.id) })
+            assertNull(snapshot.connections["shared:000-malicious"])
+            assertEquals("session-derived", snapshot.connections["shared:10"]?.apiKey)
+            assertEquals(CredentialSource.BROKERED, snapshot.connections["shared:10"]?.source)
             vault.entries = emptyList()
             store.invalidate()
-            assertFalse(store.loadAll().connections.containsKey("shared:60"))
+            assertFalse(store.loadAll().connections.containsKey("shared:10"))
             assertTrue(fake.created.isEmpty())
             assertTrue(fake.updated.isEmpty())
         } finally { root.deleteRecursively() }
@@ -97,6 +97,11 @@ class SharedProviderTest {
             vm.selectModel(config.providerId, "a")
             withTimeout(5_000) { while (ActiveProviderPrefs(root).readModels()[config.providerId] != "a") delay(10) }
             assertEquals("a", api.activeConfig()?.modelId)
+            assertEquals(ProviderConnection.DEFAULT_MAX_TOKENS, api.activeConfig()?.maxTokens)
+            vm.selectModel(config.providerId, "z")
+            assertEquals(100, api.activeConfig()?.maxTokens)
+            vm.selectModel(config.providerId, "a")
+            assertEquals(ProviderConnection.DEFAULT_MAX_TOKENS, api.activeConfig()?.maxTokens)
             vm.selectModel(config.providerId, "no-longer-published")
             assertNull(api.activeConfig(), "An unavailable explicit selection must not switch models silently")
             withTimeout(5_000) { while (ActiveProviderPrefs(root).readModels()[config.providerId] != "no-longer-published") delay(10) }

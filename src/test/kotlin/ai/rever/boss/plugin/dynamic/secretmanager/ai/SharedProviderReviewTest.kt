@@ -123,7 +123,8 @@ class SharedProviderReviewTest {
         val store = ProviderCredentialStore(vault, env(root)).also { it.brokeredKeys = broker }
         try {
             val capped = store.loadAll()
-            assertEquals(2000, capped.descriptors.count { SharedProviderDefinition.isShared(it.id) })
+            assertEquals(32, capped.descriptors.count { SharedProviderDefinition.isShared(it.id) })
+            assertFalse(capped.sharedDiscoveryComplete)
             assertEquals(20, vault.reads)
             assertNotNull(capped.sharedDiscoveryWarning)
             assertFalse(capped.storeReadFailed)
@@ -148,7 +149,10 @@ class SharedProviderReviewTest {
             store.invalidate()
             vault.entries = emptyList()
             gate.complete(Unit)
-            assertNull(old.await().connections[descriptor.id])
+            val invalidated = old.await()
+            assertNull(invalidated.connections[descriptor.id])
+            assertTrue(invalidated.invalidatedDuringLoad)
+            assertFalse(invalidated.storeReadFailed)
             assertNull(store.loadAll().connections[descriptor.id])
             assertEquals(2, vault.reads)
         } finally { gate.complete(Unit); root.deleteRecursively() }
@@ -206,5 +210,108 @@ class SharedProviderReviewTest {
             assertTrue(api.configuredProviders().none { it.providerId == descriptor.id })
             assertTrue(api.availableModels().none { it.providerId == descriptor.id })
         } finally { scope.cancel(); root.deleteRecursively() }
+    }
+
+    @Test fun `broker scope lookup recovers after host broker discovery changes`() {
+        var advertised = emptyList<ai.rever.boss.plugin.api.BrokerInfo>()
+        val source = BrokeredCredentialBridge.from(object : ai.rever.boss.plugin.api.BrokeredCredentialProvider {
+            override fun availableBrokers() = advertised
+            override suspend fun exchange(brokerId: String) =
+                Result.success(ai.rever.boss.plugin.api.BrokeredCredential("minted", 600))
+        })
+        assertFalse(source.permitsEndpoint("managed", descriptor.chatEndpoint))
+        advertised = listOf(ai.rever.boss.plugin.api.BrokerInfo("managed", "Managed", scopedTo = definition.baseUrl))
+        assertTrue(source.permitsEndpoint("managed", descriptor.chatEndpoint))
+        advertised = emptyList()
+        assertFalse(source.permitsEndpoint("managed", descriptor.chatEndpoint))
+    }
+
+    @Test fun `manual discovery refresh reuses minted credentials`() = runBlocking {
+        val root = Files.createTempDirectory("shared-narrow-refresh").toFile()
+        var mints = 0
+        val vault = Vault().also { it.entries = listOf(entry()) }
+        val store = ProviderCredentialStore(vault, env(root)).also {
+            it.brokeredKeys = object : BrokeredKeySource by broker {
+                override suspend fun fetch(brokerId: String): Result<BrokeredKey> {
+                    if (brokerId == "managed") mints++
+                    return broker.fetch(brokerId)
+                }
+            }
+        }
+        try {
+            store.loadAll()
+            val generation = store.invalidations.value
+            store.expireSharedDefinitions()
+            store.loadAll()
+            assertEquals(2, vault.reads)
+            assertEquals(1, mints)
+            assertEquals(generation, store.invalidations.value)
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun `transient discovery failure retains selection and consumer polling restores it`() = runBlocking {
+        val root = Files.createTempDirectory("shared-transient").toFile()
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        var now = 0L
+        val vault = Vault().also { it.entries = listOf(entry()) }
+        val store = ProviderCredentialStore(vault, env(root), monotonicNanos = { now })
+            .also { it.brokeredKeys = broker }
+        val catalog = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(
+            200 to """{"data":[{"id":"model","is_default":true}]}""",
+        ))))
+        try {
+            val vm = AiProvidersViewModel(
+                store = store, catalog = catalog, prefs = ActiveProviderPrefs(root), legacyImport = null,
+                splitViewOperations = null, scope = scope, envResolver = env(root),
+                ollamaSystemCheck = noOllamaOnThisMachine(),
+            )
+            val api = LlmProviderSettingsApiImpl(vm)
+            api.activeConfig()
+            withTimeout(10_000) { vm.catalogsLoaded.first { it } }
+            assertNotNull(api.activeConfig())
+            vault.fail = true
+            vm.refreshConnections()
+            withTimeout(10_000) { vm.state.first { it.sharedDiscoveryWarning != null } }
+            assertEquals(descriptor.id, vm.state.value.activeProviderId)
+            assertNull(api.activeConfig(), "Missing fresh credentials fail closed")
+            vault.fail = false
+            now = 16 * 1_000_000_000L
+            api.activeConfig()
+            withTimeout(10_000) { vm.state.first { it.sharedDiscoveryWarning == null } }
+            withTimeout(10_000) { catalog.states.first { it[descriptor.id] is CatalogState.Loaded } }
+            assertEquals(descriptor.id, api.activeConfig()?.providerId)
+            vault.fail = true
+            vm.refreshConnections()
+            withTimeout(10_000) { vm.state.first { it.sharedDiscoveryWarning != null } }
+            vault.fail = false
+            vault.entries = emptyList()
+            vm.refreshConnections()
+            withTimeout(10_000) { vm.state.first { it.sharedDiscoveryWarning == null } }
+            assertNull(vm.state.value.activeProviderId, "A complete scan after failure confirms revocation")
+            assertNotNull(vm.state.value.providerSelectionWarning)
+        } finally { scope.cancel(); root.deleteRecursively() }
+    }
+
+    @Test fun `first load retries an invalidated scan without a false storage failure`() = runBlocking {
+        val root = Files.createTempDirectory("shared-first-race").toFile()
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val gate = CompletableDeferred<Unit>()
+        val vault = Vault().also { it.entries = listOf(entry()); it.gate = gate }
+        val store = ProviderCredentialStore(vault, env(root)).also { it.brokeredKeys = broker }
+        try {
+            val vm = AiProvidersViewModel(
+                store = store, catalog = ModelCatalog(), prefs = ActiveProviderPrefs(root), legacyImport = null,
+                splitViewOperations = null, scope = scope, envResolver = env(root),
+                ollamaSystemCheck = noOllamaOnThisMachine(),
+            )
+            vm.ensureConnectionsLoaded()
+            withTimeout(10_000) { vault.entered.await() }
+            store.invalidate()
+            gate.complete(Unit)
+            withTimeout(10_000) { vm.connectionsLoaded.first { it } }
+            assertTrue(vm.state.value.storeAvailable)
+            assertNotNull(vm.state.value.connections[descriptor.id])
+            assertEquals(descriptor.id, vm.state.value.activeProviderId)
+        } finally { gate.complete(Unit); scope.cancel(); root.deleteRecursively() }
     }
 }
