@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.net.URI
 
@@ -46,6 +47,8 @@ internal data class SharedProviderDefinition(
     val baseUrl: String,
     val defaultForNewUsers: Boolean = false,
 ) {
+    fun canonicalNotes(): String = json.encodeToString(this)
+
     fun descriptor(
         secretId: String,
         sourceLabel: String = "Shared with you",
@@ -68,7 +71,23 @@ internal data class SharedProviderDefinition(
 
     companion object {
         const val TAG = "ai-provider-definition"
-        private val json = Json { ignoreUnknownKeys = true }
+        const val INERT_PASSWORD = "Managed by BOSS"
+        const val BOSS_AI_WEBSITE = "BOSS AI"
+        const val BOSS_AI_USERNAME = "BOSS sign-in"
+        const val BOSS_AI_BROKER = "boss-ai"
+        const val BOSS_AI_BASE_URL = "https://api.risaboss.com/functions/v1/boss-ai/v1"
+        private val json = Json {
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+        }
+
+        fun bossAi(): SharedProviderDefinition = SharedProviderDefinition(
+            schema = "boss-managed-provider-v1",
+            name = BOSS_AI_WEBSITE,
+            brokerId = BOSS_AI_BROKER,
+            baseUrl = BOSS_AI_BASE_URL,
+            defaultForNewUsers = true,
+        )
         fun isShared(id: String): Boolean = id.startsWith("shared:")
 
         fun parse(notes: String?): SharedProviderDefinition? = runCatching {

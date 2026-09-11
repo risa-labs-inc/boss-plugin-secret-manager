@@ -44,6 +44,15 @@ class SharedProviderTest {
         override suspend fun fetch(brokerId: String) = if (brokerId == "managed") Result.success(BrokeredKey("session-derived", 600)) else Result.failure(IllegalStateException("Unknown broker"))
     }
 
+    @Test fun `canonical BOSS AI request is discoverable inert metadata`() {
+        val request = bossAiDefinitionRequest()
+        assertEquals(SharedProviderDefinition.BOSS_AI_WEBSITE, request.website)
+        assertEquals(SharedProviderDefinition.BOSS_AI_USERNAME, request.username)
+        assertEquals(SharedProviderDefinition.INERT_PASSWORD, request.password)
+        assertEquals(listOf(SharedProviderDefinition.TAG), request.tags)
+        assertEquals(SharedProviderDefinition.bossAi(), SharedProviderDefinition.parse(request.notes))
+    }
+
     private fun env(root: java.io.File) = EnvResolver(root, processEnv = { null }, systemProperty = { null }, useLaunchctl = false)
 
     @Test fun `shared notes cannot redirect credentials outside the host scope`() {

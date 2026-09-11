@@ -375,6 +375,18 @@ ids from secret UUIDs. They are per-ViewModel descriptors, never mutations to th
 process-global `ProviderRegistry`. The owner controls the shared configuration;
 recipients keep model selections in local preferences and never write the share.
 
+**Publishing has a supported path; the tag is not an operator-only database trick.** The Add
+menu's `Add BOSS AI provider` action creates the canonical inert vault entry (or repairs the
+matching hand-created entry) with the `ai-provider-definition` tag. Distribution still uses the
+existing Share dialog, so its `secret.share.role` UI gate and the server's role-share authorization
+remain the authority. The MCP equivalent is deliberately narrow: `managed_ai_provider_publish`
+takes an existing owned entry and an exact role name (resolved internally to its id), accepts only a valid `boss-managed-provider-v1`
+definition whose password is exactly the inert `Managed by BOSS` placeholder, canonicalizes its
+notes, adds the tag, then calls the same share API. It never exposes a general agent-directed way
+to share arbitrary secrets. Creation and sharing cannot be one generic `secret_create` call because
+the host API returns `Unit`, not the new secret id; the explicit existing id makes retries
+deterministic and the server's share upsert makes them idempotent.
+
 The host broker owns the credential destination. Both catalog and inference URLs
 must fit its `BrokerInfo.scopedTo` boundary before minting. Shared definitions
 contain no upstream key; broker credentials stay in memory. Account-specific

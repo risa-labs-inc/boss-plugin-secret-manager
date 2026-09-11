@@ -5,10 +5,16 @@ import ai.rever.boss.plugin.api.McpToolDefinition
 import ai.rever.boss.plugin.api.McpToolHandler
 import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
+import ai.rever.boss.plugin.api.FilterOperator
+import ai.rever.boss.plugin.api.QueryFilter
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.api.SecretEntryWithSharingData
+import ai.rever.boss.plugin.api.ShareSecretRequestData
+import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.managedProviderUpdate
+import kotlinx.serialization.json.Json
 
 /**
  * MCP tools contributed by the Secret Manager plugin.
@@ -22,6 +28,8 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 internal class SecretManagerMcpToolProvider(
     override val providerId: String,
     private val secrets: SecretDataProvider,
+    /** Resolves role names exactly as the existing Share dialog does. */
+    private val supabase: SupabaseDataProvider?,
     /**
      * Invalidated after any write, for the same reason the panel's CRUD paths do it: the
      * AI provider cache is keyed off these same secrets, so an agent deleting an
@@ -212,6 +220,57 @@ internal class SecretManagerMcpToolProvider(
             },
         ),
         McpToolDefinition(
+            name = "managed_ai_provider_publish",
+            description = "Validate and tag an inert managed AI provider definition, then share only that definition with a role. " +
+                "Pass an exact role name from roles_list. Role sharing is permission-checked by the server.",
+            inputSchema = MANAGED_PROVIDER_PUBLISH_SCHEMA,
+            readOnly = false,
+            handler = McpToolHandler { args ->
+                val id = args.string("id")
+                    ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
+                val roleName = args.string("target_role")
+                    ?: return@McpToolHandler McpToolResult(
+                        "Missing required argument: target_role",
+                        isError = true,
+                    )
+                val roleId = roleIdByName(roleName).getOrElse { error ->
+                    return@McpToolHandler McpToolResult("Refused: ${error.message}", isError = true)
+                }
+                val entry = findById(id)
+                    ?: return@McpToolHandler McpToolResult("No owned secret with id $id", isError = true)
+                val update = managedProviderUpdate(entry).getOrElse { error ->
+                    return@McpToolHandler McpToolResult("Refused: ${error.message}", isError = true)
+                }
+
+                val updated = secrets.updateSecret(update)
+                if (updated.isFailure) {
+                    return@McpToolHandler McpToolResult(
+                        "Failed to prepare the managed provider: ${updated.exceptionOrNull()?.message}",
+                        isError = true,
+                    )
+                }
+                aiProviderStore.invalidate()
+
+                secrets.shareSecret(
+                    ShareSecretRequestData(
+                        secretId = id,
+                        targetRoleId = roleId,
+                        notes = "Managed AI provider definition",
+                    ),
+                ).fold(
+                    onSuccess = {
+                        McpToolResult("Published managed AI provider $id to role $roleName.")
+                    },
+                    onFailure = { error ->
+                        McpToolResult(
+                            "Prepared managed AI provider $id, but sharing failed: ${error.message}",
+                            isError = true,
+                        )
+                    },
+                )
+            },
+        ),
+        McpToolDefinition(
             name = "secret_create",
             description = "Create a new secret (website, username, password, optional notes).",
             inputSchema = CREATE_SCHEMA,
@@ -335,6 +394,19 @@ internal class SecretManagerMcpToolProvider(
      */
     private suspend fun findById(id: String): SecretEntryData? =
         secrets.getUserSecrets(limit = 500).getOrNull()?.data?.firstOrNull { it.id == id }
+
+    private suspend fun roleIdByName(name: String): Result<String> {
+        val provider = supabase ?: return Result.failure(IllegalStateException("Role lookup is unavailable on this host."))
+        return provider.select(
+            table = "roles",
+            columns = "id,name",
+            filters = listOf(QueryFilter("name", FilterOperator.EQ, name)),
+        ).mapCatching { body ->
+            val roles = roleJson.decodeFromString<List<ShareRoleRow>>(body)
+            require(roles.size == 1) { "No unique role named '$name' exists." }
+            roles.single().id
+        }
+    }
 
     /**
      * What a bounded search can honestly conclude.
@@ -491,5 +563,8 @@ internal class SecretManagerMcpToolProvider(
             """{"type":"object","properties":{"query":{"type":"string","description":"Search text."}},"required":["query"]}"""
         const val CREATE_SCHEMA =
             """{"type":"object","properties":{"website":{"type":"string"},"username":{"type":"string"},"password":{"type":"string"},"notes":{"type":"string"}},"required":["website","username","password"]}"""
+        const val MANAGED_PROVIDER_PUBLISH_SCHEMA =
+            """{"type":"object","properties":{"id":{"type":"string","description":"Owned inert provider-definition secret id."},"target_role":{"type":"string","description":"Exact role name from roles_list, for example user."}},"required":["id","target_role"]}"""
+        val roleJson = Json { ignoreUnknownKeys = true }
     }
 }

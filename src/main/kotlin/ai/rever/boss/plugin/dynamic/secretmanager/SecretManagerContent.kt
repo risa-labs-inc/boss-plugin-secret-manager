@@ -178,6 +178,7 @@ private fun SecretManagerView(
     // key is right - the supplier reads a field that is set once, before any panel is created.
     val aiViewModel = remember { aiProvidersViewModel() }
     var showAddDropdown by remember { mutableStateOf(false) }
+    var showBossAiDefinitionDialog by remember { mutableStateOf(false) }
 
     // Fetch on first entry into the section, not on panel open: this is a second secrets RPC
     // and most panel opens never reach the section. Re-runs only when the section changes.
@@ -328,6 +329,36 @@ private fun SecretManagerView(
                             }
                         }
 
+                        // A global managed provider is inert metadata, not an upstream key.
+                        // Only users who can perform the eventual role share get the shortcut;
+                        // the share itself still goes through the existing server-enforced dialog.
+                        if (state.canShareWithRoles) {
+                            DropdownMenuItem(
+                                onClick = {
+                                    showAddDropdown = false
+                                    onSelectSection(SecretPanelSection.SECRETS)
+                                    showBossAiDefinitionDialog = true
+                                }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = BossThemeColors.TextSecondary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        "Add BOSS AI provider",
+                                        color = BossThemeColors.TextPrimary,
+                                        style = SecretPanelType.body
+                                    )
+                                }
+                            }
+                        }
+
                         // Named for the job, not the mechanism. "Create API Key" was the third
                         // unrelated thing in this panel called an API key - alongside an AI
                         // provider's key and the "this is an API key" tag on an ordinary secret -
@@ -433,6 +464,16 @@ private fun SecretManagerView(
             onConfirm = { viewModel.createSecret(it) },
             onDismiss = { viewModel.hideCreateDialog() },
             isLoading = state.isOperationInProgress
+        )
+    }
+
+    if (showBossAiDefinitionDialog) {
+        BossAiDefinitionDialog(
+            onConfirm = {
+                showBossAiDefinitionDialog = false
+                viewModel.prepareBossAiProviderDefinition()
+            },
+            onDismiss = { showBossAiDefinitionDialog = false },
         )
     }
 
@@ -1293,6 +1334,45 @@ private fun TagBadge(tag: String) {
 }
 
 // ==================== DIALOGS ====================
+
+@Composable
+private fun BossAiDefinitionDialog(
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    BossAlertDialog(
+        onDismissRequest = onDismiss,
+        backgroundColor = BossThemeColors.SurfaceColor,
+        title = {
+            Text("Add BOSS AI provider", color = BossThemeColors.TextPrimary, style = SecretPanelType.title)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Creates a credential-free provider definition in your encrypted vault. " +
+                        "If you already created the documented BOSS AI entry, it will be repaired and tagged instead.",
+                    color = BossThemeColors.TextPrimary,
+                    style = SecretPanelType.body,
+                )
+                Text(
+                    "Afterwards, use Share on its card and select Roles → user to publish it to everyone.",
+                    color = BossThemeColors.TextSecondary,
+                    style = SecretPanelType.meta,
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) {
+                Text("Prepare provider")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = BossThemeColors.TextSecondary)
+            }
+        },
+    )
+}
 
 @Composable
 private fun CreateSecretDialog(

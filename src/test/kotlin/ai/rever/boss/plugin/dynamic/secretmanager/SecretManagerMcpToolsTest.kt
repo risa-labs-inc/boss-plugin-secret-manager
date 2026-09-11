@@ -4,21 +4,26 @@ import ai.rever.boss.plugin.api.CreateSecretRequestData
 import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.api.PaginatedSecretsData
 import ai.rever.boss.plugin.api.PaginatedSecretsWithSharingData
+import ai.rever.boss.plugin.api.QueryFilter
+import ai.rever.boss.plugin.api.QueryRange
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.api.SecretEntryWithSharingData
 import ai.rever.boss.plugin.api.SecretShareData
 import ai.rever.boss.plugin.api.ShareSecretRequestData
+import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.api.UnshareSecretRequestData
 import ai.rever.boss.plugin.api.UpdateSecretRequestData
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.EnvResolver
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.SharedProviderDefinition
 import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -49,7 +54,7 @@ class SecretManagerMcpToolsTest {
         store: ProviderCredentialStore,
         secrets: SecretDataProvider,
         name: String,
-    ) = SecretManagerMcpToolProvider("test", secrets, store)
+    ) = SecretManagerMcpToolProvider("test", secrets, FakeSupabase, store)
         .tools()
         .single { it.name == name }
 
@@ -99,6 +104,47 @@ class SecretManagerMcpToolsTest {
             assertFalse(result.isError, result.text)
             assertEquals(1, secrets.created.size)
             assertTrue(store.invalidations.value > before, "create did not invalidate the cache")
+        }
+
+    @Test
+    fun `managed provider publish canonicalizes tags shares and invalidates`() =
+        runTest {
+            val entry = managedProviderSecret("managed-1")
+            val (store, secrets) = storeWith(listOf(entry))
+            val before = store.invalidations.value
+
+            val result =
+                tool(store, secrets, "managed_ai_provider_publish")
+                    .handler
+                    .call(McpToolArgs(mapOf("id" to entry.id, "target_role" to "user")))
+
+            assertFalse(result.isError, result.text)
+            val update = assertNotNull(secrets.updated.singleOrNull())
+            assertTrue(update.tags.contains(SharedProviderDefinition.TAG))
+            assertEquals(SharedProviderDefinition.INERT_PASSWORD, update.password)
+            assertEquals(SharedProviderDefinition.bossAi(), SharedProviderDefinition.parse(update.notes))
+            assertEquals("role-user", secrets.shared.single().targetRoleId)
+            assertTrue(store.invalidations.value > before, "publish did not invalidate discovery")
+        }
+
+    @Test
+    fun `managed provider publish refuses malformed or credential bearing secrets`() =
+        runTest {
+            val valid = managedProviderSecret("managed-1")
+            for (entry in listOf(valid.copy(notes = "not-json"), valid.copy(password = "real-secret"))) {
+                val (store, secrets) = storeWith(listOf(entry))
+                val before = store.invalidations.value
+
+                val result =
+                    tool(store, secrets, "managed_ai_provider_publish")
+                        .handler
+                        .call(McpToolArgs(mapOf("id" to entry.id, "target_role" to "user")))
+
+                assertTrue(result.isError)
+                assertTrue(secrets.updated.isEmpty())
+                assertTrue(secrets.shared.isEmpty())
+                assertEquals(before, store.invalidations.value)
+            }
         }
 
     @Test
@@ -708,7 +754,30 @@ class SecretManagerMcpToolsTest {
         updatedAt = "2026-01-01",
     )
 
+    private fun managedProviderSecret(id: String) = SecretEntryData(
+        id = id,
+        website = SharedProviderDefinition.BOSS_AI_WEBSITE,
+        username = SharedProviderDefinition.BOSS_AI_USERNAME,
+        password = SharedProviderDefinition.INERT_PASSWORD,
+        notes = SharedProviderDefinition.bossAi().canonicalNotes(),
+        createdAt = "2026-01-01",
+        updatedAt = "2026-01-01",
+    )
+
     private companion object {
+        val FakeSupabase =
+            object : SupabaseDataProvider {
+                override suspend fun select(
+                    table: String,
+                    columns: String,
+                    filters: List<QueryFilter>,
+                    range: QueryRange?,
+                ): Result<String> = Result.success("""[{"id":"role-user","name":"user"}]""")
+
+                override suspend fun rpc(function: String, parameters: String): Result<String> =
+                    Result.failure(UnsupportedOperationException())
+            }
+
         /**
          * The distinguishing half of the truncation notice. Deliberately a fragment rather
          * than the whole line: the tests are about whether the notice is present, not about
@@ -773,6 +842,8 @@ class SecretManagerMcpToolsTest {
         var emptyPageClaimsMore: Boolean = false,
     ) : SecretDataProvider {
         val created = mutableListOf<CreateSecretRequestData>()
+        val updated = mutableListOf<UpdateSecretRequestData>()
+        val shared = mutableListOf<ShareSecretRequestData>()
         val deleted = mutableListOf<String>()
         var failWrites = false
 
@@ -806,8 +877,11 @@ class SecretManagerMcpToolsTest {
             return Result.success(Unit)
         }
 
-        override suspend fun updateSecret(request: UpdateSecretRequestData): Result<Unit> =
-            Result.success(Unit)
+        override suspend fun updateSecret(request: UpdateSecretRequestData): Result<Unit> {
+            if (failWrites) return Result.failure(IllegalStateException("write refused"))
+            updated += request
+            return Result.success(Unit)
+        }
 
         override suspend fun getUserSecretsWithSharingInfo(
             limit: Int,
@@ -836,8 +910,11 @@ class SecretManagerMcpToolsTest {
         override suspend fun getSecretShares(secretId: String): Result<List<SecretShareData>> =
             Result.failure(UnsupportedOperationException())
 
-        override suspend fun shareSecret(request: ShareSecretRequestData): Result<Unit> =
-            Result.failure(UnsupportedOperationException())
+        override suspend fun shareSecret(request: ShareSecretRequestData): Result<Unit> {
+            if (failWrites) return Result.failure(IllegalStateException("write refused"))
+            shared += request
+            return Result.success(Unit)
+        }
 
         override suspend fun unshareSecret(request: UnshareSecretRequestData): Result<Unit> =
             Result.failure(UnsupportedOperationException())
