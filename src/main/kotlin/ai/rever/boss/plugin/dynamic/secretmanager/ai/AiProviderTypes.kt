@@ -128,6 +128,8 @@ data class ProviderDescriptor(
     val brokerId: String? = null,
     /** Only shared provider definitions can supply this recommendation. */
     val sharedDefault: Boolean = false,
+    /** Untrusted provenance label shown for a vault-delivered definition. */
+    val sharedSourceLabel: String? = null,
 ) {
     /** Whether a model id is embedded into [chatEndpoint] rather than sent in the body. */
     val needsModelInEndpoint: Boolean
@@ -272,6 +274,9 @@ fun interface BrokeredKeySource {
     val supportsSharedProviders: Boolean get() = false
     /** Host-owned destination check, mandatory for descriptors read from shared notes. */
     fun permitsEndpoint(brokerId: String, endpoint: String): Boolean = false
+    /** Check one definition against a single snapshot of the host broker registry. */
+    fun permitsEndpoints(brokerId: String, endpoints: List<String>): Boolean =
+        endpoints.all { permitsEndpoint(brokerId, it) }
 }
 
 /**

@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.CreateSecretRequestData
 import ai.rever.boss.plugin.api.SecretDataProvider
 import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.api.UpdateSecretRequestData
+import ai.rever.boss.plugin.dynamic.secretmanager.SecretAccess
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.CancellationException
@@ -154,6 +155,8 @@ class ProviderCredentialStore(
     private data class SharedDefinitions(
         val descriptors: List<ProviderDescriptor>,
         val warning: String? = null,
+        val stored: Map<String, StoredProvider> = emptyMap(),
+        val removalAuthoritative: Boolean = true,
     )
 
     private data class CachedSharedDefinitions(
@@ -213,9 +216,16 @@ class ProviderCredentialStore(
     /** Read every provider's effective connection. */
     suspend fun loadAll(): ConnectionsSnapshot {
         val startedAt = generation.get()
-        val storedResult = loadStoredSecrets()
-        val stored = storedResult.getOrElse { emptyMap() }
         val shared = loadSharedDefinitions()
+        // The sharing RPC is a superset of the owned-secret list. A successful shared
+        // scan therefore supplies both views and avoids a second full-vault traversal.
+        // On failure, fall back to the narrower API so personal credentials still work.
+        val storedResult = if (shared.isSuccess && brokeredKeys?.supportsSharedProviders == true) {
+            Result.success(shared.getOrThrow().stored)
+        } else {
+            loadStoredSecrets()
+        }
+        val stored = storedResult.getOrElse { emptyMap() }
         val descriptors = ProviderRegistry.all + shared.getOrNull()?.descriptors.orEmpty()
 
         val connections =
@@ -236,7 +246,7 @@ class ProviderCredentialStore(
             connections = connections,
             storeReadFailed = storedResult.isFailure,
             descriptors = descriptors,
-            sharedDiscoveryComplete = shared.isSuccess && shared.getOrNull()?.warning == null,
+            sharedDiscoveryComplete = shared.isSuccess && shared.getOrNull()?.removalAuthoritative == true,
             sharedDiscoveryWarning = if (shared.isFailure) {
                 "Shared AI providers could not be refreshed. Retry using Refresh."
             } else shared.getOrNull()?.warning,
@@ -262,26 +272,47 @@ class ProviderCredentialStore(
         }
         if (generation.get() == startedAt) {
             cachedShared = CachedSharedDefinitions(result, startedAt, monotonicNanos())
+            result.getOrNull()?.let { cached = it.stored }
         }
         result
     }
 
     private suspend fun scanSharedDefinitions(broker: BrokeredKeySource): SharedDefinitions {
         val found = mutableMapOf<String, ProviderDescriptor>()
+        val stored = mutableMapOf<String, StoredProvider>()
         var offset = 0
         var warning: String? = null
+        var removalAuthoritative = true
         while (true) {
             val page = secrets.getUserSecretsWithSharingInfo(limit = PAGE_SIZE, offset = offset).getOrThrow()
             for (entry in page.data) {
+                if (!SecretAccess.isShare(entry.accessLevel) && entry.tags.contains(TAG_AI_PROVIDER)) {
+                    val providerId = providerIdOf(entry.website, entry.tags) ?: continue
+                    stored.putIfAbsent(
+                        providerId,
+                        toStored(providerId, entry.id, entry.password, entry.username, entry.notes),
+                    )
+                }
                 if (!entry.tags.contains(SharedProviderDefinition.TAG)) continue
                 val definition = SharedProviderDefinition.parse(entry.notes) ?: continue
-                val descriptor = definition.descriptor(entry.id)
+                val sharedBy = entry.sharedByEmail?.filterNot(Char::isISOControl)?.trim()?.take(100)
+                val source = when {
+                    SecretAccess.isShare(entry.accessLevel) && !sharedBy.isNullOrBlank() ->
+                        "Shared by $sharedBy"
+                    SecretAccess.isShare(entry.accessLevel) -> "Shared with you"
+                    entry.accessLevel.equals(SecretAccess.ORG, ignoreCase = true) -> "Managed by your organisation"
+                    else -> "Managed from your vault"
+                }
+                val descriptor = definition.descriptor(entry.id, source)
                 val modelsEndpoint = descriptor.modelsEndpoint ?: continue
-                if (!broker.permitsEndpoint(definition.brokerId, descriptor.chatEndpoint) ||
-                    !broker.permitsEndpoint(definition.brokerId, modelsEndpoint)) {
+                if (!broker.permitsEndpoints(
+                        definition.brokerId,
+                        listOf(descriptor.chatEndpoint, modelsEndpoint),
+                    )) {
                     // Scope refusal can mean an unavailable host broker, not vault revocation.
                     // Omit credentials, but do not clear the user's selected id based on this scan.
                     warning = "Some shared AI definitions are unavailable within this host's broker scopes."
+                    removalAuthoritative = false
                     continue
                 }
                 found.putIfAbsent(descriptor.id, descriptor)
@@ -290,6 +321,7 @@ class ProviderCredentialStore(
             offset += page.data.size
             if (offset >= MAX_SCANNED) {
                 warning = "Shared AI discovery reached its scan limit; some providers may not be listed."
+                removalAuthoritative = false
                 logger.warn(LogCategory.NETWORK, warning)
                 break
             }
@@ -297,7 +329,13 @@ class ProviderCredentialStore(
         if (found.size > MAX_SHARED_PROVIDERS) {
             warning = "Shared AI discovery reached its provider limit; some providers may not be listed."
         }
-        return SharedDefinitions(found.values.sortedBy { it.id }.take(MAX_SHARED_PROVIDERS), warning)
+        return SharedDefinitions(
+            descriptors = found.values.sortedBy { it.id }.take(MAX_SHARED_PROVIDERS),
+            warning = warning,
+            stored = stored.toMap(),
+            // A provider over the admission cap is unavailable by policy, not unknown.
+            removalAuthoritative = removalAuthoritative,
+        )
     }
 
     /**
@@ -534,8 +572,14 @@ class ProviderCredentialStore(
         // invalidation.
         val startedAt = generation.get()
 
-        return source
-            .fetch(brokerId)
+        val fetched = try {
+            source.fetch(brokerId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
+        }
+        return fetched
             .fold(
                 onSuccess = { credential ->
                     lastMintFailureNanos.remove(brokerId)
@@ -762,20 +806,30 @@ class ProviderCredentialStore(
      * names a known provider, so an entry whose website was edited by hand still
      * resolves.
      */
-    private fun providerIdOf(entry: SecretEntryData): String? =
-        ProviderRegistry.find(entry.website)?.id
-            ?: entry.tags.firstNotNullOfOrNull { tag -> ProviderRegistry.find(tag)?.id }
+    private fun providerIdOf(entry: SecretEntryData): String? = providerIdOf(entry.website, entry.tags)
+
+    private fun providerIdOf(website: String, tags: List<String>): String? =
+        ProviderRegistry.find(website)?.id
+            ?: tags.firstNotNullOfOrNull { tag -> ProviderRegistry.find(tag)?.id }
 
     private fun toStored(
         providerId: String,
         entry: SecretEntryData,
+    ): StoredProvider = toStored(providerId, entry.id, entry.password, entry.username, entry.notes)
+
+    private fun toStored(
+        providerId: String,
+        secretId: String,
+        password: String,
+        username: String,
+        notes: String?,
     ): StoredProvider =
         StoredProvider(
-            secretId = entry.id,
+            secretId = secretId,
             providerId = providerId,
-            apiKey = entry.password,
-            label = entry.username.takeIf { it.isNotBlank() },
-            settings = parseSettings(entry.notes),
+            apiKey = password,
+            label = username.takeIf { it.isNotBlank() },
+            settings = parseSettings(notes),
         )
 
     /**

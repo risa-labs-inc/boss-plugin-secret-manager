@@ -30,6 +30,11 @@ internal object BrokeredCredentialBridge {
                     endpoint, provider.availableBrokers().firstOrNull { it.id == brokerId }?.scopedTo,
                 )
 
+            override fun permitsEndpoints(brokerId: String, endpoints: List<String>): Boolean {
+                val scope = provider.availableBrokers().firstOrNull { it.id == brokerId }?.scopedTo
+                return endpoints.all { SharedProviderDefinition.withinScope(it, scope) }
+            }
+
             override suspend fun fetch(brokerId: String): Result<BrokeredKey> = provider.exchange(brokerId).map { credential ->
                 BrokeredKey(
                     token = credential.token,

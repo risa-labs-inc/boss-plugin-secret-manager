@@ -422,6 +422,9 @@ class AiProvidersViewModel(
 
             _state.update { current ->
                 val preferred = current.activeProviderId ?: storedActive
+                val savedShareRemoved = snapshot?.sharedDiscoveryComplete != false &&
+                    preferred?.let(SharedProviderDefinition::isShared) == true &&
+                    descriptors.none { it.id == preferred }
                 current.copy(
                     connections = connections,
                     providers = descriptors,
@@ -431,6 +434,10 @@ class AiProvidersViewModel(
                     } else initialProviderId(preferred, descriptors, connections),
                     storeAvailable = store != null && snapshot?.storeReadFailed != true,
                     sharedDiscoveryWarning = snapshot?.sharedDiscoveryWarning,
+                    providerSelectionWarning = if (savedShareRemoved) {
+                        "The previously selected shared AI provider is unavailable. " +
+                            "Choose an available provider in AI settings."
+                    } else current.providerSelectionWarning,
                     error = current.error.takeUnless { it == LOAD_RETRY_MESSAGE },
                 )
             }
@@ -476,7 +483,7 @@ class AiProvidersViewModel(
     }
 
     /** Load credentials, seed cached model lists, then refresh anything stale. */
-    fun load() {
+    fun load(): Job {
         connectionsLoadStarted.set(true)
         catalogsLoadStarted.set(true)
         val catalogRequestedAtNanos = monotonicNanos()
@@ -486,7 +493,7 @@ class AiProvidersViewModel(
         // from load() to a state still reading `isLoading = false` is being told the load
         // already finished. Nothing about the flag needs the coroutine.
         _state.update { it.copy(isLoading = true, error = null) }
-        scope.launch {
+        return scope.launch {
             // Re-read the environment on every entry into the section. The panel tells
             // users they can unset a variable to take key management over in BOSS, and the
             // resolver memoises misses as well as hits — so without this that instruction
@@ -1193,7 +1200,7 @@ class AiProvidersViewModel(
      */
     fun refreshConnections(): Job = scope.launch(Dispatchers.IO) {
         store?.expireSharedDefinitions()
-        if (!_connectionsLoaded.value) load() else reloadConnectionsSafely()
+        if (!_connectionsLoaded.value) load().join() else reloadConnectionsSafely()
     }
 
     private suspend fun reloadConnectionsSafely() {

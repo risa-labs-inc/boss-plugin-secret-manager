@@ -453,12 +453,21 @@ private fun ProviderRow(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         StatusDot(connection.source, noKeyNeeded = !descriptor.requiresApiKey)
-        Text(
-            text = descriptor.displayName,
-            style = SecretPanelType.body,
-            color = BossThemeColors.TextPrimary,
-            modifier = Modifier.weight(1f),
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = descriptor.displayName,
+                style = SecretPanelType.body,
+                color = BossThemeColors.TextPrimary,
+            )
+            descriptor.sharedSourceLabel?.let { source ->
+                Text(
+                    text = source,
+                    style = SecretPanelType.caption,
+                    color = BossThemeColors.TextMuted,
+                    maxLines = 1,
+                )
+            }
+        }
         if (isActive) {
             Text(
                 text = "Active",

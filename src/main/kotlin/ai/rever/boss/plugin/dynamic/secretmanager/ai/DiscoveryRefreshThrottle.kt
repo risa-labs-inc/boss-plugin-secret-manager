@@ -9,11 +9,12 @@ internal class DiscoveryRefreshThrottle(
     private val nowNanos: () -> Long,
 ) {
     private val inFlight = AtomicBoolean(false)
-    private val finishedAt = AtomicLong(Long.MIN_VALUE / 2)
+    private val hasFinished = AtomicBoolean(false)
+    private val finishedAt = AtomicLong(0)
 
     fun begin(): Boolean {
         if (!inFlight.compareAndSet(false, true)) return false
-        if (nowNanos() - finishedAt.get() < intervalMs * 1_000_000L) {
+        if (hasFinished.get() && nowNanos() - finishedAt.get() < intervalMs * 1_000_000L) {
             inFlight.set(false)
             return false
         }
@@ -22,6 +23,7 @@ internal class DiscoveryRefreshThrottle(
 
     fun finish() {
         finishedAt.set(nowNanos())
+        hasFinished.set(true)
         inFlight.set(false)
     }
 }

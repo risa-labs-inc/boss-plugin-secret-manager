@@ -87,6 +87,25 @@ class SharedProviderReviewTest {
         assertEquals(descriptor.id, initialProviderId(null, descriptors, mapOf(descriptor.id to connection)))
     }
 
+    @Test fun `revoked saved share warns before startup falls back`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("shared-startup-revoked").toFile()
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val prefs = ActiveProviderPrefs(root)
+        prefs.write("shared:revoked")
+        val store = ProviderCredentialStore(Vault(), env(root)).also { it.brokeredKeys = broker }
+        try {
+            val vm = AiProvidersViewModel(
+                store = store, catalog = ModelCatalog(ModelCatalogClient(QueuedHttpClient(emptyList()))),
+                prefs = prefs, legacyImport = null, splitViewOperations = null, scope = scope,
+                envResolver = env(root), ollamaSystemCheck = noOllamaOnThisMachine(),
+            )
+            vm.ensureConnectionsLoaded()
+            withTimeout(10_000) { vm.connectionsLoaded.first { it } }
+            assertFalse(vm.state.value.activeProviderId == "shared:revoked")
+            assertNotNull(vm.state.value.providerSelectionWarning)
+        } finally { scope.cancel(); root.deleteRecursively() }
+    }
+
     @Test fun `shared discovery caches success and empty results until expiry or invalidation`() = runBlocking {
         val root = Files.createTempDirectory("shared-cache").toFile()
         var now = 0L
@@ -218,16 +237,35 @@ class SharedProviderReviewTest {
 
     @Test fun `broker scope lookup recovers after host broker discovery changes`() {
         var advertised = emptyList<ai.rever.boss.plugin.api.BrokerInfo>()
+        var reads = 0
         val source = BrokeredCredentialBridge.from(object : ai.rever.boss.plugin.api.BrokeredCredentialProvider {
-            override fun availableBrokers() = advertised
+            override fun availableBrokers(): List<ai.rever.boss.plugin.api.BrokerInfo> {
+                reads++
+                return advertised
+            }
             override suspend fun exchange(brokerId: String) =
                 Result.success(ai.rever.boss.plugin.api.BrokeredCredential("minted", 600))
         })
         assertFalse(source.permitsEndpoint("managed", descriptor.chatEndpoint))
         advertised = listOf(ai.rever.boss.plugin.api.BrokerInfo("managed", "Managed", scopedTo = definition.baseUrl))
         assertTrue(source.permitsEndpoint("managed", descriptor.chatEndpoint))
+        reads = 0
+        assertTrue(source.permitsEndpoints("managed", listOf(descriptor.chatEndpoint, descriptor.modelsEndpoint!!)))
+        assertEquals(1, reads, "One definition must use one broker-registry snapshot")
         advertised = emptyList()
         assertFalse(source.permitsEndpoint("managed", descriptor.chatEndpoint))
+    }
+
+    @Test fun `provider admission cap warns without making a complete vault scan ambiguous`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("shared-provider-cap").toFile()
+        val vault = Vault().also { it.entries = (0 until 33).map { index -> entry("%02d".format(index)) } }
+        val store = ProviderCredentialStore(vault, env(root)).also { it.brokeredKeys = broker }
+        try {
+            val snapshot = store.loadAll()
+            assertEquals(32, snapshot.descriptors.count { SharedProviderDefinition.isShared(it.id) })
+            assertTrue(snapshot.sharedDiscoveryComplete)
+            assertNotNull(snapshot.sharedDiscoveryWarning)
+        } finally { root.deleteRecursively() }
     }
 
     @Test fun `manual discovery refresh reuses minted credentials`() = runBlocking {
@@ -387,6 +425,8 @@ class SharedProviderReviewTest {
             it.brokeredKeys = object : BrokeredKeySource by broker {
                 override fun permitsEndpoint(brokerId: String, endpoint: String) =
                     advertised.get() && broker.permitsEndpoint(brokerId, endpoint)
+                override fun permitsEndpoints(brokerId: String, endpoints: List<String>) =
+                    advertised.get() && broker.permitsEndpoints(brokerId, endpoints)
             }
         }
         val catalog = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(
@@ -424,6 +464,22 @@ class SharedProviderReviewTest {
             vault.onRead = null
             assertNotNull(store.loadAll().connections[descriptor.id])
             assertEquals(2, vault.reads)
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun `a throwing host broker fails closed without escaping the provider load`() = runBlocking {
+        val root = Files.createTempDirectory("shared-broker-throw").toFile()
+        val vault = Vault().also { it.entries = listOf(entry()) }
+        val store = ProviderCredentialStore(vault, env(root)).also {
+            it.brokeredKeys = object : BrokeredKeySource by broker {
+                override suspend fun fetch(brokerId: String): Result<BrokeredKey> =
+                    throw IllegalStateException("host bridge failed")
+            }
+        }
+        try {
+            val snapshot = store.loadAll()
+            assertEquals(CredentialSource.NONE, snapshot.connections[descriptor.id]?.source)
+            assertEquals("", snapshot.connections[descriptor.id]?.apiKey)
         } finally { root.deleteRecursively() }
     }
 

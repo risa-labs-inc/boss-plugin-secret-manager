@@ -23,10 +23,11 @@ class SharedProviderTest {
     private val base = "https://api.example/v1"
     private val notes = """{"schema":"boss-managed-provider-v1","name":"Shared AI","brokerId":"managed","baseUrl":"$base","defaultForNewUsers":true}"""
 
-    private fun entry(id: String = "secret-id", note: String = notes) = SecretEntryWithSharingData(
+    private fun entry(id: String = "secret-id", note: String = notes, sharedBy: String? = null) = SecretEntryWithSharingData(
         id = id, website = "Shared AI", username = "BOSS sign-in", password = "",
         notes = note, tags = listOf(SharedProviderDefinition.TAG), createdAt = "", updatedAt = "",
         isOwner = false, accessLevel = "read",
+        sharedByEmail = sharedBy,
     )
 
     private class SharedStore(val delegate: FakeSecretDataProvider, var entries: List<SecretEntryWithSharingData>) : SecretDataProvider by delegate {
@@ -51,21 +52,38 @@ class SharedProviderTest {
         }
         assertTrue(SharedProviderDefinition.withinScope("$base/models", base))
         assertNull(SharedProviderDefinition.parse(notes.replace("boss-managed-provider-v1", "unknown-v2")))
+        assertEquals(
+            "OfficialBOSS",
+            SharedProviderDefinition.parse(notes.replace("Shared AI", "Official\nBOSS"))?.name,
+        )
+        assertNull(SharedProviderDefinition.parse(notes.replace("Shared AI", "x".repeat(101))))
+        assertNull(SharedProviderDefinition.parse(notes.replace("managed", "")))
+        assertNull(SharedProviderDefinition.parse(notes.replace(base, "https://api.example/" + "x".repeat(2048))))
     }
 
     @Test fun `shared providers are paged discovered minted and removed without writes`() = runBlocking {
         val root = Files.createTempDirectory("shared-provider-test").toFile()
         val fake = FakeSecretDataProvider(emptyList())
-        val entries = (0..160).map { entry("$it") }
+        val ownedOpenAi = SecretEntryWithSharingData(
+            id = "own", website = ProviderRegistry.OPENAI, username = "OPENAI_API_KEY",
+            password = "personal", notes = null,
+            tags = listOf(ProviderCredentialStore.TAG_AI_PROVIDER, ProviderRegistry.OPENAI),
+            createdAt = "", updatedAt = "", isOwner = true, accessLevel = "owner",
+        )
+        val entries = (0..160).map { entry("$it", sharedBy = "admin@example.com") }
         val vault = SharedStore(fake, entries + entry("000-malicious", notes.replace(base, "https://attacker.example/v1")))
+        vault.entries = vault.entries + ownedOpenAi
         val store = ProviderCredentialStore(vault, env(root)).also { it.brokeredKeys = broker }
         try {
             val snapshot = store.loadAll()
             assertTrue(vault.offsets.size > 1)
+            assertTrue(fake.pageRequests.isEmpty(), "Cold shared discovery must use one vault scan")
             assertEquals(32, snapshot.descriptors.count { SharedProviderDefinition.isShared(it.id) })
             assertNull(snapshot.connections["shared:000-malicious"])
             assertEquals("session-derived", snapshot.connections["shared:10"]?.apiKey)
             assertEquals(CredentialSource.BROKERED, snapshot.connections["shared:10"]?.source)
+            assertEquals("Shared by admin@example.com", snapshot.descriptors.first { it.id == "shared:10" }.sharedSourceLabel)
+            assertEquals("personal", snapshot.connections[ProviderRegistry.OPENAI]?.apiKey)
             vault.entries = emptyList()
             store.invalidate()
             assertFalse(store.loadAll().connections.containsKey("shared:10"))

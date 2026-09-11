@@ -442,6 +442,20 @@ Incomplete same-generation discovery may additionally retain up to 32 display-on
 rows, prioritizing active/open selections. Removing the token-rotation exemption,
 display-row retention, or discovery rate floor each fails its corresponding
 SharedProviderReviewTest regression (mutation-verified).
+When shared discovery is enabled, its sharing-aware RPC is the single cold vault
+scan: owned provider credentials and managed definitions are derived from that one
+snapshot, while a failed sharing scan falls back to the narrower owned-secret RPC.
+Rows label their provenance (shared by, organisation, or the user's vault), and
+publisher names are stripped of control characters before display. Broker scope
+checks for both endpoints use one host-registry snapshot. The 32-provider admission
+cap warns but remains an authoritative completed scan; the 2000-row scan cap and a
+scope refusal remain incomplete. Startup warns before falling back from a revoked
+saved share, and a Refresh job completes only after its initial load completes.
+The single-scan path, publisher-name sanitization, and startup fallback warning are
+mutation-verified by the shared-provider regression tests.
+Host broker exceptions are converted to a failed, unconfigured provider while coroutine
+cancellation still propagates, so the initial consumer load cannot cancel a non-supervisor
+plugin scope merely because a host bridge violated its Result-returning contract.
 
 Review regressions were mutation-checked: reading the derived connection in
 `selectModel` fails the default consumer test (100 instead of the original 2000

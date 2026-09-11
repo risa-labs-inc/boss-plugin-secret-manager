@@ -45,7 +45,7 @@ internal data class SharedProviderDefinition(
     val baseUrl: String,
     val defaultForNewUsers: Boolean = false,
 ) {
-    fun descriptor(secretId: String): ProviderDescriptor = ProviderDescriptor(
+    fun descriptor(secretId: String, sourceLabel: String = "Shared with you"): ProviderDescriptor = ProviderDescriptor(
         id = "shared:$secretId",
         displayName = name,
         wireFormat = WireFormat.OPENAI_CHAT,
@@ -57,6 +57,7 @@ internal data class SharedProviderDefinition(
         keyPlaceholder = "",
         brokerId = brokerId,
         sharedDefault = defaultForNewUsers,
+        sharedSourceLabel = sourceLabel,
     )
 
     companion object {
@@ -66,10 +67,12 @@ internal data class SharedProviderDefinition(
 
         fun parse(notes: String?): SharedProviderDefinition? = runCatching {
             if (notes == null || notes.length > 8192) return null
-            json.decodeFromString<SharedProviderDefinition>(notes).takeIf {
-                it.schema == "boss-managed-provider-v1" && it.name.isNotBlank() && it.name.length <= 100 &&
+            val decoded = json.decodeFromString<SharedProviderDefinition>(notes)
+            val safeName = decoded.name.filterNot(Char::isISOControl).trim()
+            decoded.takeIf {
+                it.schema == "boss-managed-provider-v1" && safeName.isNotBlank() && it.name.length <= 100 &&
                     it.brokerId.isNotBlank() && it.baseUrl.length <= 2048 && safeUrl(it.baseUrl)
-            }
+            }?.copy(name = safeName)
         }.getOrNull()
 
         private fun safeUrl(value: String): Boolean = runCatching {
