@@ -42,6 +42,9 @@ class LlmProviderSettingsApiImpl(
      * something a caller can send a request with, and returning a half-populated one
      * would push that check onto every consumer. [configuredProviders] deliberately has
      * a different contract for consumers that own model selection.
+     * Reads also request a stale-catalog sweep for all providers on the ViewModel's
+     * retry floor. Fresh catalogs do not make HTTP requests; this keeps non-shared
+     * model discovery current as well as discovering shared defaults.
      */
     override fun activeConfig(): LlmConfig? {
         // Callers can reach this before the settings panel has ever been rendered, so

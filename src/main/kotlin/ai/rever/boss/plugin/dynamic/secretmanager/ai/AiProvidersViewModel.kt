@@ -316,7 +316,7 @@ class AiProvidersViewModel(
         ensureConnectionsLoaded()
         if (_connectionsLoaded.value && store?.sharedDefinitionsStale() == true &&
             discoveryRefreshInFlight.compareAndSet(false, true)) {
-            scope.launch(Dispatchers.IO) { runCatching { reloadConnections() } }
+            scope.launch(Dispatchers.IO) { reloadConnectionsSafely() }
                 .invokeOnCompletion { discoveryRefreshInFlight.set(false) }
         }
         catalogsLoadStarted.set(true)
@@ -400,7 +400,7 @@ class AiProvidersViewModel(
      */
     val connectionsLoaded: StateFlow<Boolean> = _connectionsLoaded.asStateFlow()
 
-    private suspend fun loadConnections(): Map<String, ProviderConnection> = connectionLoadMutex.withLock {
+    private suspend fun loadConnections(): Map<String, ProviderConnection>? = connectionLoadMutex.withLock {
         repeat(3) {
             val startedAt = store?.invalidations?.value
             val storedActive = prefs.read()
@@ -422,6 +422,7 @@ class AiProvidersViewModel(
                     } else initialProviderId(preferred, descriptors, connections),
                     storeAvailable = store != null && snapshot?.storeReadFailed != true,
                     sharedDiscoveryWarning = snapshot?.sharedDiscoveryWarning,
+                    error = current.error.takeUnless { it == LOAD_RETRY_MESSAGE },
                 )
             }
             _connectionsLoaded.value = true
@@ -431,7 +432,11 @@ class AiProvidersViewModel(
         }
         // A busy invalidation stream must not wedge the one-shot consumer load latch.
         connectionsLoadStarted.set(false)
-        emptyMap()
+        _connectionsLoaded.value = false
+        _catalogsLoaded.value = false
+        logger.warn(LogCategory.NETWORK, "AI provider load invalidated repeatedly; retry required")
+        _state.update { it.copy(error = LOAD_RETRY_MESSAGE) }
+        null
     }
 
     /**
@@ -477,7 +482,10 @@ class AiProvidersViewModel(
             // resolver memoises misses as well as hits — so without this that instruction
             // was only true after an app restart.
             envResolver.invalidate()
-            val connections = loadConnections()
+            val connections = loadConnections() ?: run {
+                _state.update { it.copy(isLoading = false) }
+                return@launch
+            }
 
             _state.update { current ->
                 current.copy(
@@ -1146,14 +1154,14 @@ class AiProvidersViewModel(
         // returns from `cached` unless `invalidate()` has run. The floor is about the mint rate.
         //
         // IO because this can now fire from any consumer read, and `pluginScope` falls back to
-        // Dispatchers.Main. runCatching because a host `exchange`/`listSecrets` that throws rather
+        // Dispatchers.Main. Contain ordinary failures because a host `exchange`/`listSecrets` that throws rather
         // than returning a failed Result would escape and cancel the scope - and a plain
         // CoroutineScope(Main) is not a supervisor, so that would silently kill every later launch
         // in the plugin. invokeOnCompletion rather than finally: if the scope is already cancelled
         // the body never runs, and the flag would latch true forever - the same shape of latch as
         // the bug this PR fixes.
         scope
-            .launch(Dispatchers.IO) { runCatching { reloadConnections() } }
+            .launch(Dispatchers.IO) { reloadConnectionsSafely() }
             .invokeOnCompletion {
                 lastBrokeredRefreshNanos.set(System.nanoTime())
                 brokeredRefreshInFlight.set(false)
@@ -1168,7 +1176,7 @@ class AiProvidersViewModel(
      * revoked in the Secrets section next door is the case it exists for, and the invalidation
      * collector only covers changes made through this plugin's own store.
      *
-     * On `Dispatchers.IO`, and `runCatching` around the body, for the same reasons the brokered
+     * On `Dispatchers.IO`, with ordinary failures contained, for the same reasons the brokered
      * refresh path documents: `pluginScope` falls back to `Dispatchers.Main`, and a host
      * `listSecrets` that throws instead of returning a failed `Result` would escape and cancel a
      * scope that is not a supervisor, silently killing every later launch in the plugin.
@@ -1176,7 +1184,17 @@ class AiProvidersViewModel(
     fun refreshConnections() {
         scope.launch(Dispatchers.IO) {
             store?.expireSharedDefinitions()
-            runCatching { reloadConnections() }
+            if (!_connectionsLoaded.value) load() else reloadConnectionsSafely()
+        }
+    }
+
+    private suspend fun reloadConnectionsSafely() {
+        try {
+            reloadConnections()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            logger.warn(LogCategory.NETWORK, "Could not reload AI provider connections")
         }
     }
 
@@ -1286,10 +1304,10 @@ class AiProvidersViewModel(
                 // back the same credential. That made the first version of this a poller for
                 // lapse rather than a renewal.
                 credentials.expireBrokeredCache()
-                // runCatching for the same reason as refreshLapsedBrokeredCredential: a host
+                // Contain failures for the same reason as refreshLapsedBrokeredCredential: a host
                 // exchange that throws rather than returning a failed Result would escape and
                 // cancel this scope, which is not a supervisor.
-                runCatching { reloadConnections() }
+                reloadConnectionsSafely()
             }
     }
 
@@ -1320,6 +1338,7 @@ class AiProvidersViewModel(
     }
 
     private companion object {
+        const val LOAD_RETRY_MESSAGE = "AI provider settings changed while loading. Retry using Refresh."
         const val MAX_CONCURRENT_CATALOG_FETCHES = 4
         /**
          * Floor on how often a brokered refresh may run.

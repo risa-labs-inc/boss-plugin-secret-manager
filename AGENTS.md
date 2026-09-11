@@ -422,7 +422,9 @@ Review-round state rules: an incomplete or failed scan does not revoke the activ
 selection; unavailable credentials fail closed while a later successful discovery
 restores the same selection. A generation-invalidated first load retries instead
 of reporting a vault outage. Manual discovery refresh does not invalidate session
-credentials. Model-limit clamping is read-only; writers use raw connections.
+credentials. Exhausted startup retries report a retryable error and must not run
+an empty catalog sweep or publish readiness. Cancelled discovery is rethrown,
+never cached as a vault failure. Model-limit clamping is read-only; writers use raw connections.
 Catalog HTTP work is limited to four concurrent requests, and at most 32 shared
 definitions are admitted (UUID order, deterministic when defaults tie).
 

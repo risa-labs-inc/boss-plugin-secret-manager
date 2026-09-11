@@ -6,6 +6,7 @@ import ai.rever.boss.plugin.api.SecretEntryWithSharingData
 import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -17,6 +18,7 @@ import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -47,11 +49,13 @@ class SharedProviderReviewTest {
         var entries = emptyList<SecretEntryWithSharingData>()
         var reads = 0
         var fail = false
+        @Volatile var onRead: (() -> Unit)? = null
         var gate: CompletableDeferred<Unit>? = null
         val entered = CompletableDeferred<Unit>()
         override suspend fun getUserSecretsWithSharingInfo(limit: Int, offset: Int)
             : Result<PaginatedSecretsWithSharingData> {
             reads++
+            onRead?.invoke()
             val page = entries.drop(offset).take(limit)
             entered.complete(Unit)
             gate?.await()
@@ -249,7 +253,7 @@ class SharedProviderReviewTest {
         } finally { root.deleteRecursively() }
     }
 
-    @Test fun `transient discovery failure retains selection and consumer polling restores it`() = runBlocking {
+    @Test fun `transient discovery failure retains selection and consumer polling restores it`() = runBlocking<Unit> {
         val root = Files.createTempDirectory("shared-transient").toFile()
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         var now = 0L
@@ -289,6 +293,48 @@ class SharedProviderReviewTest {
             withTimeout(10_000) { vm.state.first { it.sharedDiscoveryWarning == null } }
             assertNull(vm.state.value.activeProviderId, "A complete scan after failure confirms revocation")
             assertNotNull(vm.state.value.providerSelectionWarning)
+        } finally { scope.cancel(); root.deleteRecursively() }
+    }
+
+    @Test fun `cancelled discovery propagates and does not cache a transient failure`() = runBlocking {
+        val root = Files.createTempDirectory("shared-cancelled").toFile()
+        val vault = Vault().also { it.entries = listOf(entry()) }
+        val store = ProviderCredentialStore(vault, env(root)).also { it.brokeredKeys = broker }
+        try {
+            vault.onRead = { throw CancellationException("cancelled") }
+            assertFailsWith<CancellationException> { store.loadAll() }
+            vault.onRead = null
+            assertNotNull(store.loadAll().connections[descriptor.id])
+            assertEquals(2, vault.reads)
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun `exhausted startup retries do not publish readiness and Refresh recovers`() = runBlocking {
+        val root = Files.createTempDirectory("shared-exhausted").toFile()
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val vault = Vault().also { it.entries = listOf(entry()) }
+        val store = ProviderCredentialStore(vault, env(root)).also { it.brokeredKeys = broker }
+        vault.onRead = store::invalidate
+        try {
+            val vm = AiProvidersViewModel(
+                store = store, catalog = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(
+                    200 to """{"data":[{"id":"model","is_default":true}]}""",
+                )))), prefs = ActiveProviderPrefs(root), legacyImport = null,
+                splitViewOperations = null, scope = scope, envResolver = env(root),
+                ollamaSystemCheck = noOllamaOnThisMachine(),
+            )
+            vm.load()
+            withTimeout(10_000) { vm.state.first { !it.isLoading && it.error != null } }
+            assertFalse(vm.connectionsLoaded.value)
+            assertFalse(vm.catalogsLoaded.value)
+            assertTrue(vault.reads >= 3)
+            vault.onRead = null
+            vm.refreshConnections()
+            withTimeout(10_000) { vm.catalogsLoaded.first { it } }
+            assertTrue(vm.connectionsLoaded.value)
+            assertNull(vm.state.value.error)
+            assertNotNull(LlmProviderSettingsApiImpl(vm).activeConfig())
+            Unit
         } finally { scope.cancel(); root.deleteRecursively() }
     }
 

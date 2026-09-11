@@ -99,11 +99,14 @@ class SharedProviderTest {
             assertEquals("a", api.activeConfig()?.modelId)
             assertEquals(ProviderConnection.DEFAULT_MAX_TOKENS, api.activeConfig()?.maxTokens)
             vm.selectModel(config.providerId, "z")
+            withTimeout(5_000) { while (ActiveProviderPrefs(root).readModels()[config.providerId] != "z") delay(10) }
             assertEquals(100, api.activeConfig()?.maxTokens)
             vm.selectModel(config.providerId, "a")
+            withTimeout(5_000) { while (ActiveProviderPrefs(root).readModels()[config.providerId] != "a") delay(10) }
             assertEquals(ProviderConnection.DEFAULT_MAX_TOKENS, api.activeConfig()?.maxTokens)
             vm.selectModel(config.providerId, "no-longer-published")
             assertNull(api.activeConfig(), "An unavailable explicit selection must not switch models silently")
+            assertTrue(vm.state.value.unavailableSharedModel)
             withTimeout(5_000) { while (ActiveProviderPrefs(root).readModels()[config.providerId] != "no-longer-published") delay(10) }
             assertTrue(fake.created.isEmpty())
             assertTrue(fake.updated.isEmpty())

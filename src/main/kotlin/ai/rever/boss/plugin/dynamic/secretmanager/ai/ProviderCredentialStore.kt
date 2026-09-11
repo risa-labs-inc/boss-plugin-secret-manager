@@ -6,6 +6,7 @@ import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.api.UpdateSecretRequestData
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -252,7 +253,13 @@ class ProviderCredentialStore(
             it.generation == startedAt && monotonicNanos() - it.fetchedAtNanos <
                 (if (it.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS)
         }?.let { return@withLock it.result }
-        val result = runCatching { scanSharedDefinitions(broker) }
+        val result = try {
+            Result.success(scanSharedDefinitions(broker))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
+        }
         if (generation.get() == startedAt) {
             cachedShared = CachedSharedDefinitions(result, startedAt, monotonicNanos())
         }
