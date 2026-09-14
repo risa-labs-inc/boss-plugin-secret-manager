@@ -203,6 +203,7 @@ class ConsumerProviderDiscoveryTest {
         Harness(clock = { clockCalls++; throw CancellationException("plugin stopped") }).use { h ->
             h.load()
 
+            // LlmModelPricingAPI is synchronous and non-throwing; no cancellable work occurs here.
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
             assertEquals(1, clockCalls)
         }

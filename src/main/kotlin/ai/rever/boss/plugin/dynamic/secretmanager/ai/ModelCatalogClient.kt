@@ -136,6 +136,7 @@ class ModelCatalogClient(
         }
         // Preserve the picker's first-entry rule, but never choose a price from ambiguous ids.
         val models = collected.groupBy { it.id }.values.map { matches ->
+            // Identical duplicates are ambiguous too: retain the first picker row but no rate.
             matches.first().let { if (matches.size > 1) it.copy(pricing = null) else it }
         }
         if (descriptor.id == ProviderRegistry.OPENROUTER) {

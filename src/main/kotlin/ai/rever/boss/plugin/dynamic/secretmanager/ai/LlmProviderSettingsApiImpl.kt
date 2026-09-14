@@ -140,7 +140,9 @@ class LlmProviderSettingsApiImpl(
      * a picker, while an old rate must not authorize another budgeted call. Catalog refresh is
      * requested asynchronously; until it lands, the safe synchronous answer is null.
      * Consumers pricing a catalog should retain returned cards through [AiModelPricing.validUntilEpochMs]
-     * rather than repeat this provider/model lookup for every rendered row.
+     * rather than repeat this provider/model lookup for every rendered row. A cache-seeded card
+     * can already be nearly [ModelCatalog.CACHE_TTL_MS] old when returned; its timestamps are the
+     * authority, not the lookup time.
      * This API is synchronous and non-throwing by contract. Its containment includes a
      * synchronously thrown `CancellationException`; there is no suspending work to cancel here.
      */
@@ -152,7 +154,7 @@ class LlmProviderSettingsApiImpl(
                 // A current card needs no discovery kick or host-registry hop. A miss still starts
                 // the asynchronous cold/stale load so a later synchronous lookup can succeed.
                 viewModel.ensureCatalogsLoaded()
-                pricingFromSnapshot(providerId, modelId, now)
+                null
             }
         }.fold(onSuccess = { it }, onFailure = {
             // No ids, payloads, exception messages or credentials cross this log boundary.
