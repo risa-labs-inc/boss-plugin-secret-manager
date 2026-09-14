@@ -161,18 +161,22 @@ class ConsumerProviderDiscoveryTest {
     }
 
     @Test fun `pricing lookup converts an implementation failure to unavailable`() = runBlocking {
-        Harness(clock = { error("broken clock") }).use { h ->
+        var clockCalls = 0
+        Harness(clock = { clockCalls++; error("broken clock") }).use { h ->
             h.load()
 
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+            assertEquals(1, clockCalls)
         }
     }
 
     @Test fun `pricing lookup contains a synchronous cancellation-shaped failure`() = runBlocking {
-        Harness(clock = { throw CancellationException("plugin stopped") }).use { h ->
+        var clockCalls = 0
+        Harness(clock = { clockCalls++; throw CancellationException("plugin stopped") }).use { h ->
             h.load()
 
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+            assertEquals(1, clockCalls)
         }
     }
 

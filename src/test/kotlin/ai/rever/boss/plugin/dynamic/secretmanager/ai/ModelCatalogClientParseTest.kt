@@ -243,13 +243,14 @@ class ModelCatalogClientParseTest {
                   {"id":"overflow","pricing":{"prompt":"1e400","completion":"0"}},
                   {"id":"non-finite","pricing":{"prompt":"NaN","completion":"0"}},
                   {"id":"null-auxiliary","pricing":{"prompt":"0","completion":"0","web_search":null}},
-                  {"id":"numeric-auxiliary","pricing":{"prompt":"0","completion":"0","request":0}}
+                  {"id":"numeric-auxiliary","pricing":{"prompt":"0","completion":"0","request":0}},
+                  {"id":"nested-auxiliary","pricing":{"prompt":"0","completion":"0","web_search":{"per_call":"0"}}}
                 ]}
             """.trimIndent()
 
             val models = clientReturning(body).fetch(descriptor(ProviderRegistry.OPENROUTER), "k").getOrThrow()
 
-            assertEquals(12, models.size)
+            assertEquals(13, models.size)
             assertTrue(models.all { it.pricing == null })
         }
 

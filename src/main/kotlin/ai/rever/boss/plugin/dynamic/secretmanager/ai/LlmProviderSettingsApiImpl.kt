@@ -147,36 +147,13 @@ class LlmProviderSettingsApiImpl(
     override fun modelPricing(providerId: String, modelId: String): AiModelPricing? =
         // Non-suspending on purpose: the API boundary contains even malformed host linkage.
         runCatching {
-            viewModel.ensureCatalogsLoaded()
-            val state = viewModel.state.value
-            // Ambiguous ids must not authorize a budgeted call, even if the picker shows one.
-            val descriptor =
-                state.providers.singleOrNull { it.id == providerId } ?: return@runCatching null
-            val catalog =
-                viewModel.catalogStateOf(providerId) as? CatalogState.Loaded
-                    ?: return@runCatching null
-            val connection = state.connectionOf(providerId)
-            if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
-                return@runCatching null
-            }
-            val ttl = ModelCatalog.ttlFor(providerId)
-            val validUntil = catalog.fetchedAtEpochMs + ttl
             val now = nowEpochMs()
-            if (validUntil < catalog.fetchedAtEpochMs || catalog.fetchedAtEpochMs > now || now > validUntil) {
-                return@runCatching null
+            pricingFromSnapshot(providerId, modelId, now) ?: run {
+                // A current card needs no discovery kick or host-registry hop. A miss still starts
+                // the asynchronous cold/stale load so a later synchronous lookup can succeed.
+                viewModel.ensureCatalogsLoaded()
+                pricingFromSnapshot(providerId, modelId, now)
             }
-            val pricing =
-                catalog.models.singleOrNull { it.id == modelId }?.pricing
-                    ?: return@runCatching null
-            AiModelPricing(
-                providerId = providerId,
-                modelId = modelId,
-                inputUsdPer1M = pricing.inputUsdPer1M,
-                outputUsdPer1M = pricing.outputUsdPer1M,
-                source = AiModelPricing.SOURCE_PROVIDER_CATALOG,
-                fetchedAtEpochMs = catalog.fetchedAtEpochMs,
-                validUntilEpochMs = validUntil,
-            )
         }.fold(onSuccess = { it }, onFailure = {
             // No ids, payloads, exception messages or credentials cross this log boundary.
             val exceptionClass = it.javaClass.simpleName
@@ -189,6 +166,27 @@ class LlmProviderSettingsApiImpl(
             }
             null
         })
+
+    private fun pricingFromSnapshot(providerId: String, modelId: String, now: Long): AiModelPricing? {
+        val state = viewModel.state.value
+        // Ambiguous ids must not authorize a budgeted call, even if the picker shows one.
+        val descriptor = state.providers.singleOrNull { it.id == providerId } ?: return null
+        val catalog = viewModel.catalogStateOf(providerId) as? CatalogState.Loaded ?: return null
+        val connection = state.connectionOf(providerId)
+        if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) return null
+        val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.ttlFor(providerId)
+        if (validUntil < catalog.fetchedAtEpochMs || catalog.fetchedAtEpochMs > now || now > validUntil) return null
+        val pricing = catalog.models.singleOrNull { it.id == modelId }?.pricing ?: return null
+        return AiModelPricing(
+            providerId = providerId,
+            modelId = modelId,
+            inputUsdPer1M = pricing.inputUsdPer1M,
+            outputUsdPer1M = pricing.outputUsdPer1M,
+            source = AiModelPricing.SOURCE_PROVIDER_CATALOG,
+            fetchedAtEpochMs = catalog.fetchedAtEpochMs,
+            validUntilEpochMs = validUntil,
+        )
+    }
 
     private fun configFor(providerId: String, requireModel: Boolean = true): LlmConfig? {
         // Every path that hands out a credential goes through here - `activeConfig` and
