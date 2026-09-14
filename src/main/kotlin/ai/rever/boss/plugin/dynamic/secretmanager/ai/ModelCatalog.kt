@@ -100,7 +100,9 @@ class ModelCatalog(
      */
     fun isStale(providerId: String, nowEpochMs: Long): Boolean =
         when (val state = _states.value[providerId]) {
-            is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs > ttlFor(providerId)
+            is CatalogState.Loaded ->
+                nowEpochMs < state.fetchedAtEpochMs ||
+                    nowEpochMs - state.fetchedAtEpochMs > ttlFor(providerId)
             // A permanent failure (rejected key) is not stale: nothing changes until the
             // credential does, and the panel re-enters this on every open. Saving a new key
             // calls refresh(force = true), so recovery does not depend on staleness.

@@ -221,7 +221,7 @@ class SharedProviderReviewTest {
     @Test fun `shared catalog is never seeded from disk`() = runBlocking {
         val root = Files.createTempDirectory("shared-no-seed").toFile()
         try {
-            File(root, "ai-model-catalog.json").writeText("""{"version":1,"providers":{
+            File(root, "ai-model-catalog.json").writeText("""{"version":2,"providers":{
                 "${descriptor.id}":{"models":[{"id":"private","displayName":"Private"}],"fetchedAtEpochMs":1000}}}""")
             val catalog = ModelCatalog(cacheDir = root)
             catalog.seedFromCache()

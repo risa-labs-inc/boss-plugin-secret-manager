@@ -111,6 +111,16 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `a future-dated result is stale so discovery can replace it`() =
+        runTest {
+            val fetchedAt = 1_000_000L
+            val (catalog, _) = catalogSeededAt(fetchedAt)
+            catalog.seedFromCache()
+
+            assertTrue(catalog.isStale(descriptor.id, fetchedAt - 1))
+        }
+
+    @Test
     fun `a seeded list is marked as coming from the cache`() =
         runTest {
             // The panel distinguishes "live" from "cached" in its freshness line, so a
