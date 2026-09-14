@@ -28,11 +28,12 @@ import kotlin.test.assertTrue
 class ConsumerProviderDiscoveryTest {
     private class Harness(
         keys: Map<String, String> = mapOf("OPENROUTER_API_KEY" to "test-only-key"),
-        response: Pair<Int, String> = 200 to """{"data":[{"id":"consumer/model","name":"Consumer model","context_length":131072}]}""",
+        response: Pair<Int, String> = 200 to """{"data":[{"id":"consumer/model","name":"Consumer model","context_length":131072,"pricing":{"prompt":"0.0000015","completion":"0.000006"}}]}""",
         responses: List<Pair<Int, String>> = emptyList(),
         probe: OllamaSystemCheck = noOllamaOnThisMachine(),
         beforeResponse: () -> Unit = {},
         val nowNanos: AtomicLong = AtomicLong(0),
+        val nowEpochMs: AtomicLong = AtomicLong(System.currentTimeMillis()),
     ) : AutoCloseable {
         val root = Files.createTempDirectory("consumer-provider").toFile()
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -54,7 +55,7 @@ class ConsumerProviderDiscoveryTest {
                 ollamaSystemCheck = probe,
                 monotonicNanos = nowNanos::get,
             )
-        val api = LlmProviderSettingsApiImpl(vm)
+        val api = LlmProviderSettingsApiImpl(vm, nowEpochMs::get)
 
         suspend fun load() {
             api.availableModels()
@@ -78,6 +79,43 @@ class ConsumerProviderDiscoveryTest {
             assertEquals(131072, model.contextLength)
             assertEquals(1, h.http.requests.size)
             assertFalse(h.api.configuredProviders().any { it.providerId == ProviderRegistry.OLLAMA })
+        }
+    }
+
+    @Test fun `pricing lookup returns exact fresh OpenRouter catalog rates`() = runBlocking {
+        Harness().use { h ->
+            h.load()
+            val pricing = h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")
+
+            assertEquals(ProviderRegistry.OPENROUTER, pricing?.providerId)
+            assertEquals("consumer/model", pricing?.modelId)
+            assertEquals(1.5, pricing?.inputUsdPer1M)
+            assertEquals(6.0, pricing?.outputUsdPer1M)
+            assertEquals("provider-catalog", pricing?.source)
+            assertEquals(ModelCatalog.CACHE_TTL_MS, pricing!!.validUntilEpochMs - pricing.fetchedAtEpochMs)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model-alias"))
+        }
+    }
+
+    @Test fun `pricing lookup rejects expired and failed catalog entries`() = runBlocking {
+        Harness(
+            responses = listOf(
+                200 to """{"data":[{"id":"consumer/model","pricing":{"prompt":"0.0000015","completion":"0.000006"}}]}""",
+                503 to """{"error":"offline"}""",
+            ),
+        ).use { h ->
+            h.load()
+            val fresh = h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")!!
+            h.nowEpochMs.set(fresh.validUntilEpochMs + 1)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+
+            val descriptor = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+            h.catalog.refresh(descriptor, "test-only-key", force = true)
+            withTimeout(5000) {
+                h.vm.state.first { it.catalogOf(descriptor.id) is CatalogState.Failed }
+            }
+            h.nowEpochMs.set(System.currentTimeMillis())
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
         }
     }
 

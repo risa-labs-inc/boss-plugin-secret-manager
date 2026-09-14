@@ -225,7 +225,22 @@ data class AiModel(
     val isDefault: Boolean = false,
     /** Server-reported remaining allowance and UTC reset times. */
     val allowanceSummary: String? = null,
+    /** Complete provider-published USD token rates, or null when this model cannot be costed. */
+    val pricing: ModelPricing? = null,
 )
+
+/** Plugin-local rate card retained from a provider model catalog. */
+data class ModelPricing(
+    /** US dollars per one million input tokens. */
+    val inputUsdPer1M: Double,
+    /** US dollars per one million output tokens. */
+    val outputUsdPer1M: Double,
+) {
+    init {
+        require(inputUsdPer1M.isFinite() && inputUsdPer1M >= 0.0)
+        require(outputUsdPer1M.isFinite() && outputUsdPer1M >= 0.0)
+    }
+}
 
 /** Where a provider's credential came from, which decides whether it is editable. */
 enum class CredentialSource {

@@ -91,7 +91,7 @@ class ModelCatalogStateTest {
         File(dir, "ai-model-catalog.json").writeText(
             """
             {"providers":{"${descriptor.id}":{"models":[{"id":"gpt-5","displayName":"GPT-5"}],
-            "fetchedAtEpochMs":$fetchedAtEpochMs}},"version":1}
+            "fetchedAtEpochMs":$fetchedAtEpochMs}},"version":2}
             """.trimIndent(),
         )
         return ModelCatalog(cacheDir = dir) to dir
@@ -121,6 +121,24 @@ class ModelCatalogStateTest {
             val loaded = catalog.stateOf(descriptor.id) as CatalogState.Loaded
             assertTrue(loaded.fromCache)
             assertEquals(listOf("gpt-5"), loaded.models.map { it.id })
+        }
+
+    @Test
+    fun `provider pricing survives the model cache round trip`() =
+        runTest {
+            val dir = Files.createTempDirectory("catalog-pricing").toFile()
+            val router = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+            val body =
+                """{"data":[{"id":"priced/model","pricing":{"prompt":"0.000002","completion":"0.000008"}}]}"""
+            val fetched = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(200 to body))), dir)
+            fetched.refresh(router, apiKey = "k", force = true, nowEpochMs = 1_000_000L)
+
+            val restored = ModelCatalog(cacheDir = dir)
+            restored.seedFromCache()
+
+            val model = (restored.stateOf(router.id) as CatalogState.Loaded).models.single()
+            assertEquals(2.0, model.pricing?.inputUsdPer1M)
+            assertEquals(8.0, model.pricing?.outputUsdPer1M)
         }
 
     @Test
@@ -213,7 +231,7 @@ class ModelCatalogStateTest {
             val dir = Files.createTempDirectory("catalog-failed").toFile()
             File(dir, "ai-model-catalog.json").writeText(
                 """{"providers":{"${descriptor.id}":{"models":[{"id":"cached","displayName":"Cached"}],
-                "fetchedAtEpochMs":1000000}},"version":1}""".trimIndent(),
+                "fetchedAtEpochMs":1000000}},"version":2}""".trimIndent(),
             )
 
             val fake = QueuedHttpClient(listOf(401 to """{"error":"bad key"}"""))
@@ -286,7 +304,7 @@ class ModelCatalogStateTest {
             val dir = Files.createTempDirectory("catalog-notconfigured").toFile()
             File(dir, "ai-model-catalog.json").writeText(
                 """{"providers":{"${descriptor.id}":{"models":[{"id":"cached","displayName":"Cached"}],
-                "fetchedAtEpochMs":1000000}},"version":1}""".trimIndent(),
+                "fetchedAtEpochMs":1000000}},"version":2}""".trimIndent(),
             )
 
             val catalog = ModelCatalog(cacheDir = dir)

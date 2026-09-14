@@ -8,7 +8,7 @@ Your credentials, secrets shared with you, Plugin Store API keys and AI provider
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.secretmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin`
-- **API Version**: 1.0.89 (`plugin.json` `apiVersion` and `minApiVersion`)
+- **API Version**: 1.0.90 (`plugin.json` `apiVersion` and `minApiVersion`)
 
 ## Essential Commands
 
@@ -610,6 +610,20 @@ Transient provider failures have their own five-minute retry floor; 401/403 fail
 until the credential changes. `load()` marks discovery started too: invalidating a changed
 credential must never clear a catalog without scheduling its replacement. `catalogsLoaded` drops
 false across that invalidation and becomes true only after the replacement sweep completes.
+
+### Native USD pricing is catalog-derived and freshness-bounded
+
+`LlmModelPricingAPI.modelPricing(providerId, modelId)` exposes only complete rates retained from a
+provider's live model catalog. OpenRouter is the currently verified source: its documented
+`pricing.prompt` and `pricing.completion` USD-per-token strings are converted to USD per million
+tokens, while any present additional charge must be an explicit numeric zero because `AiUsage`
+cannot account for it. Missing, malformed, negative, non-finite or partially representable pricing
+keeps the model usable but returns no rate card.
+
+Pricing is available only from a current `CatalogState.Loaded` entry. `Failed.lastKnown` stays
+useful for the picker but never authorizes a budgeted call, and a loaded entry returns null after
+its catalog TTL. Provider/model ids match exactly; aliases are never inferred. Version-two disk
+caches retain verified rates and force old model-only caches through a fresh provider fetch.
 
 ### Legacy plaintext key import
 

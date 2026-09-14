@@ -321,6 +321,7 @@ class ModelCatalog(
         val maxOutputTokens: Int? = null,
         val capabilities: List<String> = emptyList(),
         val ownedBy: String? = null,
+        val pricing: CachedPricing? = null,
     ) {
         fun toModel(): AiModel =
             AiModel(
@@ -330,6 +331,7 @@ class ModelCatalog(
                 maxOutputTokens = maxOutputTokens,
                 capabilities = capabilities,
                 ownedBy = ownedBy,
+                pricing = pricing?.toModelPricing(),
             )
 
         companion object {
@@ -341,7 +343,21 @@ class ModelCatalog(
                     maxOutputTokens = model.maxOutputTokens,
                     capabilities = model.capabilities,
                     ownedBy = model.ownedBy,
+                    pricing = model.pricing?.let(CachedPricing::from),
                 )
+        }
+    }
+
+    @Serializable
+    private data class CachedPricing(
+        val inputUsdPer1M: Double,
+        val outputUsdPer1M: Double,
+    ) {
+        fun toModelPricing(): ModelPricing = ModelPricing(inputUsdPer1M, outputUsdPer1M)
+
+        companion object {
+            fun from(pricing: ModelPricing): CachedPricing =
+                CachedPricing(pricing.inputUsdPer1M, pricing.outputUsdPer1M)
         }
     }
 
@@ -355,6 +371,6 @@ class ModelCatalog(
         const val TRANSIENT_FAILURE_RETRY_MS: Long = 5 * 60 * 1000L
 
         private const val CACHE_FILE_NAME = "ai-model-catalog.json"
-        private const val CACHE_FORMAT_VERSION = 1
+        private const val CACHE_FORMAT_VERSION = 2
     }
 }

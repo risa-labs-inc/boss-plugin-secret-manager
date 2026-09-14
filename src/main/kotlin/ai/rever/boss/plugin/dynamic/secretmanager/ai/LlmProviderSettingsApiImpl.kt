@@ -1,19 +1,22 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
 import ai.rever.boss.plugin.api.AiAvailableModel
+import ai.rever.boss.plugin.api.AiModelPricing
 import ai.rever.boss.plugin.api.AiProviderModels
 import ai.rever.boss.plugin.api.LlmApiFormat
 import ai.rever.boss.plugin.api.LlmConfig
 import ai.rever.boss.plugin.api.LlmProviderSettingsAPI
+import ai.rever.boss.plugin.api.LlmModelPricingAPI
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
 /**
  * Serves AI provider configuration to the host and to other plugins.
  *
- * [availableModels] references [AiProviderModels]/[AiAvailableModel], introduced in api
- * 1.0.89. The manifest therefore declares 1.0.89 as its floor: a `LinkageError` guard
- * around construction cannot protect a lazily resolved method signature or a host's
+ * [availableModels] references [AiProviderModels]/[AiAvailableModel], and this class implements
+ * [LlmModelPricingAPI], introduced in api 1.0.90. The manifest therefore declares 1.0.90 as its
+ * floor: a `LinkageError` guard around construction cannot protect a lazily resolved method
+ * signature or a host's
  * pre-registration binary compatibility scan.
  *
  * Reads state from [AiProvidersViewModel] rather than the store directly, so the
@@ -21,7 +24,8 @@ import androidx.compose.ui.Modifier
  */
 class LlmProviderSettingsApiImpl(
     private val viewModel: AiProvidersViewModel,
-) : LlmProviderSettingsAPI {
+    private val nowEpochMs: () -> Long = System::currentTimeMillis,
+) : LlmProviderSettingsAPI, LlmModelPricingAPI {
 
     /** This implementation does render a panel, so the host shouldn't show its notice. */
     override val supportsSettingsPanel: Boolean = true
@@ -122,6 +126,34 @@ class LlmProviderSettingsApiImpl(
 
             AiProviderModels(providerId = descriptor.id, providerName = descriptor.displayName, models = models)
         }
+    }
+
+    /**
+     * Return a fresh, complete rate card for one exact provider/model pair.
+     *
+     * This never falls back to [CatalogState.Failed.lastKnown]: an old model name is useful in
+     * a picker, while an old rate must not authorize another budgeted call. Catalog refresh is
+     * requested asynchronously; until it lands, the safe synchronous answer is null.
+     */
+    override fun modelPricing(providerId: String, modelId: String): AiModelPricing? {
+        viewModel.ensureCatalogsLoaded()
+        val state = viewModel.state.value
+        val descriptor = state.providers.singleOrNull { it.id == providerId } ?: return null
+        val catalog = viewModel.catalogStateOf(providerId) as? CatalogState.Loaded ?: return null
+        val connection = state.connectionOf(providerId)
+        if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) return null
+        val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.CACHE_TTL_MS
+        if (validUntil < catalog.fetchedAtEpochMs || nowEpochMs() > validUntil) return null
+        val pricing = catalog.models.singleOrNull { it.id == modelId }?.pricing ?: return null
+        return AiModelPricing(
+            providerId = providerId,
+            modelId = modelId,
+            inputUsdPer1M = pricing.inputUsdPer1M,
+            outputUsdPer1M = pricing.outputUsdPer1M,
+            source = AiModelPricing.SOURCE_PROVIDER_CATALOG,
+            fetchedAtEpochMs = catalog.fetchedAtEpochMs,
+            validUntilEpochMs = validUntil,
+        )
     }
 
     private fun configFor(providerId: String, requireModel: Boolean = true): LlmConfig? {

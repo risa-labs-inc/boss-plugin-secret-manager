@@ -207,11 +207,12 @@ class ModelCatalogClientParseTest {
     // ==================== OpenRouter ====================
 
     @Test
-    fun `openrouter reports its readable name and context length`() =
+    fun `openrouter reports metadata and documented USD per-token pricing`() =
         runTest {
             val body = """
                 {"data":[{"id":"anthropic/claude-opus-5","name":"Anthropic: Claude Opus 5",
-                "context_length":200000,"pricing":{"prompt":"0.000015","completion":"0.000075"}}]}
+                "context_length":200000,"pricing":{"prompt":"0.000015","completion":"0.000075",
+                "request":"0","image":"0"}}]}
             """.trimIndent()
 
             val model =
@@ -220,6 +221,47 @@ class ModelCatalogClientParseTest {
             assertEquals("anthropic/claude-opus-5", model.id)
             assertEquals("Anthropic: Claude Opus 5", model.displayName)
             assertEquals(200_000, model.contextLength)
+            assertEquals(15.0, model.pricing?.inputUsdPer1M)
+            assertEquals(75.0, model.pricing?.outputUsdPer1M)
+        }
+
+    @Test
+    fun `openrouter keeps model but rejects incomplete or unsupported charges`() =
+        runTest {
+            val body = """
+                {"data":[
+                  {"id":"missing-completion","pricing":{"prompt":"0.000001"}},
+                  {"id":"malformed","pricing":{"prompt":"free","completion":"0.000002"}},
+                  {"id":"negative","pricing":{"prompt":"-0.000001","completion":"0.000002"}},
+                  {"id":"request-fee","pricing":{"prompt":"0.000001","completion":"0.000002","request":"0.01"}},
+                  {"id":"future-fee","pricing":{"prompt":"0.000001","completion":"0.000002","new_charge":"0.01"}},
+                  {"id":"numeric-schema-drift","pricing":{"prompt":0.000001,"completion":"0.000002"}}
+                ]}
+            """.trimIndent()
+
+            val models = clientReturning(body).fetch(descriptor(ProviderRegistry.OPENROUTER), "k").getOrThrow()
+
+            assertEquals(6, models.size)
+            assertTrue(models.all { it.pricing == null })
+        }
+
+    @Test
+    fun `openrouter accepts only explicit zero for additional published charge fields`() =
+        runTest {
+            val body = """
+                {"data":[{"id":"free-model","pricing":{"prompt":"0","completion":"0",
+                "request":"0","web_search":"0","future_charge":"0"}}]}
+            """.trimIndent()
+
+            val pricing =
+                clientReturning(body)
+                    .fetch(descriptor(ProviderRegistry.OPENROUTER), "k")
+                    .getOrThrow()
+                    .single()
+                    .pricing
+
+            assertEquals(0.0, pricing?.inputUsdPer1M)
+            assertEquals(0.0, pricing?.outputUsdPer1M)
         }
 
     // ==================== Ollama ====================

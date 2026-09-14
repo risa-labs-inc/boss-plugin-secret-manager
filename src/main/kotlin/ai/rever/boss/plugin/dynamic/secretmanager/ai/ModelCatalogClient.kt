@@ -12,6 +12,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
+import java.math.BigDecimal
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -472,8 +473,41 @@ class ModelCatalogClient(
             id = id,
             displayName = obj.str("name") ?: id,
             contextLength = obj.int("context_length"),
+            pricing = openRouterPricing(obj),
         )
     }
+
+    /**
+     * OpenRouter publishes every pricing value as USD per token, request or other unit.
+     * [ModelPricing] can represent prompt and completion tokens only, so a present additional
+     * charge must be an explicit zero. Missing or malformed token rates leave the model visible
+     * in the picker but deliberately unpriced.
+     *
+     * Schema and units: https://openrouter.ai/docs/guides/overview/models
+     */
+    private fun openRouterPricing(model: JsonObject): ModelPricing? {
+        val pricing = model["pricing"] as? JsonObject ?: return null
+        val prompt = pricing.usd("prompt") ?: return null
+        val completion = pricing.usd("completion") ?: return null
+        if (pricing.any { (name, value) ->
+                name != "prompt" && name != "completion" && value.usdOrNull() != BigDecimal.ZERO
+            }
+        ) return null
+
+        val inputPerMillion = prompt.multiply(ONE_MILLION).toDouble()
+        val outputPerMillion = completion.multiply(ONE_MILLION).toDouble()
+        if (!inputPerMillion.isFinite() || !outputPerMillion.isFinite()) return null
+        return ModelPricing(inputUsdPer1M = inputPerMillion, outputUsdPer1M = outputPerMillion)
+    }
+
+    private fun JsonObject.usd(key: String): BigDecimal? = this[key]?.usdOrNull()
+
+    private fun JsonElement.usdOrNull(): BigDecimal? =
+        (this as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?.toBigDecimalOrNull()
+            ?.takeIf { it.signum() >= 0 }
 
     private fun googleModel(obj: JsonObject): AiModel? {
         // Google returns resource names ("models/gemini-x"); requests take the bare id.
@@ -507,6 +541,7 @@ class ModelCatalogClient(
             .orEmpty()
 
     companion object {
+        private val ONE_MILLION = BigDecimal("1000000")
         private val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(20)
         private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
 

@@ -39,8 +39,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-secret-manager"
 
     private companion object {
-        /** Minimum api release required by this implementation's model-discovery signature. */
-        const val REQUIRED_API_VERSION = "1.0.89"
+        /** Minimum api release required by this implementation's model-pricing signature. */
+        const val REQUIRED_API_VERSION = "1.0.90"
 
         /**
          * Deliberately on the companion, not an instance property.
