@@ -112,7 +112,10 @@ class ConsumerProviderDiscoveryTest {
     }
 
     @Test fun `fresh pricing lookup does not re-enter shared provider discovery`() = runBlocking {
-        Harness().use { h ->
+        Harness(response = 200 to """{"data":[
+            {"id":"consumer/model","pricing":{"prompt":"0.0000015","completion":"0.000006"}},
+            {"id":"unpriced/model"}
+        ]}""").use { h ->
             h.load()
             val hostChecks = AtomicInteger()
             h.store.brokeredKeys = object : BrokeredKeySource {
@@ -125,6 +128,8 @@ class ConsumerProviderDiscoveryTest {
             }
 
             assertEquals(1.5, h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")?.inputUsdPer1M)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "unpriced/model"))
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "missing/model"))
             assertEquals(0, hostChecks.get(), "a fresh in-memory rate card reached the host broker registry")
         }
     }

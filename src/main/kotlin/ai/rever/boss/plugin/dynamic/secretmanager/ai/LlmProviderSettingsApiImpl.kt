@@ -150,12 +150,12 @@ class LlmProviderSettingsApiImpl(
         // Non-suspending on purpose: the API boundary contains even malformed host linkage.
         runCatching {
             val now = nowEpochMs()
-            pricingFromSnapshot(providerId, modelId, now) ?: run {
-                // A current card needs no discovery kick or host-registry hop. A miss still starts
-                // the asynchronous cold/stale load so a later synchronous lookup can succeed.
+            val catalog = currentCatalog(providerId, now) ?: run {
+                // A missing or stale catalog starts asynchronous discovery for a later read.
                 viewModel.ensureCatalogsLoaded()
-                null
+                return@runCatching null
             }
+            pricingFrom(catalog, providerId, modelId)
         }.fold(onSuccess = { it }, onFailure = {
             // No ids, payloads, exception messages or credentials cross this log boundary.
             val exceptionClass = it.javaClass.simpleName
@@ -169,7 +169,7 @@ class LlmProviderSettingsApiImpl(
             null
         })
 
-    private fun pricingFromSnapshot(providerId: String, modelId: String, now: Long): AiModelPricing? {
+    private fun currentCatalog(providerId: String, now: Long): CatalogState.Loaded? {
         val state = viewModel.state.value
         // Ambiguous ids must not authorize a budgeted call, even if the picker shows one.
         val descriptor = state.providers.singleOrNull { it.id == providerId } ?: return null
@@ -178,6 +178,15 @@ class LlmProviderSettingsApiImpl(
         if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) return null
         val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.ttlFor(providerId)
         if (validUntil < catalog.fetchedAtEpochMs || catalog.fetchedAtEpochMs > now || now > validUntil) return null
+        return catalog
+    }
+
+    private fun pricingFrom(
+        catalog: CatalogState.Loaded,
+        providerId: String,
+        modelId: String,
+    ): AiModelPricing? {
+        val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.ttlFor(providerId)
         val pricing = catalog.models.singleOrNull { it.id == modelId }?.pricing ?: return null
         return AiModelPricing(
             providerId = providerId,

@@ -132,6 +132,7 @@ class ModelCatalogStateTest {
                 """{"data":[{"id":"priced/model","pricing":{"prompt":"0.000002","completion":"0.000008"}}]}"""
             val fetched = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(200 to body))), dir)
             fetched.refresh(router, apiKey = "k", force = true, nowEpochMs = 1_000_000L)
+            assertTrue(File(dir, "ai-model-catalog.json").readText().contains("\"version\":2"))
 
             val restored = ModelCatalog(cacheDir = dir)
             restored.seedFromCache()
@@ -178,6 +179,20 @@ class ModelCatalogStateTest {
             val dir = Files.createTempDirectory("catalog-v1-upgrade").toFile()
             File(dir, "ai-model-catalog.json").writeText(
                 """{"providers":{"${descriptor.id}":{"models":[{"id":"gpt-5","displayName":"GPT-5"}],"fetchedAtEpochMs":1000000}},"version":1}""",
+            )
+            val catalog = ModelCatalog(cacheDir = dir)
+
+            catalog.seedFromCache()
+
+            assertEquals(CatalogState.NotConfigured, catalog.stateOf(descriptor.id))
+        }
+
+    @Test
+    fun `a legacy writer cache with no version stamp is discarded`() =
+        runTest {
+            val dir = Files.createTempDirectory("catalog-unstamped-v1").toFile()
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${descriptor.id}":{"models":[{"id":"gpt-5","displayName":"GPT-5"}],"fetchedAtEpochMs":1000000}}}""",
             )
             val catalog = ModelCatalog(cacheDir = dir)
 

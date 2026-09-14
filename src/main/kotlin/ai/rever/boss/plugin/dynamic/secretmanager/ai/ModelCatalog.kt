@@ -253,6 +253,7 @@ class ModelCatalog(
                 val existing = readCacheBlocking(file)
                 val merged =
                     CachedCatalog(
+                        version = CACHE_FORMAT_VERSION,
                         providers =
                             existing.providers +
                                 (
@@ -297,13 +298,13 @@ class ModelCatalog(
             if (!file.exists()) return@runCatching null
             json.decodeFromString<CachedCatalog>(file.readText())
                 .takeIf { it.version == CACHE_FORMAT_VERSION }
-        }.getOrNull() ?: CachedCatalog(emptyMap())
+        }.getOrNull() ?: CachedCatalog(version = CACHE_FORMAT_VERSION, providers = emptyMap())
 
     // Model lists only — never credentials. Keys live in the secret store.
     @Serializable
     private data class CachedCatalog(
+        val version: Int,
         val providers: Map<String, CachedProvider>,
-        val version: Int = CACHE_FORMAT_VERSION,
     )
 
     @Serializable
