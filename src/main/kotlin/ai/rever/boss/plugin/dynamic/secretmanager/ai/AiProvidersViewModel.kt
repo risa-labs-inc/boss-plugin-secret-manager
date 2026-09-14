@@ -14,7 +14,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.dropWhile
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -140,6 +140,9 @@ data class AiProvidersUiState(
 
     fun cliHealthOf(engineId: String): CliEngineHealth = cliHealth[engineId] ?: CliEngineHealth.Unknown
 }
+
+/** Keep a generation change even when collection starts after the StateFlow has conflated it. */
+internal fun StateFlow<Long>.afterGeneration(generation: Long) = dropWhile { it == generation }
 
 /**
  * Drives the AI providers panel: resolves credentials, keeps model lists current, and
@@ -289,11 +292,13 @@ class AiProvidersViewModel(
         // list's own create/update/delete does. Clearing the store cache alone was not
         // enough: activeConfig() answers other plugins from the snapshot below, so a secret
         // deleted from the list kept being served for the session unless the user happened
-        // to open Settings → AI Providers. drop(1) skips the initial value; only real
-        // invalidations should trigger a read.
+        // to open Settings → AI Providers. Capture the generation before launching: drop(1)
+        // lost an invalidation when the collector's first observation was already the bumped
+        // value, which left the stale connection seated indefinitely on a busy dispatcher.
         store?.let { credentialStore ->
+            val initialGeneration = credentialStore.invalidations.value
             scope.launch {
-                credentialStore.invalidations.drop(1).collect {
+                credentialStore.invalidations.afterGeneration(initialGeneration).collect {
                     if (connectionsLoadStarted.get()) {
                         try {
                             reloadConnections()

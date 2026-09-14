@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -79,6 +80,14 @@ class ConsumerProviderDiscoveryTest {
             scope.cancel()
             root.deleteRecursively()
         }
+    }
+
+    @Test fun `a late invalidation subscriber observes the changed generation`() = runBlocking {
+        val generations = MutableStateFlow(0L)
+        val initialGeneration = generations.value
+        generations.value = 1L
+
+        assertEquals(1L, withTimeout(1000) { generations.afterGeneration(initialGeneration).first() })
     }
 
     @Test fun `OpenRouter model metadata needs no default or settings visit`() = runBlocking {
