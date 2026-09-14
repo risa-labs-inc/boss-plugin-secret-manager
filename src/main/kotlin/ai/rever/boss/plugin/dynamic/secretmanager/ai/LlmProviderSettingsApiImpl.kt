@@ -155,7 +155,8 @@ class LlmProviderSettingsApiImpl(
             if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
                 return@runCatching null
             }
-            val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.CACHE_TTL_MS
+            val ttl = if (isManagedProvider(providerId)) ModelCatalog.SHARED_CACHE_TTL_MS else ModelCatalog.CACHE_TTL_MS
+            val validUntil = catalog.fetchedAtEpochMs + ttl
             val now = nowEpochMs()
             if (validUntil < catalog.fetchedAtEpochMs || catalog.fetchedAtEpochMs > now || now > validUntil) {
                 return@runCatching null

@@ -36,6 +36,7 @@ class ConsumerProviderDiscoveryTest {
         val nowEpochMs: AtomicLong = AtomicLong(System.currentTimeMillis()),
         clock: () -> Long = { maxOf(System.currentTimeMillis(), nowEpochMs.get()) },
         cachedAt: Long? = null,
+        duplicateCachedModel: Boolean = false,
     ) : AutoCloseable {
         val root = Files.createTempDirectory("consumer-provider").toFile()
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -43,9 +44,13 @@ class ConsumerProviderDiscoveryTest {
         val prefs = ActiveProviderPrefs(bossRootDir = root)
         val http = QueuedHttpClient(responses, always = response, beforeResponse = { beforeResponse() })
         val catalog = ModelCatalog(ModelCatalogClient(http), root).also {
-            if (cachedAt != null) java.io.File(root, "ai-model-catalog.json").writeText(
-                """{"version":2,"providers":{"OPENROUTER":{"fetchedAtEpochMs":$cachedAt,"models":[{"id":"consumer/model","displayName":"Cached","pricing":{"inputUsdPer1M":1.5,"outputUsdPer1M":6.0}}]}}}""",
-            )
+            if (cachedAt != null) {
+                val model = """{"id":"consumer/model","displayName":"Cached","pricing":{"inputUsdPer1M":1.5,"outputUsdPer1M":6.0}}"""
+                val models = if (duplicateCachedModel) "$model,$model" else model
+                java.io.File(root, "ai-model-catalog.json").writeText(
+                    """{"version":2,"providers":{"OPENROUTER":{"fetchedAtEpochMs":$cachedAt,"models":[$models]}}}""",
+                )
+            }
         }
         val secrets = FakeSecretDataProvider(emptyList())
         val store = ProviderCredentialStore(secrets, env)
@@ -115,6 +120,16 @@ class ConsumerProviderDiscoveryTest {
             clock.incrementAndGet()
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
             clock.set(fetched - 1)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+        }
+    }
+
+    @Test fun `duplicate cached model ids are refused at the API boundary`() = runBlocking {
+        Harness(cachedAt = System.currentTimeMillis(), duplicateCachedModel = true).use { h ->
+            h.load()
+            val loaded = h.catalog.stateOf(ProviderRegistry.OPENROUTER) as CatalogState.Loaded
+            assertTrue(loaded.fromCache)
+            assertEquals(2, loaded.models.size)
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
         }
     }

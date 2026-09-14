@@ -195,6 +195,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     gateway = GatewayPresence.from(context),
                 )
 
+            // Host DefaultPlugin.registerPluginAPI indexes every directly implemented interface;
+            // llmProvider returns this same instance, so consumers can cast to LlmModelPricingAPI.
             context.registerPluginAPI(LlmProviderSettingsApiImpl(viewModel))
 
             // Warm the credentials so the first AI action after a restart doesn't race
