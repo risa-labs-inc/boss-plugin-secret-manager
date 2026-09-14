@@ -142,6 +142,23 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `invalid cached pricing keeps the model unpriced`() =
+        runTest {
+            val dir = Files.createTempDirectory("catalog-invalid-pricing").toFile()
+            val router = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${router.id}":{"models":[{"id":"visible/model","displayName":"Visible model","pricing":{"inputUsdPer1M":-1,"outputUsdPer1M":2}}],"fetchedAtEpochMs":1000000}},"version":2}""",
+            )
+
+            val catalog = ModelCatalog(cacheDir = dir)
+            catalog.seedFromCache()
+
+            val model = (catalog.stateOf(router.id) as CatalogState.Loaded).models.single()
+            assertEquals("visible/model", model.id)
+            assertNull(model.pricing)
+        }
+
+    @Test
     fun `a cache written by a different format version is discarded`() =
         runTest {
             val dir = Files.createTempDirectory("catalog-version").toFile()

@@ -353,7 +353,8 @@ class ModelCatalog(
         val inputUsdPer1M: Double,
         val outputUsdPer1M: Double,
     ) {
-        fun toModelPricing(): ModelPricing = ModelPricing(inputUsdPer1M, outputUsdPer1M)
+        fun toModelPricing(): ModelPricing? =
+            runCatching { ModelPricing(inputUsdPer1M, outputUsdPer1M) }.getOrNull()
 
         companion object {
             fun from(pricing: ModelPricing): CachedPricing =

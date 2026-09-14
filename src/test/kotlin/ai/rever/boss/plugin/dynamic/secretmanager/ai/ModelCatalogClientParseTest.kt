@@ -39,6 +39,7 @@ class ModelCatalogClientParseTest {
         assertEquals(100, model.maxOutputTokens)
         assertTrue(model.isDefault)
         assertEquals(listOf("text", "tools"), model.capabilities)
+        assertNull(model.pricing)
         assertEquals(
             "day: 3000000000 / 4000000000 tokens remaining (resets 12 Sep 00:00 UTC)\n" +
                 "week: 5000 / 6000 tokens remaining (resets 14 Sep 00:00 UTC)",

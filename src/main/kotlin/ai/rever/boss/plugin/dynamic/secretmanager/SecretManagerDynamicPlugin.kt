@@ -85,7 +85,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         }
 
         val navigation = ProviderNavigation()
-        // Verified against the v1.0.73 tag (which predates the current 1.0.89 floor): PluginContext's
+        // Verified against the v1.0.73 tag (which predates the current 1.0.90 floor): PluginContext's
         // applicationEventBus, eventsOfType(Class<T>), and CustomPluginEvent's
         // eventName/payload all exist there, so this path needs no linkage adapter.
         context.applicationEventBus?.let { bus ->
@@ -106,7 +106,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
         // wouldn't be recognised as provider configuration by the other.
         //
         // Safe to construct outside the LinkageError guard below — ProviderCredentialStore
-        // and ProviderRegistry reference only api symbols covered by the 1.0.89 floor.
+        // and ProviderRegistry reference only api symbols covered by the 1.0.90 floor.
         val envResolver = EnvResolver()
         val credentialStore = ProviderCredentialStore(secretDataProvider, envResolver)
 
@@ -154,8 +154,8 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
      * PluginContext.llmProvider.
      *
      * Guarded as a final containment boundary for linkage failures. The declared api floor is
-     * still authoritative: it is 1.0.89 because [LlmProviderSettingsApiImpl.availableModels]
-     * exposes types introduced there, including in a lazily resolved method signature.
+     * still authoritative: it is 1.0.90 because [LlmProviderSettingsApiImpl] implements the
+     * native model-pricing companion introduced there.
      */
     private fun registerAiProviderSettings(
         context: PluginContext,
@@ -173,7 +173,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     ?.let { File(it) }
 
             // Inside the guard on purpose: a malformed host can still violate the declared
-            // 1.0.89 floor. Left unset when the host has no broker relay, which makes
+            // 1.0.90 floor. Left unset when the host has no broker relay, which makes
             // brokered providers report unconfigured instead of failing.
             credentialStore.brokeredKeys = BrokeredCredentialBridge.from(context)
 
@@ -190,7 +190,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     // optional gateway per call. Null costs the Local CLI section and nothing else.
                     cliEngines = GatewayCliEngineAccess.orNull(context),
                     // Not guarded by anything: every symbol it touches (PluginLoaderDelegate,
-                    // PanelEventProvider, PanelId, openPanel) predates this plugin's 1.0.89 floor.
+                    // PanelEventProvider, PanelId, openPanel) predates this plugin's 1.0.90 floor.
                     // It lives inside the guard only because the ViewModel that holds it does.
                     gateway = GatewayPresence.from(context),
                 )

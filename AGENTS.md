@@ -334,7 +334,7 @@ to discover that one plugin stood in the way.
 gateway serving no engines is a different fact from an absent one. It is ported from
 `user-secret-list`'s `SecretManagerLink` minus the part that does not apply: that plugin's floor is
 1.0.20, so it had to probe reflectively for `openPanel` (api 1.0.57). This plugin's floor is
-**1.0.89**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
+**1.0.90**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
 it and are called straight - a guard there would be dead code implying a risk that cannot occur.
 
 Two rules carried over from that port, both mutation-verified here:
@@ -618,7 +618,8 @@ provider's live model catalog. OpenRouter is the currently verified source: its 
 `pricing.prompt` and `pricing.completion` USD-per-token strings are converted to USD per million
 tokens, while any present additional charge must be an explicit numeric zero because `AiUsage`
 cannot account for it. Missing, malformed, negative, non-finite or partially representable pricing
-keeps the model usable but returns no rate card.
+keeps the model usable but returns no rate card. Managed BOSS AI publishes allowances rather than
+verified dollar rates and therefore remains unpriced.
 
 Pricing is available only from a current `CatalogState.Loaded` entry. `Failed.lastKnown` stays
 useful for the picker but never authorizes a budgeted call, and a loaded entry returns null after
@@ -862,7 +863,7 @@ Providers instead get an assisted flow: a "Get API key" button opening
 
 ### Linkage containment
 
-The manifest's declared `apiVersion` floor is **1.0.89** (`plugin.json`, both `apiVersion` and
+The manifest's declared `apiVersion` floor is **1.0.90** (`plugin.json`, both `apiVersion` and
 `minApiVersion`). Check it rather than trusting prose: this section has lagged the manifest twice.
 The registration guard remains a final containment boundary for malformed host installations,
 not a substitute for declaring every type in a public method signature. In particular,
@@ -922,7 +923,8 @@ providers report unconfigured - the same answer a host with no broker should giv
 ### Wire formats are direct at the declared API floor
 
 `LlmApiFormat.OPENAI_RESPONSES` once needed reflective resolution because it landed in 1.0.74
-while the plugin admitted 1.0.73 hosts. The 1.0.89 model-discovery signature raised the floor, so
+while the plugin admitted 1.0.73 hosts. Model discovery raised the floor to 1.0.89 and native
+model pricing raised it again to 1.0.90, so
 every enum constant used by `LlmProviderSettingsApiImpl` is now guaranteed and the reflective
 branch became misleading dead compatibility code. Map them directly; a new constant still requires
 checking its release against the manifest before use.

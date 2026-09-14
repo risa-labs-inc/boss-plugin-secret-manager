@@ -34,6 +34,7 @@ class ConsumerProviderDiscoveryTest {
         beforeResponse: () -> Unit = {},
         val nowNanos: AtomicLong = AtomicLong(0),
         val nowEpochMs: AtomicLong = AtomicLong(System.currentTimeMillis()),
+        clock: () -> Long = nowEpochMs::get,
     ) : AutoCloseable {
         val root = Files.createTempDirectory("consumer-provider").toFile()
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -55,7 +56,7 @@ class ConsumerProviderDiscoveryTest {
                 ollamaSystemCheck = probe,
                 monotonicNanos = nowNanos::get,
             )
-        val api = LlmProviderSettingsApiImpl(vm, nowEpochMs::get)
+        val api = LlmProviderSettingsApiImpl(vm, clock)
 
         suspend fun load() {
             api.availableModels()
@@ -93,7 +94,16 @@ class ConsumerProviderDiscoveryTest {
             assertEquals(6.0, pricing?.outputUsdPer1M)
             assertEquals("provider-catalog", pricing?.source)
             assertEquals(ModelCatalog.CACHE_TTL_MS, pricing!!.validUntilEpochMs - pricing.fetchedAtEpochMs)
+            assertNull(h.api.modelPricing("openrouter", "consumer/model"))
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model-alias"))
+        }
+    }
+
+    @Test fun `pricing lookup converts an implementation failure to unavailable`() = runBlocking {
+        Harness(clock = { error("broken clock") }).use { h ->
+            h.load()
+
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
         }
     }
 

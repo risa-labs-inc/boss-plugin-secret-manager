@@ -135,26 +135,36 @@ class LlmProviderSettingsApiImpl(
      * a picker, while an old rate must not authorize another budgeted call. Catalog refresh is
      * requested asynchronously; until it lands, the safe synchronous answer is null.
      */
-    override fun modelPricing(providerId: String, modelId: String): AiModelPricing? {
-        viewModel.ensureCatalogsLoaded()
-        val state = viewModel.state.value
-        val descriptor = state.providers.singleOrNull { it.id == providerId } ?: return null
-        val catalog = viewModel.catalogStateOf(providerId) as? CatalogState.Loaded ?: return null
-        val connection = state.connectionOf(providerId)
-        if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) return null
-        val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.CACHE_TTL_MS
-        if (validUntil < catalog.fetchedAtEpochMs || nowEpochMs() > validUntil) return null
-        val pricing = catalog.models.singleOrNull { it.id == modelId }?.pricing ?: return null
-        return AiModelPricing(
-            providerId = providerId,
-            modelId = modelId,
-            inputUsdPer1M = pricing.inputUsdPer1M,
-            outputUsdPer1M = pricing.outputUsdPer1M,
-            source = AiModelPricing.SOURCE_PROVIDER_CATALOG,
-            fetchedAtEpochMs = catalog.fetchedAtEpochMs,
-            validUntilEpochMs = validUntil,
-        )
-    }
+    override fun modelPricing(providerId: String, modelId: String): AiModelPricing? =
+        runCatching {
+            viewModel.ensureCatalogsLoaded()
+            val state = viewModel.state.value
+            val descriptor =
+                state.providers.singleOrNull { it.id == providerId } ?: return@runCatching null
+            val catalog =
+                viewModel.catalogStateOf(providerId) as? CatalogState.Loaded
+                    ?: return@runCatching null
+            val connection = state.connectionOf(providerId)
+            if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
+                return@runCatching null
+            }
+            val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.CACHE_TTL_MS
+            if (validUntil < catalog.fetchedAtEpochMs || nowEpochMs() > validUntil) {
+                return@runCatching null
+            }
+            val pricing =
+                catalog.models.singleOrNull { it.id == modelId }?.pricing
+                    ?: return@runCatching null
+            AiModelPricing(
+                providerId = providerId,
+                modelId = modelId,
+                inputUsdPer1M = pricing.inputUsdPer1M,
+                outputUsdPer1M = pricing.outputUsdPer1M,
+                source = AiModelPricing.SOURCE_PROVIDER_CATALOG,
+                fetchedAtEpochMs = catalog.fetchedAtEpochMs,
+                validUntilEpochMs = validUntil,
+            )
+        }.getOrNull()
 
     private fun configFor(providerId: String, requireModel: Boolean = true): LlmConfig? {
         // Every path that hands out a credential goes through here - `activeConfig` and
