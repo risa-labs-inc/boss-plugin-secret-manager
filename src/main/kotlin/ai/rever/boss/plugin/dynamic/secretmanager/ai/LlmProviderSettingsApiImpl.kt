@@ -16,8 +16,8 @@ import androidx.compose.ui.Modifier
  * Serves AI provider configuration to the host and to other plugins.
  *
  * [availableModels] references [AiProviderModels]/[AiAvailableModel], and this class implements
- * [LlmModelPricingAPI], pending API PR #59. The provisional manifest floor must be aligned
- * with its eventual release before publishing: a `LinkageError` guard around construction
+ * [LlmModelPricingAPI], assigned to API 1.0.92 by PR #59. That manifest floor must be retained
+ * when publishing: a `LinkageError` guard around construction
  * cannot protect a lazily resolved method signature or a host's binary compatibility scan.
  *
  * Reads state from [AiProvidersViewModel] rather than the store directly, so the
@@ -226,7 +226,7 @@ class LlmProviderSettingsApiImpl(
 
     /**
      * Map the plugin-local wire format onto the api enum. Every constant here predates
-     * the manifest's 1.0.90 floor, so reflective compatibility branches would be dead code.
+     * the manifest's 1.0.92 floor, so reflective compatibility branches would be dead code.
      */
     private fun WireFormat.toApiFormat(): LlmApiFormat =
         when (this) {

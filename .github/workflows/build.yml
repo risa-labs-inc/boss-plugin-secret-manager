@@ -10,7 +10,7 @@ jobs:
     uses: risa-labs-inc/BossConsole-Releases/.github/workflows/plugin-release.yml@main
     with:
       # 'latest', as every plugin repo does. The api is additive-only (apiCheck gates it), so
-      # API PR #59 must ship and the manifest floor must match it before release; a pin would
+      # API PR #59 must publish 1.0.92 before this plugin releases; a pin would
       # mean hand-bumping every plugin repo on each api release.
       boss_plugin_api_version: 'latest'
     secrets:

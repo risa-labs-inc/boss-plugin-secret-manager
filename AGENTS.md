@@ -8,7 +8,7 @@ Your credentials, secrets shared with you, Plugin Store API keys and AI provider
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.secretmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin`
-- **API Version**: 1.0.90 (`plugin.json` `apiVersion` and `minApiVersion`)
+- **API Version**: 1.0.92 (`plugin.json` `apiVersion` and `minApiVersion`)
 
 ## Essential Commands
 
@@ -334,7 +334,7 @@ to discover that one plugin stood in the way.
 gateway serving no engines is a different fact from an absent one. It is ported from
 `user-secret-list`'s `SecretManagerLink` minus the part that does not apply: that plugin's floor is
 1.0.20, so it had to probe reflectively for `openPanel` (api 1.0.57). This plugin's floor is
-**1.0.90**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
+**1.0.92**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
 it and are called straight - a guard there would be dead code implying a risk that cannot occur.
 
 Two rules carried over from that port, both mutation-verified here:
@@ -613,9 +613,9 @@ false across that invalidation and becomes true only after the replacement sweep
 
 ### Native USD pricing is catalog-derived and freshness-bounded
 
-Release gate: API PR #59 is still pending; released v1.0.90 contains an unrelated change
-and lacks the pricing types. Align both manifest floors to the actual pricing release and
-verify hosted CI against that published artifact before merging this change.
+Release gate: API PR #59 is still pending and assigned v1.0.92; released v1.0.91 lacks the
+pricing types. Both manifest floors are pinned to 1.0.92, and hosted CI must verify against that
+published artifact before this plugin merges.
 
 `LlmModelPricingAPI.modelPricing(providerId, modelId)` exposes only complete rates retained from a
 provider's live model catalog. OpenRouter is the currently verified source: its documented
@@ -882,7 +882,7 @@ Providers instead get an assisted flow: a "Get API key" button opening
 
 ### Linkage containment
 
-The manifest's declared `apiVersion` floor is **1.0.90** (`plugin.json`, both `apiVersion` and
+The manifest's declared `apiVersion` floor is **1.0.92** (`plugin.json`, both `apiVersion` and
 `minApiVersion`). Check it rather than trusting prose: this section has lagged the manifest twice.
 The registration guard remains a final containment boundary for malformed host installations,
 not a substitute for declaring every type in a public method signature. In particular,
@@ -890,8 +890,8 @@ not a substitute for declaring every type in a public method signature. In parti
 `availableModels()`'s signature, can resolve after guarded construction, and may be inspected by
 the host's binary validator before registration. Native pricing additionally names `AiModelPricing`
 and implements `LlmModelPricingAPI` directly, exposing linkage before any method is called.
-Their actual release must determine the floor (see the release gate above), rather than claiming
-the construction guard makes older hosts safe.
+Their assigned 1.0.92 release determines the floor (see the release gate above); the construction
+guard does not make older hosts safe.
 
 Earlier audits remain useful evidence. Verified against the api tags:
 `PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
@@ -924,7 +924,7 @@ The cross-plugin navigation path was checked against **v1.0.73**, not the newest
 `CustomPluginEvent.eventName`/`payload` are all present there and therefore below today's floor.
 
 `BrokerInfo.scopedTo` is also read by `BrokeredCredentialBridge`. Verified against
-the released `v1.0.74` source, it predates the 1.0.90 floor. Scope is looked up live:
+the released `v1.0.74` source, it predates the 1.0.92 floor. Scope is looked up live:
 the current host lists signed-out brokers with `available=false`, but the API does
 not promise every host keeps the same list throughout registration and sign-in.
 
@@ -932,7 +932,7 @@ not promise every host keeps the same list throughout registration and sign-in.
 only files that name the newer AI API types (`LlmProviderSettingsAPI` and
 `LlmApiFormat.GOOGLE_GENERATIVE` from 1.0.71; `BrokeredCredentialProvider`,
 `PluginContext.brokeredCredentialProvider` and `LlmApiFormat.OPENAI_RESPONSES` from 1.0.74;
-`AiCliSessionAPI` and `AiCliHealth` from 1.0.78; model discovery types from 1.0.89; native pricing types pending API PR #59).
+`AiCliSessionAPI` and `AiCliHealth` from 1.0.78; model discovery types from 1.0.89; native pricing types assigned to 1.0.92 by API PR #59).
 Everything else uses the plugin-local `WireFormat` enum, the plugin-local `BrokeredKeySource`
 seam, and the plugin-local `CliEngineAccess` seam. Keep the adapter boundary even with the higher
 floor: it limits blast radius when a host API installation is incoherent.
@@ -945,7 +945,7 @@ providers report unconfigured - the same answer a host with no broker should giv
 
 `LlmApiFormat.OPENAI_RESPONSES` once needed reflective resolution because it landed in 1.0.74
 while the plugin admitted 1.0.73 hosts. Model discovery raised the floor to 1.0.89 and native
-model pricing raised it again to 1.0.90, so
+model pricing raised it again to 1.0.92, so
 every enum constant used by `LlmProviderSettingsApiImpl` is now guaranteed and the reflective
 branch became misleading dead compatibility code. Map them directly; a new constant still requires
 checking its release against the manifest before use.
