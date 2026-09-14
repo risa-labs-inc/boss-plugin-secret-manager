@@ -5,8 +5,10 @@ import ai.rever.boss.plugin.api.AiModelPricing
 import ai.rever.boss.plugin.api.AiProviderModels
 import ai.rever.boss.plugin.api.LlmApiFormat
 import ai.rever.boss.plugin.api.LlmConfig
-import ai.rever.boss.plugin.api.LlmProviderSettingsAPI
 import ai.rever.boss.plugin.api.LlmModelPricingAPI
+import ai.rever.boss.plugin.api.LlmProviderSettingsAPI
+import ai.rever.boss.plugin.logging.BossLogger
+import ai.rever.boss.plugin.logging.LogCategory
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
@@ -14,10 +16,9 @@ import androidx.compose.ui.Modifier
  * Serves AI provider configuration to the host and to other plugins.
  *
  * [availableModels] references [AiProviderModels]/[AiAvailableModel], and this class implements
- * [LlmModelPricingAPI], introduced in api 1.0.90. The manifest therefore declares 1.0.90 as its
- * floor: a `LinkageError` guard around construction cannot protect a lazily resolved method
- * signature or a host's
- * pre-registration binary compatibility scan.
+ * [LlmModelPricingAPI], pending API PR #59. The provisional manifest floor must be aligned
+ * with its eventual release before publishing: a `LinkageError` guard around construction cannot protect a lazily resolved method
+ * signature or a host's pre-registration binary compatibility scan.
  *
  * Reads state from [AiProvidersViewModel] rather than the store directly, so the
  * panel and API can never disagree about which provider is active.
@@ -26,6 +27,8 @@ class LlmProviderSettingsApiImpl(
     private val viewModel: AiProvidersViewModel,
     private val nowEpochMs: () -> Long = System::currentTimeMillis,
 ) : LlmProviderSettingsAPI, LlmModelPricingAPI {
+
+    private val logger = BossLogger.forComponent("LlmProviderSettingsApi")
 
     /** This implementation does render a panel, so the host shouldn't show its notice. */
     override val supportsSettingsPanel: Boolean = true
@@ -136,9 +139,11 @@ class LlmProviderSettingsApiImpl(
      * requested asynchronously; until it lands, the safe synchronous answer is null.
      */
     override fun modelPricing(providerId: String, modelId: String): AiModelPricing? =
+        // Intentional non-throwing API boundary, including malformed host linkage.
         runCatching {
             viewModel.ensureCatalogsLoaded()
             val state = viewModel.state.value
+            // Ambiguous ids must not authorize a budgeted call, even if the picker shows one.
             val descriptor =
                 state.providers.singleOrNull { it.id == providerId } ?: return@runCatching null
             val catalog =
@@ -163,6 +168,13 @@ class LlmProviderSettingsApiImpl(
                 source = AiModelPricing.SOURCE_PROVIDER_CATALOG,
                 fetchedAtEpochMs = catalog.fetchedAtEpochMs,
                 validUntilEpochMs = validUntil,
+            )
+        }.onFailure {
+            // No ids, payloads, exception messages or credentials cross this log boundary.
+            logger.debug(
+                LogCategory.SYSTEM,
+                "Model pricing lookup failed",
+                mapOf("exception" to it.javaClass.simpleName),
             )
         }.getOrNull()
 
@@ -207,7 +219,7 @@ class LlmProviderSettingsApiImpl(
 
     /**
      * Map the plugin-local wire format onto the api enum. Every constant here predates
-     * the manifest's 1.0.89 floor, so reflective compatibility branches would be dead code.
+     * the manifest's 1.0.90 floor, so reflective compatibility branches would be dead code.
      */
     private fun WireFormat.toApiFormat(): LlmApiFormat =
         when (this) {

@@ -8,7 +8,7 @@ import ai.rever.boss.plugin.api.PluginContext
  * [BrokeredKeySource] seam.
  *
  * This adapter keeps host API types out of the credential store even though they predate
- * the manifest's 1.0.89 floor. The boundary still makes the store independently testable
+ * the manifest's 1.0.90 floor. The boundary still makes the store independently testable
  * and limits an incoherent host installation to AI settings registration. See AGENTS.md.
  *
  * BOSS AI uses the generic authenticated RPC API through [BossAiCredentialSource].

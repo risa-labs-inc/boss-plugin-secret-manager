@@ -251,7 +251,7 @@ class ModelCatalogClientParseTest {
         runTest {
             val body = """
                 {"data":[{"id":"free-model","pricing":{"prompt":"0","completion":"0",
-                "request":"0","web_search":"0","future_charge":"0"}}]}
+                "request":"0.0","web_search":"0.00","future_charge":"0E-8"}}]}
             """.trimIndent()
 
             val pricing =

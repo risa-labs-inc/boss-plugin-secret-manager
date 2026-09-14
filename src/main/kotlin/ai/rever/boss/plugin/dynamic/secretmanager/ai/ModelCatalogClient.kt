@@ -490,7 +490,7 @@ class ModelCatalogClient(
         val prompt = pricing.usd("prompt") ?: return null
         val completion = pricing.usd("completion") ?: return null
         if (pricing.any { (name, value) ->
-                name != "prompt" && name != "completion" && value.usdOrNull() != BigDecimal.ZERO
+                name != "prompt" && name != "completion" && value.usdOrNull()?.signum() != 0
             }
         ) return null
 

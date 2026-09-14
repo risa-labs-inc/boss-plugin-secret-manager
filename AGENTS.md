@@ -613,6 +613,10 @@ false across that invalidation and becomes true only after the replacement sweep
 
 ### Native USD pricing is catalog-derived and freshness-bounded
 
+Release gate: API PR #59 is still pending; released v1.0.90 contains an unrelated change
+and lacks the pricing types. Align both manifest floors to the actual pricing release and
+verify hosted CI against that published artifact before merging this change.
+
 `LlmModelPricingAPI.modelPricing(providerId, modelId)` exposes only complete rates retained from a
 provider's live model catalog. OpenRouter is the currently verified source: its documented
 `pricing.prompt` and `pricing.completion` USD-per-token strings are converted to USD per million
@@ -625,6 +629,17 @@ Pricing is available only from a current `CatalogState.Loaded` entry. `Failed.la
 useful for the picker but never authorizes a budgeted call, and a loaded entry returns null after
 its catalog TTL. Provider/model ids match exactly; aliases are never inferred. Version-two disk
 caches retain verified rates and force old model-only caches through a fresh provider fetch.
+This deliberately discards v1 picker lists on upgrade: an offline user has no cached picker
+until a successful fetch. Keeping the version gate also prevents old cache entries from being
+laundered into verified v2 entries by a later cache write.
+
+The auxiliary-charge rule deliberately sacrifices coverage: consumers cannot declare which
+cache, image, audio or search features they use through this pricing contract, so excluding
+those charges from an allegedly complete budget card could undercount spend. On 2026-09-14,
+the public OpenRouter `/api/v1/models` snapshot admitted 127 of 445 models under the numeric-zero
+rule; 277 had nonzero cache-read charges (rejection categories overlap). This is partial coverage,
+not universal OpenRouter pricing. Zero accepts decimal and exponent representations equally.
+Duplicate provider/model ids deliberately yield no pricing rather than choosing an ambiguous card.
 
 ### Legacy plaintext key import
 
@@ -903,7 +918,7 @@ The cross-plugin navigation path was checked against **v1.0.73**, not the newest
 `CustomPluginEvent.eventName`/`payload` are all present there and therefore below today's floor.
 
 `BrokerInfo.scopedTo` is also read by `BrokeredCredentialBridge`. Verified against
-the released `v1.0.74` source, it predates the 1.0.89 floor. Scope is looked up live:
+the released `v1.0.74` source, it predates the 1.0.90 floor. Scope is looked up live:
 the current host lists signed-out brokers with `available=false`, but the API does
 not promise every host keeps the same list throughout registration and sign-in.
 

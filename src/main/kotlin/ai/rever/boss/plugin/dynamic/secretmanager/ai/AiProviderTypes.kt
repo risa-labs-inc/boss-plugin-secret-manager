@@ -237,8 +237,8 @@ data class ModelPricing(
     val outputUsdPer1M: Double,
 ) {
     init {
-        require(inputUsdPer1M.isFinite() && inputUsdPer1M >= 0.0)
-        require(outputUsdPer1M.isFinite() && outputUsdPer1M >= 0.0)
+        require(inputUsdPer1M.isFinite() && inputUsdPer1M >= 0.0) { "Input USD rate must be finite and non-negative" }
+        require(outputUsdPer1M.isFinite() && outputUsdPer1M >= 0.0) { "Output USD rate must be finite and non-negative" }
     }
 }
 
