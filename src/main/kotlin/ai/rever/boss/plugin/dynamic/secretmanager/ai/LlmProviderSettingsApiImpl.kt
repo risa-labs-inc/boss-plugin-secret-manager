@@ -17,8 +17,8 @@ import androidx.compose.ui.Modifier
  *
  * [availableModels] references [AiProviderModels]/[AiAvailableModel], and this class implements
  * [LlmModelPricingAPI], assigned to API 1.0.92 by PR #59. That manifest floor must be retained
- * when publishing: a `LinkageError` guard around construction
- * cannot protect a lazily resolved method signature or a host's binary compatibility scan.
+ * when publishing: a `LinkageError` guard around construction cannot protect a lazily resolved
+ * method signature or a host's binary compatibility scan.
  *
  * Reads state from [AiProvidersViewModel] rather than the store directly, so the
  * panel and API can never disagree about which provider is active.
@@ -139,6 +139,10 @@ class LlmProviderSettingsApiImpl(
      * This never falls back to [CatalogState.Failed.lastKnown]: an old model name is useful in
      * a picker, while an old rate must not authorize another budgeted call. Catalog refresh is
      * requested asynchronously; until it lands, the safe synchronous answer is null.
+     * Consumers pricing a catalog should retain returned cards through [AiModelPricing.validUntilEpochMs]
+     * rather than repeat this provider/model lookup for every rendered row.
+     * This API is synchronous and non-throwing by contract. Its containment includes a
+     * synchronously thrown `CancellationException`; there is no suspending work to cancel here.
      */
     override fun modelPricing(providerId: String, modelId: String): AiModelPricing? =
         // Non-suspending on purpose: the API boundary contains even malformed host linkage.
@@ -155,7 +159,7 @@ class LlmProviderSettingsApiImpl(
             if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) {
                 return@runCatching null
             }
-            val ttl = if (isManagedProvider(providerId)) ModelCatalog.SHARED_CACHE_TTL_MS else ModelCatalog.CACHE_TTL_MS
+            val ttl = ModelCatalog.ttlFor(providerId)
             val validUntil = catalog.fetchedAtEpochMs + ttl
             val now = nowEpochMs()
             if (validUntil < catalog.fetchedAtEpochMs || catalog.fetchedAtEpochMs > now || now > validUntil) {
@@ -173,7 +177,7 @@ class LlmProviderSettingsApiImpl(
                 fetchedAtEpochMs = catalog.fetchedAtEpochMs,
                 validUntilEpochMs = validUntil,
             )
-        }.onFailure {
+        }.fold(onSuccess = { it }, onFailure = {
             // No ids, payloads, exception messages or credentials cross this log boundary.
             val exceptionClass = it.javaClass.simpleName
             runCatching {
@@ -183,7 +187,8 @@ class LlmProviderSettingsApiImpl(
                     mapOf("exception" to exceptionClass),
                 )
             }
-        }.getOrNull()
+            null
+        })
 
     private fun configFor(providerId: String, requireModel: Boolean = true): LlmConfig? {
         // Every path that hands out a credential goes through here - `activeConfig` and

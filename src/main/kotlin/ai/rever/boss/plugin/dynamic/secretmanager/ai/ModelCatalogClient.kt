@@ -139,11 +139,13 @@ class ModelCatalogClient(
             matches.first().let { if (matches.size > 1) it.copy(pricing = null) else it }
         }
         if (descriptor.id == ProviderRegistry.OPENROUTER) {
-            logger.debug(
-                LogCategory.NETWORK,
-                "OpenRouter pricing coverage",
-                mapOf("models" to models.size, "priced" to models.count { it.pricing != null }),
-            )
+            val priced = models.count { it.pricing != null }
+            val context = mapOf("models" to models.size, "priced" to priced)
+            if (models.isNotEmpty() && priced == 0) {
+                logger.warn(LogCategory.NETWORK, "OpenRouter pricing coverage fell to zero", context)
+            } else {
+                logger.debug(LogCategory.NETWORK, "OpenRouter pricing coverage", context)
+            }
         }
         return Result.success(models.sortedBy { it.displayName.lowercase() })
     }

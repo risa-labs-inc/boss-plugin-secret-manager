@@ -7,6 +7,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -115,6 +116,9 @@ class ConsumerProviderDiscoveryTest {
         Harness(cachedAt = fetched, clock = clock::get).use { h ->
             h.load()
             assertTrue((h.catalog.stateOf(ProviderRegistry.OPENROUTER) as CatalogState.Loaded).fromCache)
+            // ModelCatalog still compares against the real wall clock while this API-boundary
+            // clock is injected. That split is why the cache remains fresh without an HTTP fetch
+            // as the API clock is moved across its exact inclusive deadline below.
             assertEquals(0, h.http.requests.size)
             assertEquals(1.5, h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")?.inputUsdPer1M)
             clock.incrementAndGet()
@@ -158,6 +162,14 @@ class ConsumerProviderDiscoveryTest {
 
     @Test fun `pricing lookup converts an implementation failure to unavailable`() = runBlocking {
         Harness(clock = { error("broken clock") }).use { h ->
+            h.load()
+
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+        }
+    }
+
+    @Test fun `pricing lookup contains a synchronous cancellation-shaped failure`() = runBlocking {
+        Harness(clock = { throw CancellationException("plugin stopped") }).use { h ->
             h.load()
 
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))

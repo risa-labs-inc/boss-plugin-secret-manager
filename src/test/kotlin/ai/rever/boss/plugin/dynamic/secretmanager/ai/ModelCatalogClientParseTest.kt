@@ -27,6 +27,7 @@ class ModelCatalogClientParseTest {
         ).descriptor("entry")
         val body = """{"data":[{"id":"published","name":"Published","is_default":true,
             "context_length":2048,"max_output_tokens":100,"capabilities":["text","tools",true,42],
+            "pricing":{"prompt":"0.000001","completion":"0.000002"},
             "allowance":{
               "day":{"remaining":3000000000,"limit":4000000000,"resets_at":"2026-09-12T00:00:00Z"},
               "week":{"remaining":"5000","limit":"6000","resets_at":"2026-09-14T00:00:00+00:00"},

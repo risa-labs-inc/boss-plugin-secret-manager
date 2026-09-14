@@ -27,6 +27,7 @@ class BossAiDiscoveryTest {
         "brokerId":"boss-ai","baseUrl":"${BossAiCredentialSource.API_SCOPE}","defaultForNewUsers":true}"""
     private val models = """{"data":[{"id":"a","name":"A"},{"id":"z","name":"Z",
         "is_default":true,"max_output_tokens":100,"context_length":2048,"capabilities":["text","tools"],
+        "pricing":{"prompt":"0.000001","completion":"0.000002"},
         "allowance":{"day":{"remaining":10000}}}]}"""
     private val tokenResponse get() = """{"access_token":"ai-only-token","refresh_after_seconds":180,
         "expires_at":"${Instant.now().plusSeconds(300)}"}"""
@@ -74,6 +75,7 @@ class BossAiDiscoveryTest {
             assertEquals(id, config.providerId)
             assertEquals("z", config.modelId)
             assertEquals(100, config.maxTokens)
+            assertNull(api.modelPricing(id, "z"), "managed allowance catalogs do not publish dollar rates")
             assertEquals("Included AI", vm.state.value.providers.first { it.id == id }.displayName)
             assertFalse(vm.state.value.storeAvailable)
             vm.selectModel(id, "a")

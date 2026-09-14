@@ -173,6 +173,20 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `a realistic v1 model-only cache is discarded on upgrade`() =
+        runTest {
+            val dir = Files.createTempDirectory("catalog-v1-upgrade").toFile()
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${descriptor.id}":{"models":[{"id":"gpt-5","displayName":"GPT-5"}],"fetchedAtEpochMs":1000000}},"version":1}""",
+            )
+            val catalog = ModelCatalog(cacheDir = dir)
+
+            catalog.seedFromCache()
+
+            assertEquals(CatalogState.NotConfigured, catalog.stateOf(descriptor.id))
+        }
+
+    @Test
     fun `a provider with no credential is reported not-configured`() {
         val catalog = catalog()
         catalog.markNotConfigured(descriptor.id)
