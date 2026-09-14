@@ -141,9 +141,6 @@ data class AiProvidersUiState(
     fun cliHealthOf(engineId: String): CliEngineHealth = cliHealth[engineId] ?: CliEngineHealth.Unknown
 }
 
-/** Keep a generation change even when collection starts after the StateFlow has conflated it. */
-internal fun StateFlow<Long>.afterGeneration(generation: Long) = dropWhile { it == generation }
-
 /**
  * Drives the AI providers panel: resolves credentials, keeps model lists current, and
  * persists changes.
@@ -298,7 +295,7 @@ class AiProvidersViewModel(
         store?.let { credentialStore ->
             val initialGeneration = credentialStore.invalidations.value
             scope.launch {
-                credentialStore.invalidations.afterGeneration(initialGeneration).collect {
+                credentialStore.invalidations.dropWhile { it == initialGeneration }.collect {
                     if (connectionsLoadStarted.get()) {
                         try {
                             reloadConnections()

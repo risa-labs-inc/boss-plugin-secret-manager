@@ -3,12 +3,14 @@ package ai.rever.boss.plugin.dynamic.secretmanager.ai
 import ai.rever.boss.plugin.api.SecretEntryData
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -17,11 +19,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.CoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -29,6 +31,26 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ConsumerProviderDiscoveryTest {
+    private class HoldingDispatcher : CoroutineDispatcher() {
+        private val held = ConcurrentLinkedQueue<Runnable>()
+        private val hold = AtomicBoolean(true)
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            if (hold.get()) held += block else Dispatchers.Default.dispatch(context, block)
+        }
+
+        fun allowNewDispatches() {
+            hold.set(false)
+        }
+
+        fun releaseHeld() {
+            while (true) {
+                val block = held.poll() ?: return
+                Dispatchers.Default.dispatch(kotlin.coroutines.EmptyCoroutineContext, block)
+            }
+        }
+    }
+
     private class Harness(
         keys: Map<String, String> = mapOf("OPENROUTER_API_KEY" to "test-only-key"),
         response: Pair<Int, String> = 200 to """{"data":[{"id":"consumer/model","name":"Consumer model","context_length":131072,"pricing":{"prompt":"0.0000015","completion":"0.000006"}}]}""",
@@ -40,9 +62,10 @@ class ConsumerProviderDiscoveryTest {
         clock: () -> Long = { maxOf(System.currentTimeMillis(), nowEpochMs.get()) },
         cachedAt: Long? = null,
         duplicateCachedModel: Boolean = false,
+        scopeDispatcher: CoroutineDispatcher = Dispatchers.Default,
     ) : AutoCloseable {
         val root = Files.createTempDirectory("consumer-provider").toFile()
-        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val scope = CoroutineScope(scopeDispatcher + SupervisorJob())
         val env = EnvResolver(root, processEnv = keys::get, systemProperty = { null }, useLaunchctl = false)
         val prefs = ActiveProviderPrefs(bossRootDir = root)
         val http = QueuedHttpClient(responses, always = response, beforeResponse = { beforeResponse() })
@@ -82,12 +105,23 @@ class ConsumerProviderDiscoveryTest {
         }
     }
 
-    @Test fun `a late invalidation subscriber observes the changed generation`() = runBlocking {
-        val generations = MutableStateFlow(0L)
-        val initialGeneration = generations.value
-        generations.value = 1L
+    @Test fun `an invalidation before the ViewModel collector subscribes still reloads credentials`() = runBlocking {
+        val dispatcher = HoldingDispatcher()
+        Harness(scopeDispatcher = dispatcher).use { h ->
+            // The ViewModel's constructor callbacks remain queued while work requested after
+            // construction can run. This deterministically models a busy dispatcher delaying
+            // the invalidation collector without delaying the consumer's initial load.
+            dispatcher.allowNewDispatches()
+            h.load()
+            val pageCount = h.secrets.pageRequests.size
 
-        assertEquals(1L, withTimeout(1000) { generations.afterGeneration(initialGeneration).first() })
+            h.store.invalidate()
+            dispatcher.releaseHeld()
+
+            withTimeout(5000) {
+                while (h.secrets.pageRequests.size <= pageCount) delay(10)
+            }
+        }
     }
 
     @Test fun `OpenRouter model metadata needs no default or settings visit`() = runBlocking {
