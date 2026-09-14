@@ -3,7 +3,9 @@ package ai.rever.boss.plugin.dynamic.secretmanager
 import ai.rever.boss.plugin.api.CreateSecretRequestData
 import ai.rever.boss.plugin.api.PaginatedSecretsData
 import ai.rever.boss.plugin.api.PaginatedSecretsWithSharingData
+import ai.rever.boss.plugin.api.PaginatedSecretsWithSharingAccessData
 import ai.rever.boss.plugin.api.SecretDataProvider
+import ai.rever.boss.plugin.api.SecretEntryWithSharingAccessData
 import ai.rever.boss.plugin.api.SecretEntryWithSharingData
 import ai.rever.boss.plugin.api.SecretShareData
 import ai.rever.boss.plugin.api.ShareSecretRequestData
@@ -31,6 +33,46 @@ import kotlin.test.assertTrue
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SharedSecretsViewModelTest {
+    @Test
+    fun `organization ownership survives the shared-secrets load`() =
+        runTest {
+            val shared = entry("org-shared", "billing.example", accessLevel = "read", isOwner = false)
+            val provider =
+                FakeSharingProvider(
+                    all = listOf(shared),
+                    accessOverrides =
+                        mapOf(
+                            shared.id to
+                                SecretEntryWithSharingAccessData(
+                                    secret = shared,
+                                    orgId = "org-17",
+                                    orgSlug = "platform-team",
+                                    isOrgOwned = true,
+                                    canManage = false,
+                                ),
+                        ),
+                )
+            val viewModel = SharedSecretsViewModel(provider, this)
+
+            viewModel.ensureLoaded()
+            advanceUntilIdle()
+
+            assertEquals("platform-team", viewModel.state.value.secretAccess.getValue(shared.id).orgSlug)
+            assertEquals(
+                "PLATFORM-TEAM",
+                sharedSecretOrganizationLabel(viewModel.state.value.secretAccess.getValue(shared.id)),
+            )
+        }
+
+    @Test
+    fun `organization ownership label has a safe fallback and personal rows have none`() {
+        assertEquals(
+            "ORGANIZATION",
+            sharedSecretOrganizationLabel(SecretAccessState(isOrgOwned = true, canManage = false)),
+        )
+        assertEquals(null, sharedSecretOrganizationLabel(SecretAccessState.READ_ONLY))
+    }
+
     @Test
     fun `only secrets actually shared with me appear in the section`() =
         runTest {
@@ -475,6 +517,7 @@ class SharedSecretsViewModelTest {
      */
     private class FakeSharingProvider(
         private val all: List<SecretEntryWithSharingData>,
+        private val accessOverrides: Map<String, SecretEntryWithSharingAccessData> = emptyMap(),
         private val failWith: String? = null,
         /** Forces `hasMore`, to reach the shape the host should never send. */
         private val hasMoreOverride: Boolean? = null,
@@ -513,6 +556,21 @@ class SharedSecretsViewModelTest {
                 ),
             )
         }
+
+        override suspend fun getUserSecretsWithSharingAccess(
+            limit: Int,
+            offset: Int,
+        ): Result<PaginatedSecretsWithSharingAccessData> =
+            getUserSecretsWithSharingInfo(limit, offset).map { page ->
+                PaginatedSecretsWithSharingAccessData(
+                    data =
+                        page.data.map { secret ->
+                            accessOverrides[secret.id]
+                                ?: SecretEntryWithSharingAccessData(secret = secret, canManage = false)
+                        },
+                    hasMore = page.hasMore,
+                )
+            }
 
         override suspend fun getUserSecrets(
             limit: Int,

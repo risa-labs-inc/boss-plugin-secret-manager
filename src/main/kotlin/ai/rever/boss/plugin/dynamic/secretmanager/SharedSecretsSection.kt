@@ -40,6 +40,7 @@ import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Api
+import androidx.compose.material.icons.filled.Business
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Event
 import androidx.compose.material.icons.filled.ExpandLess
@@ -132,6 +133,7 @@ internal fun SharedSecretsSection(
             else ->
                 SharedSecretList(
                     secrets = state.shared,
+                    secretAccess = state.secretAccess,
                     listState = listState,
                     expandedSecretIds = state.expandedSecretIds,
                     onToggleMetadata = onToggleMetadata,
@@ -213,6 +215,7 @@ private fun sharedSecretsSummary(state: SharedSecretsState): String =
 @Composable
 private fun SharedSecretList(
     secrets: List<SecretEntryWithSharingData>,
+    secretAccess: Map<String, SecretAccessState>,
     listState: LazyListState,
     expandedSecretIds: Set<String>,
     onToggleMetadata: (String) -> Unit,
@@ -266,6 +269,7 @@ private fun SharedSecretList(
         items(items = secrets, key = { it.id }) { secret ->
             SharedSecretCard(
                 secret = secret,
+                access = secretAccess[secret.id] ?: SecretAccessState.READ_ONLY,
                 isMetadataExpanded = expandedSecretIds.contains(secret.id),
                 onToggleMetadata = { onToggleMetadata(secret.id) },
                 onCopySecret = onCopySecret,
@@ -334,6 +338,7 @@ private fun SharedSecretList(
 @Composable
 private fun SharedSecretCard(
     secret: SecretEntryWithSharingData,
+    access: SecretAccessState,
     isMetadataExpanded: Boolean,
     onToggleMetadata: () -> Unit,
     onCopySecret: (String) -> Unit,
@@ -397,6 +402,14 @@ private fun SharedSecretCard(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier.padding(start = 8.dp),
                 ) {
+                    sharedSecretOrganizationLabel(access)?.let { organization ->
+                        SharedSecretBadge(
+                            label = organization,
+                            icon = Icons.Default.Business,
+                            color = BossThemeColors.AccentColor,
+                        )
+                    }
+
                     if (isApiKey) {
                         SharedSecretBadge(
                             // Upper-cased like the access level directly below it: both are
@@ -508,6 +521,10 @@ private fun SharedSecretCard(
         }
     }
 }
+
+/** A stable, testable label for organization-owned rows; personal rows do not get a badge. */
+internal fun sharedSecretOrganizationLabel(access: SecretAccessState): String? =
+    if (access.isOrgOwned) access.orgSlug?.takeIf(String::isNotBlank)?.uppercase() ?: "ORGANIZATION" else null
 
 /**
  * Copy-to-clipboard for a name, which is not a credential and should not look like one.
