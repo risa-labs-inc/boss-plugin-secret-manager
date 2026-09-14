@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -107,6 +108,33 @@ class ConsumerProviderDiscoveryTest {
             assertEquals(ModelCatalog.CACHE_TTL_MS, pricing!!.validUntilEpochMs - pricing.fetchedAtEpochMs)
             assertNull(h.api.modelPricing("openrouter", "consumer/model"))
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model-alias"))
+        }
+    }
+
+    @Test fun `fresh pricing lookup does not re-enter shared provider discovery`() = runBlocking {
+        Harness().use { h ->
+            h.load()
+            val hostChecks = AtomicInteger()
+            h.store.brokeredKeys = object : BrokeredKeySource {
+                override suspend fun fetch(brokerId: String) = Result.failure<BrokeredKey>(AssertionError("not used"))
+                override val supportsSharedProviders = true
+                override fun canDiscoverSharedProviders(): Boolean {
+                    hostChecks.incrementAndGet()
+                    return false
+                }
+            }
+
+            assertEquals(1.5, h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")?.inputUsdPer1M)
+            assertEquals(0, hostChecks.get(), "a fresh in-memory rate card reached the host broker registry")
+        }
+    }
+
+    @Test fun `cold pricing lookup starts discovery for a later synchronous read`() = runBlocking {
+        Harness().use { h ->
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+            withTimeout(5000) { h.vm.catalogsLoaded.first { it } }
+
+            assertEquals(1.5, h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")?.inputUsdPer1M)
         }
     }
 
