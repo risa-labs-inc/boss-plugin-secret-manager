@@ -627,7 +627,11 @@ verified dollar rates and therefore remains unpriced.
 
 Pricing is available only from a current `CatalogState.Loaded` entry. `Failed.lastKnown` stays
 useful for the picker but never authorizes a budgeted call, and a loaded entry returns null after
-its catalog TTL. Provider/model ids match exactly; aliases are never inferred. Version-two disk
+its catalog TTL. A provider must also remain listed under the machine-facing rule, including a
+current credential for keyed providers; a loaded catalog alone does not authorize pricing.
+Provider/model ids match exactly; aliases are never inferred. A catalog timestamp ahead of the
+wall clock fails closed until time catches up or discovery replaces it, even while the picker can
+still show that catalog. Version-two disk
 caches retain verified rates and force old model-only caches through a fresh provider fetch.
 This deliberately discards v1 picker lists on upgrade: an offline user has no cached picker
 until a successful fetch. The version gate rejects stale or unstamped formats and requires new
@@ -639,7 +643,7 @@ those charges from an allegedly complete budget card could undercount spend. On 
 the public OpenRouter `/api/v1/models` snapshot admitted 127 of 445 models under the numeric-zero
 rule; 277 had nonzero cache-read charges (rejection categories overlap). This is partial coverage,
 not universal OpenRouter pricing. Zero accepts decimal and exponent representations equally.
-Duplicate provider/model ids deliberately yield no pricing rather than choosing an ambiguous card.
+Duplicate model ids deliberately yield no pricing rather than choosing an ambiguous card.
 The fetcher's picker deduplication must clear pricing on duplicate ids before choosing the first
 entry; otherwise the API's singleOrNull check never sees the ambiguity. Positive decimal rates
 that underflow to Double zero are unpriced, not free. Coverage counts are logged once per fetch;
@@ -936,6 +940,11 @@ only files that name the newer AI API types (`LlmProviderSettingsAPI` and
 Everything else uses the plugin-local `WireFormat` enum, the plugin-local `BrokeredKeySource`
 seam, and the plugin-local `CliEngineAccess` seam. Keep the adapter boundary even with the higher
 floor: it limits blast radius when a host API installation is incoherent.
+
+BOSS v9.4.2 `DefaultPlugin.registerPluginAPI` indexes every directly implemented interface.
+`LlmProviderSettingsApiImpl` is therefore registered as both `LlmProviderSettingsAPI` and
+`LlmModelPricingAPI` at the declared host floor; `PluginContext.llmProvider` returns that same
+instance, so consumers may cast it to the pricing companion contract.
 
 `ProviderCredentialStore` is constructed **outside** the guard, which is why it cannot
 hold an api type and gets `brokeredKeys` assigned after the fact. Left null, brokered

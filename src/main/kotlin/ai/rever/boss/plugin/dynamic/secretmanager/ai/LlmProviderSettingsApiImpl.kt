@@ -139,6 +139,8 @@ class LlmProviderSettingsApiImpl(
      * This never falls back to [CatalogState.Failed.lastKnown]: an old model name is useful in
      * a picker, while an old rate must not authorize another budgeted call. Catalog refresh is
      * requested asynchronously; until it lands, the safe synchronous answer is null.
+     * Null means unknown and must not be treated as free; a free model returns explicit zero rates.
+     * Consumers may obtain this companion contract by casting the same `llmProvider` instance.
      * Consumers pricing a catalog should retain returned cards through [AiModelPricing.validUntilEpochMs]
      * rather than repeat this provider/model lookup for every rendered row. A cache-seeded card
      * can already be nearly [ModelCatalog.CACHE_TTL_MS] old when returned; its timestamps are the
@@ -150,12 +152,12 @@ class LlmProviderSettingsApiImpl(
         // Non-suspending on purpose: the API boundary contains even malformed host linkage.
         runCatching {
             val now = nowEpochMs()
-            val catalog = currentCatalog(providerId, now) ?: run {
+            val current = currentCatalog(providerId, now) ?: run {
                 // A missing or stale catalog starts asynchronous discovery for a later read.
                 viewModel.ensureCatalogsLoaded()
                 return@runCatching null
             }
-            pricingFrom(catalog, providerId, modelId)
+            pricingFrom(current, providerId, modelId)
         }.fold(onSuccess = { it }, onFailure = {
             // No ids, payloads, exception messages or credentials cross this log boundary.
             val exceptionClass = it.javaClass.simpleName
@@ -169,24 +171,29 @@ class LlmProviderSettingsApiImpl(
             null
         })
 
-    private fun currentCatalog(providerId: String, now: Long): CatalogState.Loaded? {
+    private data class CurrentCatalog(
+        val catalog: CatalogState.Loaded,
+        val validUntilEpochMs: Long,
+    )
+
+    private fun currentCatalog(providerId: String, now: Long): CurrentCatalog? {
         val state = viewModel.state.value
-        // Ambiguous ids must not authorize a budgeted call, even if the picker shows one.
-        val descriptor = state.providers.singleOrNull { it.id == providerId } ?: return null
+        val descriptor = state.providers.firstOrNull { it.id == providerId } ?: return null
         val catalog = viewModel.catalogStateOf(providerId) as? CatalogState.Loaded ?: return null
         val connection = state.connectionOf(providerId)
         if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) return null
         val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.ttlFor(providerId)
         if (validUntil < catalog.fetchedAtEpochMs || catalog.fetchedAtEpochMs > now || now > validUntil) return null
-        return catalog
+        return CurrentCatalog(catalog, validUntil)
     }
 
     private fun pricingFrom(
-        catalog: CatalogState.Loaded,
+        current: CurrentCatalog,
         providerId: String,
         modelId: String,
     ): AiModelPricing? {
-        val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.ttlFor(providerId)
+        val catalog = current.catalog
+        // Ambiguous model ids must not authorize a budgeted call, even if the picker shows one.
         val pricing = catalog.models.singleOrNull { it.id == modelId }?.pricing ?: return null
         return AiModelPricing(
             providerId = providerId,
@@ -195,7 +202,7 @@ class LlmProviderSettingsApiImpl(
             outputUsdPer1M = pricing.outputUsdPer1M,
             source = AiModelPricing.SOURCE_PROVIDER_CATALOG,
             fetchedAtEpochMs = catalog.fetchedAtEpochMs,
-            validUntilEpochMs = validUntil,
+            validUntilEpochMs = current.validUntilEpochMs,
         )
     }
 
