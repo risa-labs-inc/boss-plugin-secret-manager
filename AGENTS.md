@@ -630,8 +630,8 @@ useful for the picker but never authorizes a budgeted call, and a loaded entry r
 its catalog TTL. Provider/model ids match exactly; aliases are never inferred. Version-two disk
 caches retain verified rates and force old model-only caches through a fresh provider fetch.
 This deliberately discards v1 picker lists on upgrade: an offline user has no cached picker
-until a successful fetch. Keeping the version gate also prevents old cache entries from being
-laundered into verified v2 entries by a later cache write.
+until a successful fetch. The version gate rejects stale or unstamped formats and requires new
+provider discovery before the cache can carry verified pricing metadata.
 
 The auxiliary-charge rule deliberately sacrifices coverage: consumers cannot declare which
 cache, image, audio or search features they use through this pricing contract, so excluding

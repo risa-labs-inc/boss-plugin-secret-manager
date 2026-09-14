@@ -195,7 +195,7 @@ class SecretManagerDynamicPlugin : DynamicPlugin {
                     gateway = GatewayPresence.from(context),
                 )
 
-            // Verified against BOSS v9.5.14 DefaultPlugin.kt: registerPluginAPI indexes every
+            // Verified against BOSS v9.4.2 DefaultPlugin.kt: registerPluginAPI indexes every
             // directly implemented interface. llmProvider returns this same instance, so
             // consumers can cast it to LlmModelPricingAPI.
             context.registerPluginAPI(LlmProviderSettingsApiImpl(viewModel))
