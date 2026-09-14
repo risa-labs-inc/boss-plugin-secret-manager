@@ -64,7 +64,7 @@ jobs:
             echo "source=release" >> "$GITHUB_OUTPUT"
           elif grep -q "release not found" "$RELEASE_ERROR" && [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             echo "source=pinned-head" >> "$GITHUB_OUTPUT"
-            echo "ref=a967a06db88e24f0ab83b5035b2626ade8e86dee" >> "$GITHUB_OUTPUT"
+            echo "ref=6b3768090b13b0048c0d72352d6fd3c126b05727" >> "$GITHUB_OUTPUT"
           else
             cat "$RELEASE_ERROR" >&2
             echo "::error::Could not resolve boss-plugin-api v${API_VERSION}; fallback is allowed only for a confirmed missing release on pull requests"
