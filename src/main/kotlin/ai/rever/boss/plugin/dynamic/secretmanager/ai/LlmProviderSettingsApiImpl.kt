@@ -17,8 +17,8 @@ import androidx.compose.ui.Modifier
  *
  * [availableModels] references [AiProviderModels]/[AiAvailableModel], and this class implements
  * [LlmModelPricingAPI], pending API PR #59. The provisional manifest floor must be aligned
- * with its eventual release before publishing: a `LinkageError` guard around construction cannot protect a lazily resolved method
- * signature or a host's pre-registration binary compatibility scan.
+ * with its eventual release before publishing: a `LinkageError` guard around construction
+ * cannot protect a lazily resolved method signature or a host's binary compatibility scan.
  *
  * Reads state from [AiProvidersViewModel] rather than the store directly, so the
  * panel and API can never disagree about which provider is active.
@@ -28,7 +28,9 @@ class LlmProviderSettingsApiImpl(
     private val nowEpochMs: () -> Long = System::currentTimeMillis,
 ) : LlmProviderSettingsAPI, LlmModelPricingAPI {
 
-    private val logger = BossLogger.forComponent("LlmProviderSettingsApi")
+    private companion object {
+        val logger = BossLogger.forComponent("LlmProviderSettingsApi")
+    }
 
     /** This implementation does render a panel, so the host shouldn't show its notice. */
     override val supportsSettingsPanel: Boolean = true
@@ -139,7 +141,7 @@ class LlmProviderSettingsApiImpl(
      * requested asynchronously; until it lands, the safe synchronous answer is null.
      */
     override fun modelPricing(providerId: String, modelId: String): AiModelPricing? =
-        // Intentional non-throwing API boundary, including malformed host linkage.
+        // Non-suspending on purpose: the API boundary contains even malformed host linkage.
         runCatching {
             viewModel.ensureCatalogsLoaded()
             val state = viewModel.state.value
@@ -154,7 +156,8 @@ class LlmProviderSettingsApiImpl(
                 return@runCatching null
             }
             val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.CACHE_TTL_MS
-            if (validUntil < catalog.fetchedAtEpochMs || nowEpochMs() > validUntil) {
+            val now = nowEpochMs()
+            if (validUntil < catalog.fetchedAtEpochMs || catalog.fetchedAtEpochMs > now || now > validUntil) {
                 return@runCatching null
             }
             val pricing =
@@ -171,11 +174,14 @@ class LlmProviderSettingsApiImpl(
             )
         }.onFailure {
             // No ids, payloads, exception messages or credentials cross this log boundary.
-            logger.debug(
-                LogCategory.SYSTEM,
-                "Model pricing lookup failed",
-                mapOf("exception" to it.javaClass.simpleName),
-            )
+            val exceptionClass = it.javaClass.simpleName
+            runCatching {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Model pricing lookup failed",
+                    mapOf("exception" to exceptionClass),
+                )
+            }
         }.getOrNull()
 
     private fun configFor(providerId: String, requireModel: Boolean = true): LlmConfig? {

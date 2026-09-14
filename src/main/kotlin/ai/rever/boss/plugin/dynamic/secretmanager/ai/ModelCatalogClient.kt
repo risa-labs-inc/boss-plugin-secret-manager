@@ -134,7 +134,18 @@ class ModelCatalogClient(
                 ),
             )
         }
-        return Result.success(collected.distinctBy { it.id }.sortedBy { it.displayName.lowercase() })
+        // Preserve the picker's first-entry rule, but never choose a price from ambiguous ids.
+        val models = collected.groupBy { it.id }.values.map { matches ->
+            matches.first().let { if (matches.size > 1) it.copy(pricing = null) else it }
+        }
+        if (descriptor.id == ProviderRegistry.OPENROUTER) {
+            logger.debug(
+                LogCategory.NETWORK,
+                "OpenRouter pricing coverage",
+                mapOf("models" to models.size, "priced" to models.count { it.pricing != null }),
+            )
+        }
+        return Result.success(models.sortedBy { it.displayName.lowercase() })
     }
 
     private data class Page(val models: List<AiModel>, val nextCursor: String?, val explicitlyEmpty: Boolean)
@@ -497,6 +508,10 @@ class ModelCatalogClient(
         val inputPerMillion = prompt.multiply(ONE_MILLION).toDouble()
         val outputPerMillion = completion.multiply(ONE_MILLION).toDouble()
         if (!inputPerMillion.isFinite() || !outputPerMillion.isFinite()) return null
+        // A positive decimal can underflow to Double zero; only an explicit zero is free.
+        if ((prompt.signum() > 0 && inputPerMillion == 0.0) ||
+            (completion.signum() > 0 && outputPerMillion == 0.0)
+        ) return null
         return ModelPricing(inputUsdPer1M = inputPerMillion, outputUsdPer1M = outputPerMillion)
     }
 

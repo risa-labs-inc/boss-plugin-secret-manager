@@ -640,6 +640,10 @@ the public OpenRouter `/api/v1/models` snapshot admitted 127 of 445 models under
 rule; 277 had nonzero cache-read charges (rejection categories overlap). This is partial coverage,
 not universal OpenRouter pricing. Zero accepts decimal and exponent representations equally.
 Duplicate provider/model ids deliberately yield no pricing rather than choosing an ambiguous card.
+The fetcher's picker deduplication must clear pricing on duplicate ids before choosing the first
+entry; otherwise the API's singleOrNull check never sees the ambiguity. Positive decimal rates
+that underflow to Double zero are unpriced, not free. Coverage counts are logged once per fetch;
+null/numeric auxiliary values still fail closed because they do not explicitly publish a string zero.
 
 ### Legacy plaintext key import
 
@@ -884,8 +888,10 @@ The registration guard remains a final containment boundary for malformed host i
 not a substitute for declaring every type in a public method signature. In particular,
 `AiProviderModels` and `AiAvailableModel` first ship in **v1.0.89**; they occur in
 `availableModels()`'s signature, can resolve after guarded construction, and may be inspected by
-the host's binary validator before registration. That is why the floor moved instead of claiming
-the guard made older hosts safe.
+the host's binary validator before registration. Native pricing additionally names `AiModelPricing`
+and implements `LlmModelPricingAPI` directly, exposing linkage before any method is called.
+Their actual release must determine the floor (see the release gate above), rather than claiming
+the construction guard makes older hosts safe.
 
 Earlier audits remain useful evidence. Verified against the api tags:
 `PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
@@ -926,7 +932,7 @@ not promise every host keeps the same list throughout registration and sign-in.
 only files that name the newer AI API types (`LlmProviderSettingsAPI` and
 `LlmApiFormat.GOOGLE_GENERATIVE` from 1.0.71; `BrokeredCredentialProvider`,
 `PluginContext.brokeredCredentialProvider` and `LlmApiFormat.OPENAI_RESPONSES` from 1.0.74;
-`AiCliSessionAPI` and `AiCliHealth` from 1.0.78; model discovery types from 1.0.89).
+`AiCliSessionAPI` and `AiCliHealth` from 1.0.78; model discovery types from 1.0.89; native pricing types pending API PR #59).
 Everything else uses the plugin-local `WireFormat` enum, the plugin-local `BrokeredKeySource`
 seam, and the plugin-local `CliEngineAccess` seam. Keep the adapter boundary even with the higher
 floor: it limits blast radius when a host API installation is incoherent.

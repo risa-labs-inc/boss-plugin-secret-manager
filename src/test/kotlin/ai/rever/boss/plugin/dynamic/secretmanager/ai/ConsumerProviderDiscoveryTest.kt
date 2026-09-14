@@ -34,14 +34,19 @@ class ConsumerProviderDiscoveryTest {
         beforeResponse: () -> Unit = {},
         val nowNanos: AtomicLong = AtomicLong(0),
         val nowEpochMs: AtomicLong = AtomicLong(System.currentTimeMillis()),
-        clock: () -> Long = nowEpochMs::get,
+        clock: () -> Long = { maxOf(System.currentTimeMillis(), nowEpochMs.get()) },
+        cachedAt: Long? = null,
     ) : AutoCloseable {
         val root = Files.createTempDirectory("consumer-provider").toFile()
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         val env = EnvResolver(root, processEnv = keys::get, systemProperty = { null }, useLaunchctl = false)
         val prefs = ActiveProviderPrefs(bossRootDir = root)
         val http = QueuedHttpClient(responses, always = response, beforeResponse = { beforeResponse() })
-        val catalog = ModelCatalog(ModelCatalogClient(http))
+        val catalog = ModelCatalog(ModelCatalogClient(http), root).also {
+            if (cachedAt != null) java.io.File(root, "ai-model-catalog.json").writeText(
+                """{"version":2,"providers":{"OPENROUTER":{"fetchedAtEpochMs":$cachedAt,"models":[{"id":"consumer/model","displayName":"Cached","pricing":{"inputUsdPer1M":1.5,"outputUsdPer1M":6.0}}]}}}""",
+            )
+        }
         val secrets = FakeSecretDataProvider(emptyList())
         val store = ProviderCredentialStore(secrets, env)
         val vm =
@@ -96,6 +101,43 @@ class ConsumerProviderDiscoveryTest {
             assertEquals(ModelCatalog.CACHE_TTL_MS, pricing!!.validUntilEpochMs - pricing.fetchedAtEpochMs)
             assertNull(h.api.modelPricing("openrouter", "consumer/model"))
             assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model-alias"))
+        }
+    }
+
+    @Test fun `cached pricing is served through the API until the inclusive deadline`() = runBlocking {
+        val fetched = System.currentTimeMillis()
+        val clock = AtomicLong(fetched + ModelCatalog.CACHE_TTL_MS)
+        Harness(cachedAt = fetched, clock = clock::get).use { h ->
+            h.load()
+            assertTrue((h.catalog.stateOf(ProviderRegistry.OPENROUTER) as CatalogState.Loaded).fromCache)
+            assertEquals(0, h.http.requests.size)
+            assertEquals(1.5, h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")?.inputUsdPer1M)
+            clock.incrementAndGet()
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+            clock.set(fetched - 1)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+        }
+    }
+
+    @Test fun `loaded pricing is withheld without a configured credential`() = runBlocking {
+        Harness(keys = emptyMap()).use { h ->
+            h.load()
+            // A Loaded catalog does not prove the current connection has a credential.
+            val router = ProviderRegistry.OPENROUTER
+            h.catalog.refresh(ProviderRegistry.find(router)!!, "test-only-key", force = true)
+            withTimeout(5000) { h.vm.state.first { it.catalogOf(router) is CatalogState.Loaded } }
+            assertNull(h.api.modelPricing(router, "consumer/model"))
+        }
+    }
+
+    @Test fun `duplicate live model ids retain the picker entry but withhold pricing`() = runBlocking {
+        Harness(response = 200 to """{"data":[
+            {"id":"consumer/model","pricing":{"prompt":"0.000001","completion":"0.000002"}},
+            {"id":"consumer/model","pricing":{"prompt":"0.000003","completion":"0.000004"}}
+        ]}""").use { h ->
+            h.load()
+            assertEquals(1, h.api.availableModels().single().models.size)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
         }
     }
 

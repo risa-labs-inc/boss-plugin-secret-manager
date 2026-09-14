@@ -236,13 +236,19 @@ class ModelCatalogClientParseTest {
                   {"id":"negative","pricing":{"prompt":"-0.000001","completion":"0.000002"}},
                   {"id":"request-fee","pricing":{"prompt":"0.000001","completion":"0.000002","request":"0.01"}},
                   {"id":"future-fee","pricing":{"prompt":"0.000001","completion":"0.000002","new_charge":"0.01"}},
-                  {"id":"numeric-schema-drift","pricing":{"prompt":0.000001,"completion":"0.000002"}}
+                  {"id":"numeric-schema-drift","pricing":{"prompt":0.000001,"completion":"0.000002"}},
+                  {"id":"input-underflow","pricing":{"prompt":"1e-400","completion":"0"}},
+                  {"id":"output-underflow","pricing":{"prompt":"0","completion":"1e-400"}},
+                  {"id":"overflow","pricing":{"prompt":"1e400","completion":"0"}},
+                  {"id":"non-finite","pricing":{"prompt":"NaN","completion":"0"}},
+                  {"id":"null-auxiliary","pricing":{"prompt":"0","completion":"0","web_search":null}},
+                  {"id":"numeric-auxiliary","pricing":{"prompt":"0","completion":"0","request":0}}
                 ]}
             """.trimIndent()
 
             val models = clientReturning(body).fetch(descriptor(ProviderRegistry.OPENROUTER), "k").getOrThrow()
 
-            assertEquals(6, models.size)
+            assertEquals(12, models.size)
             assertTrue(models.all { it.pricing == null })
         }
 
