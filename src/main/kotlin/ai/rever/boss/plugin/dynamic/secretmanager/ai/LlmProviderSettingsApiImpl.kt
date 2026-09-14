@@ -138,7 +138,8 @@ class LlmProviderSettingsApiImpl(
      *
      * This never falls back to [CatalogState.Failed.lastKnown]: an old model name is useful in
      * a picker, while an old rate must not authorize another budgeted call. Catalog refresh is
-     * requested asynchronously; until it lands, the safe synchronous answer is null.
+     * requested asynchronously only when there is no current catalog; until it lands, the safe
+     * synchronous answer is null.
      * Null means unknown and must not be treated as free; a free model returns explicit zero rates.
      * Consumers may obtain this companion contract by casting the same `llmProvider` instance.
      * Consumers pricing a catalog should retain returned cards through [AiModelPricing.validUntilEpochMs]
@@ -146,7 +147,8 @@ class LlmProviderSettingsApiImpl(
      * can already be nearly [ModelCatalog.CACHE_TTL_MS] old when returned; its timestamps are the
      * authority, not the lookup time.
      * This API is synchronous and non-throwing by contract. Its containment includes a
-     * synchronously thrown `CancellationException`; there is no suspending work to cancel here.
+     * synchronously thrown `CancellationException`; this remains sound only while the body has no
+     * suspending or blocking bridge whose cancellation must propagate.
      */
     override fun modelPricing(providerId: String, modelId: String): AiModelPricing? =
         // Non-suspending on purpose: the API boundary contains even malformed host linkage.

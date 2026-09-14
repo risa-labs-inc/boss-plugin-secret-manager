@@ -620,7 +620,7 @@ published artifact before this plugin merges.
 `LlmModelPricingAPI.modelPricing(providerId, modelId)` exposes only complete rates retained from a
 provider's live model catalog. OpenRouter is the currently verified source: its documented
 `pricing.prompt` and `pricing.completion` USD-per-token strings are converted to USD per million
-tokens, while any present additional charge must be an explicit numeric zero because `AiUsage`
+tokens, while any present additional charge must be a JSON string representing zero because `AiUsage`
 cannot account for it. Missing, malformed, negative, non-finite or partially representable pricing
 keeps the model usable but returns no rate card. Managed BOSS AI publishes allowances rather than
 verified dollar rates and therefore remains unpriced.
@@ -636,6 +636,10 @@ caches retain verified rates and force old model-only caches through a fresh pro
 This deliberately discards v1 picker lists on upgrade: an offline user has no cached picker
 until a successful fetch. The version gate rejects stale or unstamped formats and requires new
 provider discovery before the cache can carry verified pricing metadata.
+
+A fresh catalog is not refetched for an unknown model id. A model added upstream after a successful
+fetch can therefore remain unpriced until that provider's catalog TTL expires; this avoids turning
+per-row pricing lookups into provider-discovery host hops.
 
 The auxiliary-charge rule deliberately sacrifices coverage: consumers cannot declare which
 cache, image, audio or search features they use through this pricing contract, so excluding
