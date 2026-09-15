@@ -298,6 +298,31 @@ private fun SecretManagerView(
                             }
                         }
 
+                        // Export/import an encrypted backup of the whole vault.
+                        DropdownMenuItem(
+                            onClick = {
+                                showAddDropdown = false
+                                viewModel.showBackupDialog()
+                            }
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = BossThemeColors.TextSecondary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    "Backup / restore vault",
+                                    color = BossThemeColors.TextPrimary,
+                                    style = SecretPanelType.body
+                                )
+                            }
+                        }
+
                         // Add an AI provider API key. Written through
                         // ProviderCredentialStore so Settings → AI Providers recognises it.
                         if (state.canAddAiProviderKey) {
@@ -444,6 +469,15 @@ private fun SecretManagerView(
         )
     }
 
+    if (state.showBackupDialog) {
+        BackupDialog(
+            isBusy = state.isBackupBusy,
+            onExport = { file, pass -> viewModel.exportVaultToFile(file, pass) },
+            onImport = { file, pass -> viewModel.importVaultFromFile(file, pass) },
+            onDismiss = { viewModel.hideBackupDialog() }
+        )
+    }
+
 
 
     if (state.showAiProviderKeyDialog) {
@@ -564,6 +598,24 @@ private fun SecretsSection(
             style = SecretPanelType.meta,
             modifier = Modifier.padding(bottom = 8.dp)
         )
+
+        // Backup/restore status line.
+        if (state.isBackupBusy) {
+            Text(
+                "Working on backup...",
+                color = BossThemeColors.TextSecondary,
+                style = SecretPanelType.meta,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
+        state.backupStatus?.let { status ->
+            Text(
+                status,
+                color = BossThemeColors.TextSecondary,
+                style = SecretPanelType.meta,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
 
         // Content based on state
         when {
@@ -1309,6 +1361,96 @@ private fun TagBadge(tag: String) {
 }
 
 // ==================== DIALOGS ====================
+
+private fun chooseBackupFile(save: Boolean): java.io.File? {
+    val dialog =
+        java.awt.FileDialog(
+            null as java.awt.Frame?,
+            if (save) "Save vault backup" else "Open vault backup",
+            if (save) java.awt.FileDialog.SAVE else java.awt.FileDialog.LOAD
+        )
+    if (save) dialog.file = "boss-vault-backup.bossvlt"
+    dialog.isVisible = true
+    val dir = dialog.directory ?: return null
+    val name = dialog.file ?: return null
+    return java.io.File(dir, name)
+}
+
+@Composable
+private fun BackupDialog(
+    isBusy: Boolean,
+    onExport: (java.io.File, CharArray) -> Unit,
+    onImport: (java.io.File, CharArray) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var passphrase by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
+
+    BossDialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.width(400.dp),
+            color = BossThemeColors.SurfaceColor,
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Backup / restore vault", color = BossThemeColors.TextPrimary, style = SecretPanelType.title)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Export writes an encrypted file only this passphrase can open. " +
+                        "Import adds entries from such a file, skipping ones already present.",
+                    color = BossThemeColors.TextSecondary,
+                    style = SecretPanelType.meta
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                DialogTextField(
+                    value = passphrase,
+                    onValueChange = { passphrase = it },
+                    label = "Backup passphrase",
+                    placeholder = "Choose a strong passphrase",
+                    isPassword = true,
+                    showPassword = showPassword,
+                    onTogglePassword = { showPassword = !showPassword }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = onDismiss, enabled = !isBusy) {
+                        Text("Cancel", color = BossThemeColors.TextSecondary)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    TextButton(
+                        onClick = {
+                            val file = chooseBackupFile(save = false)
+                            if (file != null) {
+                                onImport(file, passphrase.toCharArray())
+                                onDismiss()
+                            }
+                        },
+                        enabled = !isBusy && passphrase.isNotBlank()
+                    ) {
+                        Text("Import", color = BossThemeColors.AccentColor)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            val file = chooseBackupFile(save = true)
+                            if (file != null) {
+                                onExport(file, passphrase.toCharArray())
+                                onDismiss()
+                            }
+                        },
+                        enabled = !isBusy && passphrase.isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.AccentColor)
+                    ) {
+                        Text("Export", color = BossThemeColors.TextPrimary)
+                    }
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun CreateSecretDialog(

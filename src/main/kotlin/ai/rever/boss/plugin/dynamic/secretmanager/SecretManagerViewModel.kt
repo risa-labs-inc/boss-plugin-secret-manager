@@ -20,7 +20,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import ai.rever.boss.plugin.dynamic.secretmanager.security.VaultBackupService
+import java.io.File
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -63,6 +67,7 @@ class SecretManagerViewModel(
     // Job tracking to prevent race conditions
     private var loadJob: Job? = null
     private var searchJob: Job? = null
+    private var backupJob: Job? = null
 
     /**
      * The permission collector, which is the only launch here that never completes.
@@ -367,6 +372,70 @@ class SecretManagerViewModel(
 
     fun hideCreateDialog() {
         state = state.copy(showCreateDialog = false)
+    }
+
+    fun showBackupDialog() {
+        state = state.copy(showBackupDialog = true, backupStatus = null)
+    }
+
+    fun hideBackupDialog() {
+        state = state.copy(showBackupDialog = false)
+    }
+
+    /** Export the whole vault to an encrypted file only [passphrase] can open. */
+    fun exportVaultToFile(
+        file: File,
+        passphrase: CharArray,
+    ) {
+        val provider = secretDataProvider ?: return
+        backupJob?.cancel()
+        state = state.copy(isBackupBusy = true, backupStatus = null, errorMessage = null)
+        backupJob =
+            scope.launch {
+                runCatching {
+                    val bytes = VaultBackupService.exportVault(provider, passphrase)
+                    withContext(Dispatchers.IO) { file.writeBytes(bytes) }
+                }.onSuccess {
+                    if (!disposed) state = state.copy(isBackupBusy = false, backupStatus = "Backup saved to ${file.name}")
+                }.onFailure { error ->
+                    if (error is CancellationException) return@onFailure
+                    if (!disposed) {
+                        state = state.copy(isBackupBusy = false, errorMessage = error.message ?: "Backup failed")
+                    }
+                }
+            }
+    }
+
+    /** Restore entries from an encrypted backup [file], skipping ones already present. */
+    fun importVaultFromFile(
+        file: File,
+        passphrase: CharArray,
+    ) {
+        val provider = secretDataProvider ?: return
+        backupJob?.cancel()
+        state = state.copy(isBackupBusy = true, backupStatus = null, errorMessage = null)
+        backupJob =
+            scope.launch {
+                runCatching {
+                    val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+                    VaultBackupService.importVault(bytes, passphrase, provider)
+                }.onSuccess { outcome ->
+                    if (!disposed) {
+                        state =
+                            state.copy(
+                                isBackupBusy = false,
+                                backupStatus =
+                                    "Restored ${outcome.imported}, skipped ${outcome.skipped}, failed ${outcome.failed}",
+                            )
+                        loadSecrets()
+                    }
+                }.onFailure { error ->
+                    if (error is CancellationException) return@onFailure
+                    if (!disposed) {
+                        state = state.copy(isBackupBusy = false, errorMessage = error.message ?: "Restore failed")
+                    }
+                }
+            }
     }
 
     fun showEditDialog(secret: SecretEntryData) {
@@ -1107,6 +1176,10 @@ data class SecretManagerState(
     val currentOffset: Int = 0,
     val hasMore: Boolean = true,
     val lastLoadDurationMs: Long? = null,
+    val showBackupDialog: Boolean = false,
+    val isBackupBusy: Boolean = false,
+    /** Result line from the last export/restore, or null. */
+    val backupStatus: String? = null,
     // Sharing-related state
     val showShareDialog: Boolean = false,
     val secretShares: List<SecretShareData> = emptyList(),
