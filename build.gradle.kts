@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.2.27"
+version = "1.2.28"
 
 // Keep the ordinary JAR away from the plugin artifact and the release's build/libs/*.jar glob.
 tasks.jar { destinationDirectory.set(layout.buildDirectory.dir("intermediates/jar")) }
