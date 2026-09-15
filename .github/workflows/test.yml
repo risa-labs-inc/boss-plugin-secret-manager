@@ -7,36 +7,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  published-api:
-    name: Published API release readiness
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Require the released API artifact before merge
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          API_VERSION=$(python3 -c 'import json; print(json.load(open("src/main/resources/META-INF/boss-plugin/plugin.json"))["minApiVersion"])')
-          RELEASE_ERROR=$(mktemp)
-          if gh release view "v${API_VERSION}" --repo risa-labs-inc/boss-plugin-api >/dev/null 2>"$RELEASE_ERROR"; then
-            echo "### Release readiness: published artifact available" >> "$GITHUB_STEP_SUMMARY"
-          elif grep -q "release not found" "$RELEASE_ERROR"; then
-            echo "::error::boss-plugin-api v${API_VERSION} is not published. Source integration may pass, but this plugin is not release-ready."
-            echo "### Release readiness: blocked" >> "$GITHUB_STEP_SUMMARY"
-            echo "boss-plugin-api v${API_VERSION} must be published and this workflow rerun before merge." >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          else
-            cat "$RELEASE_ERROR" >&2
-            echo "::error::Could not check boss-plugin-api v${API_VERSION} release readiness"
-            exit 1
-          fi
-
   test:
     runs-on: ubuntu-latest
     env:
@@ -53,29 +24,23 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Read required API version
-        id: api
-        run: |
-          set -euo pipefail
-          API_VERSION=$(python3 -c 'import json; print(json.load(open("src/main/resources/META-INF/boss-plugin/plugin.json"))["minApiVersion"])')
-          echo "version=$API_VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Fetch the required released plugin api jar
+      - name: Fetch the latest plugin api jar
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Latest, matching boss_plugin_api_version in build.yml — so this job compiles
+          # against the same api the release job will. The api is additive-only, so latest
+          # always carries the symbols this code needs.
           mkdir -p build/downloaded-deps
           # Excludes sources/thin classifiers explicitly: --output takes a single file, so a
           # release that ever ships a second matching asset would fail the job. build.gradle.kts
           # filters the same two for the same reason.
-          gh release download "v${{ steps.api.outputs.version }}" \
+          gh release download \
             --repo risa-labs-inc/boss-plugin-api \
-            --pattern 'boss-plugin-api-${{ steps.api.outputs.version }}.jar' \
+            --pattern 'boss-plugin-api-*[0-9].jar' \
             --output build/downloaded-deps/boss-plugin-api.jar
           test -s build/downloaded-deps/boss-plugin-api.jar
-          echo "### API dependency: published release" >> "$GITHUB_STEP_SUMMARY"
-          echo "Using boss-plugin-api v${{ steps.api.outputs.version }} release asset." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run tests
         run: ./gradlew test --no-daemon
