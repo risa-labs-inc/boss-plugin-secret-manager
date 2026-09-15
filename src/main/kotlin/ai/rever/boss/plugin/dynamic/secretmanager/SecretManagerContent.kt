@@ -5,6 +5,7 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersPanel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
+import ai.rever.boss.plugin.dynamic.secretmanager.security.PasswordGenerator
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
 import ai.rever.boss.plugin.ui.BossAlertDialog
@@ -1365,6 +1366,20 @@ private fun CreateSecretDialog(
                     showPassword = showPassword,
                     onTogglePassword = { showPassword = !showPassword }
                 )
+
+                // Offer a strong replacement rather than making the user invent one.
+                // Not for API keys, which are issued by the service, not chosen here.
+                if (!isApiKey) {
+                    TextButton(
+                        onClick = {
+                            password = PasswordGenerator.generate()
+                            showPassword = true
+                        },
+                        enabled = !isLoading
+                    ) {
+                        Text("Generate strong password", color = BossThemeColors.AccentColor)
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
