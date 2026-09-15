@@ -21,6 +21,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import ai.rever.boss.plugin.dynamic.secretmanager.security.VaultHealth
+import ai.rever.boss.plugin.dynamic.secretmanager.security.VaultHealthScanner
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -63,6 +65,7 @@ class SecretManagerViewModel(
     // Job tracking to prevent race conditions
     private var loadJob: Job? = null
     private var searchJob: Job? = null
+    private var healthJob: Job? = null
 
     /**
      * The permission collector, which is the only launch here that never completes.
@@ -367,6 +370,32 @@ class SecretManagerViewModel(
 
     fun hideCreateDialog() {
         state = state.copy(showCreateDialog = false)
+    }
+
+    /**
+     * Run a local vault-health check (reused and weak passwords) over the whole
+     * vault. Offline: no network, no egress. Cancels any in-flight check first.
+     */
+    fun runVaultHealthCheck() {
+        val provider = secretDataProvider ?: return
+        healthJob?.cancel()
+        state = state.copy(isCheckingHealth = true, errorMessage = null)
+        healthJob =
+            scope.launch {
+                runCatching { VaultHealthScanner.scan(provider) }
+                    .onSuccess { report ->
+                        if (!disposed) state = state.copy(healthReport = report, isCheckingHealth = false)
+                    }.onFailure { error ->
+                        if (error is CancellationException) return@onFailure
+                        if (!disposed) {
+                            state =
+                                state.copy(
+                                    isCheckingHealth = false,
+                                    errorMessage = error.message ?: "Vault health check failed",
+                                )
+                        }
+                    }
+            }
     }
 
     fun showEditDialog(secret: SecretEntryData) {
@@ -1107,6 +1136,9 @@ data class SecretManagerState(
     val currentOffset: Int = 0,
     val hasMore: Boolean = true,
     val lastLoadDurationMs: Long? = null,
+    /** Local vault-health report from the last check, or null if none has run. */
+    val healthReport: VaultHealth.Report? = null,
+    val isCheckingHealth: Boolean = false,
     // Sharing-related state
     val showShareDialog: Boolean = false,
     val secretShares: List<SecretShareData> = emptyList(),

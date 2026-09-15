@@ -298,6 +298,28 @@ private fun SecretManagerView(
                             }
                         }
 
+                        // Run a local (offline) reuse + weak-password check over the vault.
+                        DropdownMenuItem(
+                            onClick = {
+                                showAddDropdown = false
+                                onSelectSection(SecretPanelSection.SECRETS)
+                                viewModel.runVaultHealthCheck()
+                            }
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = BossThemeColors.TextSecondary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text("Check vault health", color = BossThemeColors.TextPrimary, style = SecretPanelType.body)
+                            }
+                        }
+
                         // Add an AI provider API key. Written through
                         // ProviderCredentialStore so Settings → AI Providers recognises it.
                         if (state.canAddAiProviderKey) {
@@ -564,6 +586,25 @@ private fun SecretsSection(
             style = SecretPanelType.meta,
             modifier = Modifier.padding(bottom = 8.dp)
         )
+
+        // Vault health summary (from the "Check vault health" action).
+        if (state.isCheckingHealth) {
+            Text(
+                "Checking vault health...",
+                color = BossThemeColors.TextSecondary,
+                style = SecretPanelType.meta,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
+        state.healthReport?.let { report ->
+            Text(
+                "Vault health: ${report.reusedPasswordCount} reused, ${report.weakCount} weak " +
+                    "(of ${report.analyzedCount})",
+                color = if (report.hasFindings) BossThemeColors.AccentColor else BossThemeColors.TextSecondary,
+                style = SecretPanelType.meta,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
 
         // Content based on state
         when {
