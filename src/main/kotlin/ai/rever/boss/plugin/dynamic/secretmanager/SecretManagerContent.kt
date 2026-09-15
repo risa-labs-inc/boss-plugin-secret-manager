@@ -15,6 +15,7 @@ import ai.rever.boss.plugin.ui.BossEmptyState
 import ai.rever.boss.plugin.ui.BossSearchBar
 import ai.rever.boss.plugin.ui.BossTabIndicator
 import ai.rever.boss.plugin.ui.BossTheme
+import ai.rever.boss.plugin.dynamic.secretmanager.security.TotpCode
 import ai.rever.boss.plugin.ui.BossThemeColors
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -606,6 +607,7 @@ private fun SecretsSection(
                             onDelete = { viewModel.showDeleteDialog(secret) },
                             onShare = { viewModel.showShareDialog(secret) },
                             onCopyPassword = { viewModel.copyPasswordToClipboard(secret, clipboardManager) },
+                            onCopyTotpCode = { viewModel.copyTotpCodeToClipboard(secret, clipboardManager) },
                             isAiProvider = viewModel.isAiProviderSecret(secret),
                             aiProviderLabel = viewModel.aiProviderDisplayName(secret),
                             // `website` holds the provider id, which is what makes this land on
@@ -936,6 +938,66 @@ private fun EmptyView(
     }
 }
 
+/**
+ * The current authenticator code for a stored TOTP seed, refreshed each second, with a
+ * countdown and a copy button.
+ *
+ * Renders nothing when the entry has no usable TOTP seed ([TotpCode.reading] is null), so
+ * the caller can place it unconditionally inside the 2FA block. The code shown is recomputed
+ * from the wall clock every second; the copy button goes through the ViewModel, which
+ * regenerates the code at click time and wipes it from the clipboard on the password policy,
+ * so what is copied is the code live at the click rather than whatever the row last painted.
+ */
+@Composable
+private fun TotpCodeRow(
+    metadata: SecretMetadataData,
+    onCopyCode: () -> Boolean,
+) {
+    // Tick once a second. The key is the seed so a different entry restarts cleanly; the
+    // value is the wall clock, which is all TotpCode.reading needs.
+    val now by produceState(initialValue = System.currentTimeMillis() / 1000L, metadata.twofaSecret) {
+        while (true) {
+            value = System.currentTimeMillis() / 1000L
+            delay(1000L)
+        }
+    }
+    val reading = TotpCode.reading(metadata, now) ?: return
+    var justCopied by remember { mutableStateOf(false) }
+    LaunchedEffect(justCopied) {
+        if (justCopied) {
+            delay(1200L)
+            justCopied = false
+        }
+    }
+
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = TotpCode.grouped(reading.code),
+            color = BossThemeColors.TextPrimary,
+            style = SecretPanelType.metaStrong
+        )
+        Text(
+            text = "${reading.secondsRemaining}s",
+            color = if (reading.secondsRemaining <= 5) BossThemeColors.ErrorColor else BossThemeColors.TextSecondary,
+            style = SecretPanelType.caption
+        )
+        IconButton(
+            onClick = { justCopied = onCopyCode() },
+            modifier = Modifier.size(24.dp)
+        ) {
+            Icon(
+                if (justCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                contentDescription = "Copy 2FA code",
+                tint = if (justCopied) BossThemeColors.SuccessColor else BossThemeColors.TextSecondary,
+                modifier = Modifier.size(14.dp)
+            )
+        }
+    }
+}
+
 @Composable
 private fun SecretCard(
     secret: SecretEntryData,
@@ -947,6 +1009,7 @@ private fun SecretCard(
     onDelete: () -> Unit,
     onShare: () -> Unit,
     onCopyPassword: () -> Unit,
+    onCopyTotpCode: () -> Boolean = { false },
     isAiProvider: Boolean = false,
     aiProviderLabel: String = "",
     onOpenAiProviderSettings: () -> Unit = {}
@@ -1249,6 +1312,9 @@ private fun SecretCard(
                                     style = SecretPanelType.meta
                                 )
                             }
+                            // Live authenticator code for a stored TOTP seed, with a copy action.
+                            // Renders nothing when the seed is absent or not TOTP.
+                            TotpCodeRow(metadata = metadata, onCopyCode = onCopyTotpCode)
                             if (metadata.recoveryCodes.isNotEmpty()) {
                                 Text(
                                     text = "Recovery Codes:",

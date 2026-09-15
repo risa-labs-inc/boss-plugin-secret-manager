@@ -7,6 +7,7 @@ import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.SharedProviderDefinition
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.bossAiDefinitionRequest
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.managedProviderUpdate
+import ai.rever.boss.plugin.dynamic.secretmanager.security.TotpCode
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import androidx.compose.runtime.getValue
@@ -709,6 +710,29 @@ class SecretManagerViewModel(
                 clipboard.setText(AnnotatedString(""))
             }
         }
+    }
+
+    /**
+     * Copy the CURRENT authenticator code for a stored TOTP seed, generated at copy time
+     * from [TotpCode], then wiped from the clipboard on the same policy as a password.
+     *
+     * The code is generated fresh here rather than taken from what the row shows, so a copy
+     * always lands on the code that is live at the instant of the click - the row ticks each
+     * second and the two could otherwise disagree across a rollover. Returns false and copies
+     * nothing when the entry has no usable TOTP seed, so a caller only offers this where it
+     * applies.
+     */
+    fun copyTotpCodeToClipboard(secret: SecretEntryData, clipboard: ClipboardManager): Boolean {
+        val copied = TotpCode.reading(secret.metadata)?.code ?: return false
+        val generation = ++clipboardCopyGeneration
+        clipboard.setText(AnnotatedString(copied))
+        scope.launch {
+            delay(CLIPBOARD_CLEAR_DELAY_MS)
+            if (generation == clipboardCopyGeneration && clipboard.getText()?.text == copied) {
+                clipboard.setText(AnnotatedString(""))
+            }
+        }
+        return true
     }
 
     fun togglePasswordVisibility(secretId: String) {
