@@ -27,6 +27,7 @@ class ModelCatalogClientParseTest {
         ).descriptor("entry")
         val body = """{"data":[{"id":"published","name":"Published","is_default":true,
             "context_length":2048,"max_output_tokens":100,"capabilities":["text","tools",true,42],
+            "pricing":{"prompt":"0.000001","completion":"0.000002"},
             "allowance":{
               "day":{"remaining":3000000000,"limit":4000000000,"resets_at":"2026-09-12T00:00:00Z"},
               "week":{"remaining":"5000","limit":"6000","resets_at":"2026-09-14T00:00:00+00:00"},
@@ -39,6 +40,7 @@ class ModelCatalogClientParseTest {
         assertEquals(100, model.maxOutputTokens)
         assertTrue(model.isDefault)
         assertEquals(listOf("text", "tools"), model.capabilities)
+        assertNull(model.pricing)
         assertEquals(
             "day: 3000000000 / 4000000000 tokens remaining (resets 12 Sep 00:00 UTC)\n" +
                 "week: 5000 / 6000 tokens remaining (resets 14 Sep 00:00 UTC)",
@@ -207,11 +209,12 @@ class ModelCatalogClientParseTest {
     // ==================== OpenRouter ====================
 
     @Test
-    fun `openrouter reports its readable name and context length`() =
+    fun `openrouter reports metadata and documented USD per-token pricing`() =
         runTest {
             val body = """
                 {"data":[{"id":"anthropic/claude-opus-5","name":"Anthropic: Claude Opus 5",
-                "context_length":200000,"pricing":{"prompt":"0.000015","completion":"0.000075"}}]}
+                "context_length":200000,"pricing":{"prompt":"0.000015","completion":"0.000075",
+                "request":"0","image":"0"}}]}
             """.trimIndent()
 
             val model =
@@ -220,6 +223,54 @@ class ModelCatalogClientParseTest {
             assertEquals("anthropic/claude-opus-5", model.id)
             assertEquals("Anthropic: Claude Opus 5", model.displayName)
             assertEquals(200_000, model.contextLength)
+            assertEquals(15.0, model.pricing?.inputUsdPer1M)
+            assertEquals(75.0, model.pricing?.outputUsdPer1M)
+        }
+
+    @Test
+    fun `openrouter keeps model but rejects incomplete or unsupported charges`() =
+        runTest {
+            val body = """
+                {"data":[
+                  {"id":"missing-completion","pricing":{"prompt":"0.000001"}},
+                  {"id":"malformed","pricing":{"prompt":"free","completion":"0.000002"}},
+                  {"id":"negative","pricing":{"prompt":"-0.000001","completion":"0.000002"}},
+                  {"id":"request-fee","pricing":{"prompt":"0.000001","completion":"0.000002","request":"0.01"}},
+                  {"id":"future-fee","pricing":{"prompt":"0.000001","completion":"0.000002","new_charge":"0.01"}},
+                  {"id":"numeric-schema-drift","pricing":{"prompt":0.000001,"completion":"0.000002"}},
+                  {"id":"input-underflow","pricing":{"prompt":"1e-400","completion":"0"}},
+                  {"id":"output-underflow","pricing":{"prompt":"0","completion":"1e-400"}},
+                  {"id":"overflow","pricing":{"prompt":"1e400","completion":"0"}},
+                  {"id":"non-finite","pricing":{"prompt":"NaN","completion":"0"}},
+                  {"id":"null-auxiliary","pricing":{"prompt":"0","completion":"0","web_search":null}},
+                  {"id":"numeric-auxiliary","pricing":{"prompt":"0","completion":"0","request":0}},
+                  {"id":"nested-auxiliary","pricing":{"prompt":"0","completion":"0","web_search":{"per_call":"0"}}}
+                ]}
+            """.trimIndent()
+
+            val models = clientReturning(body).fetch(descriptor(ProviderRegistry.OPENROUTER), "k").getOrThrow()
+
+            assertEquals(13, models.size)
+            assertTrue(models.all { it.pricing == null })
+        }
+
+    @Test
+    fun `openrouter accepts only explicit zero for additional published charge fields`() =
+        runTest {
+            val body = """
+                {"data":[{"id":"free-model","pricing":{"prompt":"0","completion":"0",
+                "request":"0.0","web_search":"0.00","future_charge":"0E-8"}}]}
+            """.trimIndent()
+
+            val pricing =
+                clientReturning(body)
+                    .fetch(descriptor(ProviderRegistry.OPENROUTER), "k")
+                    .getOrThrow()
+                    .single()
+                    .pricing
+
+            assertEquals(0.0, pricing?.inputUsdPer1M)
+            assertEquals(0.0, pricing?.outputUsdPer1M)
         }
 
     // ==================== Ollama ====================

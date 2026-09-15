@@ -91,7 +91,7 @@ class ModelCatalogStateTest {
         File(dir, "ai-model-catalog.json").writeText(
             """
             {"providers":{"${descriptor.id}":{"models":[{"id":"gpt-5","displayName":"GPT-5"}],
-            "fetchedAtEpochMs":$fetchedAtEpochMs}},"version":1}
+            "fetchedAtEpochMs":$fetchedAtEpochMs}},"version":2}
             """.trimIndent(),
         )
         return ModelCatalog(cacheDir = dir) to dir
@@ -111,6 +111,16 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `a future-dated result is stale so discovery can replace it`() =
+        runTest {
+            val fetchedAt = 1_000_000L
+            val (catalog, _) = catalogSeededAt(fetchedAt)
+            catalog.seedFromCache()
+
+            assertTrue(catalog.isStale(descriptor.id, fetchedAt - 1))
+        }
+
+    @Test
     fun `a seeded list is marked as coming from the cache`() =
         runTest {
             // The panel distinguishes "live" from "cached" in its freshness line, so a
@@ -124,6 +134,42 @@ class ModelCatalogStateTest {
         }
 
     @Test
+    fun `provider pricing survives the model cache round trip`() =
+        runTest {
+            val dir = Files.createTempDirectory("catalog-pricing").toFile()
+            val router = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+            val body =
+                """{"data":[{"id":"priced/model","pricing":{"prompt":"0.000002","completion":"0.000008"}}]}"""
+            val fetched = ModelCatalog(ModelCatalogClient(QueuedHttpClient(listOf(200 to body))), dir)
+            fetched.refresh(router, apiKey = "k", force = true, nowEpochMs = 1_000_000L)
+            assertTrue(File(dir, "ai-model-catalog.json").readText().contains("\"version\":2"))
+
+            val restored = ModelCatalog(cacheDir = dir)
+            restored.seedFromCache()
+
+            val model = (restored.stateOf(router.id) as CatalogState.Loaded).models.single()
+            assertEquals(2.0, model.pricing?.inputUsdPer1M)
+            assertEquals(8.0, model.pricing?.outputUsdPer1M)
+        }
+
+    @Test
+    fun `invalid cached pricing keeps the model unpriced`() =
+        runTest {
+            val dir = Files.createTempDirectory("catalog-invalid-pricing").toFile()
+            val router = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${router.id}":{"models":[{"id":"visible/model","displayName":"Visible model","pricing":{"inputUsdPer1M":-1,"outputUsdPer1M":2}}],"fetchedAtEpochMs":1000000}},"version":2}""",
+            )
+
+            val catalog = ModelCatalog(cacheDir = dir)
+            catalog.seedFromCache()
+
+            val model = (catalog.stateOf(router.id) as CatalogState.Loaded).models.single()
+            assertEquals("visible/model", model.id)
+            assertNull(model.pricing)
+        }
+
+    @Test
     fun `a cache written by a different format version is discarded`() =
         runTest {
             val dir = Files.createTempDirectory("catalog-version").toFile()
@@ -132,6 +178,34 @@ class ModelCatalogStateTest {
                 "fetchedAtEpochMs":1}},"version":999}""".trimIndent(),
             )
             val catalog = ModelCatalog(cacheDir = dir)
+            catalog.seedFromCache()
+
+            assertEquals(CatalogState.NotConfigured, catalog.stateOf(descriptor.id))
+        }
+
+    @Test
+    fun `a realistic v1 model-only cache is discarded on upgrade`() =
+        runTest {
+            val dir = Files.createTempDirectory("catalog-v1-upgrade").toFile()
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${descriptor.id}":{"models":[{"id":"gpt-5","displayName":"GPT-5"}],"fetchedAtEpochMs":1000000}},"version":1}""",
+            )
+            val catalog = ModelCatalog(cacheDir = dir)
+
+            catalog.seedFromCache()
+
+            assertEquals(CatalogState.NotConfigured, catalog.stateOf(descriptor.id))
+        }
+
+    @Test
+    fun `a legacy writer cache with no version stamp is discarded`() =
+        runTest {
+            val dir = Files.createTempDirectory("catalog-unstamped-v1").toFile()
+            File(dir, "ai-model-catalog.json").writeText(
+                """{"providers":{"${descriptor.id}":{"models":[{"id":"gpt-5","displayName":"GPT-5"}],"fetchedAtEpochMs":1000000}}}""",
+            )
+            val catalog = ModelCatalog(cacheDir = dir)
+
             catalog.seedFromCache()
 
             assertEquals(CatalogState.NotConfigured, catalog.stateOf(descriptor.id))
@@ -213,7 +287,7 @@ class ModelCatalogStateTest {
             val dir = Files.createTempDirectory("catalog-failed").toFile()
             File(dir, "ai-model-catalog.json").writeText(
                 """{"providers":{"${descriptor.id}":{"models":[{"id":"cached","displayName":"Cached"}],
-                "fetchedAtEpochMs":1000000}},"version":1}""".trimIndent(),
+                "fetchedAtEpochMs":1000000}},"version":2}""".trimIndent(),
             )
 
             val fake = QueuedHttpClient(listOf(401 to """{"error":"bad key"}"""))
@@ -286,7 +360,7 @@ class ModelCatalogStateTest {
             val dir = Files.createTempDirectory("catalog-notconfigured").toFile()
             File(dir, "ai-model-catalog.json").writeText(
                 """{"providers":{"${descriptor.id}":{"models":[{"id":"cached","displayName":"Cached"}],
-                "fetchedAtEpochMs":1000000}},"version":1}""".trimIndent(),
+                "fetchedAtEpochMs":1000000}},"version":2}""".trimIndent(),
             )
 
             val catalog = ModelCatalog(cacheDir = dir)

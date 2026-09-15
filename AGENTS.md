@@ -8,7 +8,7 @@ Your credentials, secrets shared with you, Plugin Store API keys and AI provider
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.secretmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin`
-- **API Version**: 1.0.89 (`plugin.json` `apiVersion` and `minApiVersion`)
+- **API Version**: 1.0.92 (`plugin.json` `apiVersion` and `minApiVersion`)
 
 ## Essential Commands
 
@@ -334,7 +334,7 @@ to discover that one plugin stood in the way.
 gateway serving no engines is a different fact from an absent one. It is ported from
 `user-secret-list`'s `SecretManagerLink` minus the part that does not apply: that plugin's floor is
 1.0.20, so it had to probe reflectively for `openPanel` (api 1.0.57). This plugin's floor is
-**1.0.89**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
+**1.0.92**, so `PluginLoaderDelegate`, `PanelEventProvider`, `PanelId` and `openPanel` are all below
 it and are called straight - a guard there would be dead code implying a risk that cannot occur.
 
 Two rules carried over from that port, both mutation-verified here:
@@ -611,6 +611,47 @@ until the credential changes. `load()` marks discovery started too: invalidating
 credential must never clear a catalog without scheduling its replacement. `catalogsLoaded` drops
 false across that invalidation and becomes true only after the replacement sweep completes.
 
+### Native USD pricing is catalog-derived and freshness-bounded
+
+API PR #59 shipped as v1.0.92 with the pricing types. Both manifest floors are pinned to 1.0.92,
+and hosted CI resolves and tests against that published artifact before this plugin merges.
+
+`LlmModelPricingAPI.modelPricing(providerId, modelId)` exposes only complete rates retained from a
+provider's live model catalog. OpenRouter is the currently verified source: its documented
+`pricing.prompt` and `pricing.completion` USD-per-token strings are converted to USD per million
+tokens, while any present additional charge must be a JSON string representing zero because `AiUsage`
+cannot account for it. Missing, malformed, negative, non-finite or partially representable pricing
+keeps the model usable but returns no rate card. Managed BOSS AI publishes allowances rather than
+verified dollar rates and therefore remains unpriced.
+
+Pricing is available only from a current `CatalogState.Loaded` entry. `Failed.lastKnown` stays
+useful for the picker but never authorizes a budgeted call, and a loaded entry returns null after
+its catalog TTL. A provider must also remain listed under the machine-facing rule, including a
+current credential for keyed providers; a loaded catalog alone does not authorize pricing.
+Provider/model ids match exactly; aliases are never inferred. A catalog timestamp ahead of the
+wall clock fails closed until time catches up or discovery replaces it, even while the picker can
+still show that catalog. Version-two disk
+caches retain verified rates and force old model-only caches through a fresh provider fetch.
+This deliberately discards v1 picker lists on upgrade: an offline user has no cached picker
+until a successful fetch. The version gate rejects stale or unstamped formats and requires new
+provider discovery before the cache can carry verified pricing metadata.
+
+A fresh catalog is not refetched for an unknown model id. A model added upstream after a successful
+fetch can therefore remain unpriced until that provider's catalog TTL expires; this avoids turning
+per-row pricing lookups into provider-discovery host hops.
+
+The auxiliary-charge rule deliberately sacrifices coverage: consumers cannot declare which
+cache, image, audio or search features they use through this pricing contract, so excluding
+those charges from an allegedly complete budget card could undercount spend. On 2026-09-14,
+the public OpenRouter `/api/v1/models` snapshot admitted 127 of 445 models under the numeric-zero
+rule; 277 had nonzero cache-read charges (rejection categories overlap). This is partial coverage,
+not universal OpenRouter pricing. Zero accepts decimal and exponent representations equally.
+Duplicate model ids deliberately yield no pricing rather than choosing an ambiguous card.
+The fetcher's picker deduplication must clear pricing on duplicate ids before choosing the first
+entry; otherwise the API's singleOrNull check never sees the ambiguity. Positive decimal rates
+that underflow to Double zero are unpriced, not free. Coverage counts are logged once per fetch;
+null/numeric auxiliary values still fail closed because they do not explicitly publish a string zero.
+
 ### Legacy plaintext key import
 
 `LegacySettingsImport` migrates keys out of the plaintext files that predate this plugin. It
@@ -848,14 +889,16 @@ Providers instead get an assisted flow: a "Get API key" button opening
 
 ### Linkage containment
 
-The manifest's declared `apiVersion` floor is **1.0.89** (`plugin.json`, both `apiVersion` and
+The manifest's declared `apiVersion` floor is **1.0.92** (`plugin.json`, both `apiVersion` and
 `minApiVersion`). Check it rather than trusting prose: this section has lagged the manifest twice.
 The registration guard remains a final containment boundary for malformed host installations,
 not a substitute for declaring every type in a public method signature. In particular,
 `AiProviderModels` and `AiAvailableModel` first ship in **v1.0.89**; they occur in
 `availableModels()`'s signature, can resolve after guarded construction, and may be inspected by
-the host's binary validator before registration. That is why the floor moved instead of claiming
-the guard made older hosts safe.
+the host's binary validator before registration. Native pricing additionally names `AiModelPricing`
+and implements `LlmModelPricingAPI` directly, exposing linkage before any method is called.
+Their assigned 1.0.92 release determines the floor (see the release gate above); the construction
+guard does not make older hosts safe.
 
 Earlier audits remain useful evidence. Verified against the api tags:
 `PluginContext.windowId`, `PluginContext.settingsProvider`, `SettingsProvider` and
@@ -888,7 +931,7 @@ The cross-plugin navigation path was checked against **v1.0.73**, not the newest
 `CustomPluginEvent.eventName`/`payload` are all present there and therefore below today's floor.
 
 `BrokerInfo.scopedTo` is also read by `BrokeredCredentialBridge`. Verified against
-the released `v1.0.74` source, it predates the 1.0.89 floor. Scope is looked up live:
+the released `v1.0.74` source, it predates the 1.0.92 floor. Scope is looked up live:
 the current host lists signed-out brokers with `available=false`, but the API does
 not promise every host keeps the same list throughout registration and sign-in.
 
@@ -896,10 +939,15 @@ not promise every host keeps the same list throughout registration and sign-in.
 only files that name the newer AI API types (`LlmProviderSettingsAPI` and
 `LlmApiFormat.GOOGLE_GENERATIVE` from 1.0.71; `BrokeredCredentialProvider`,
 `PluginContext.brokeredCredentialProvider` and `LlmApiFormat.OPENAI_RESPONSES` from 1.0.74;
-`AiCliSessionAPI` and `AiCliHealth` from 1.0.78; model discovery types from 1.0.89).
+`AiCliSessionAPI` and `AiCliHealth` from 1.0.78; model discovery types from 1.0.89; native pricing types assigned to 1.0.92 by API PR #59).
 Everything else uses the plugin-local `WireFormat` enum, the plugin-local `BrokeredKeySource`
 seam, and the plugin-local `CliEngineAccess` seam. Keep the adapter boundary even with the higher
 floor: it limits blast radius when a host API installation is incoherent.
+
+BOSS v9.4.2 `DefaultPlugin.registerPluginAPI` indexes every directly implemented interface.
+`LlmProviderSettingsApiImpl` is therefore registered as both `LlmProviderSettingsAPI` and
+`LlmModelPricingAPI` at the declared host floor; `PluginContext.llmProvider` returns that same
+instance, so consumers may cast it to the pricing companion contract.
 
 `ProviderCredentialStore` is constructed **outside** the guard, which is why it cannot
 hold an api type and gets `brokeredKeys` assigned after the fact. Left null, brokered
@@ -908,7 +956,8 @@ providers report unconfigured - the same answer a host with no broker should giv
 ### Wire formats are direct at the declared API floor
 
 `LlmApiFormat.OPENAI_RESPONSES` once needed reflective resolution because it landed in 1.0.74
-while the plugin admitted 1.0.73 hosts. The 1.0.89 model-discovery signature raised the floor, so
+while the plugin admitted 1.0.73 hosts. Model discovery raised the floor to 1.0.89 and native
+model pricing raised it again to 1.0.92, so
 every enum constant used by `LlmProviderSettingsApiImpl` is now guaranteed and the reflective
 branch became misleading dead compatibility code. Map them directly; a new constant still requires
 checking its release against the manifest before use.

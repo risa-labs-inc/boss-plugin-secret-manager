@@ -100,8 +100,9 @@ class ModelCatalog(
      */
     fun isStale(providerId: String, nowEpochMs: Long): Boolean =
         when (val state = _states.value[providerId]) {
-            is CatalogState.Loaded -> nowEpochMs - state.fetchedAtEpochMs >
-                if (isManagedProvider(providerId)) SHARED_CACHE_TTL_MS else CACHE_TTL_MS
+            is CatalogState.Loaded ->
+                nowEpochMs < state.fetchedAtEpochMs ||
+                    nowEpochMs - state.fetchedAtEpochMs > ttlFor(providerId)
             // A permanent failure (rejected key) is not stale: nothing changes until the
             // credential does, and the panel re-enters this on every open. Saving a new key
             // calls refresh(force = true), so recovery does not depend on staleness.
@@ -254,6 +255,7 @@ class ModelCatalog(
                 val existing = readCacheBlocking(file)
                 val merged =
                     CachedCatalog(
+                        version = CACHE_FORMAT_VERSION,
                         providers =
                             existing.providers +
                                 (
@@ -298,13 +300,13 @@ class ModelCatalog(
             if (!file.exists()) return@runCatching null
             json.decodeFromString<CachedCatalog>(file.readText())
                 .takeIf { it.version == CACHE_FORMAT_VERSION }
-        }.getOrNull() ?: CachedCatalog(emptyMap())
+        }.getOrNull() ?: CachedCatalog(version = CACHE_FORMAT_VERSION, providers = emptyMap())
 
     // Model lists only — never credentials. Keys live in the secret store.
     @Serializable
     private data class CachedCatalog(
+        val version: Int,
         val providers: Map<String, CachedProvider>,
-        val version: Int = CACHE_FORMAT_VERSION,
     )
 
     @Serializable
@@ -321,6 +323,7 @@ class ModelCatalog(
         val maxOutputTokens: Int? = null,
         val capabilities: List<String> = emptyList(),
         val ownedBy: String? = null,
+        val pricing: CachedPricing? = null,
     ) {
         fun toModel(): AiModel =
             AiModel(
@@ -330,6 +333,7 @@ class ModelCatalog(
                 maxOutputTokens = maxOutputTokens,
                 capabilities = capabilities,
                 ownedBy = ownedBy,
+                pricing = pricing?.toModelPricing(),
             )
 
         companion object {
@@ -341,11 +345,30 @@ class ModelCatalog(
                     maxOutputTokens = model.maxOutputTokens,
                     capabilities = model.capabilities,
                     ownedBy = model.ownedBy,
+                    pricing = model.pricing?.let(CachedPricing::from),
                 )
         }
     }
 
+    @Serializable
+    private data class CachedPricing(
+        val inputUsdPer1M: Double,
+        val outputUsdPer1M: Double,
+    ) {
+        fun toModelPricing(): ModelPricing? =
+            runCatching { ModelPricing(inputUsdPer1M, outputUsdPer1M) }.getOrNull()
+
+        companion object {
+            fun from(pricing: ModelPricing): CachedPricing =
+                CachedPricing(pricing.inputUsdPer1M, pricing.outputUsdPer1M)
+        }
+    }
+
     companion object {
+        /** One freshness rule for refresh scheduling and consumer-facing rate-card expiry. */
+        fun ttlFor(providerId: String): Long =
+            if (isManagedProvider(providerId)) SHARED_CACHE_TTL_MS else CACHE_TTL_MS
+
         /** Model lists are refreshed when older than this. */
         const val CACHE_TTL_MS: Long = 6 * 60 * 60 * 1000L
         /** Account allowances change during use, including when the settings panel is closed. */
@@ -355,6 +378,6 @@ class ModelCatalog(
         const val TRANSIENT_FAILURE_RETRY_MS: Long = 5 * 60 * 1000L
 
         private const val CACHE_FILE_NAME = "ai-model-catalog.json"
-        private const val CACHE_FORMAT_VERSION = 1
+        private const val CACHE_FORMAT_VERSION = 2
     }
 }

@@ -1,27 +1,36 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.ai
 
 import ai.rever.boss.plugin.api.AiAvailableModel
+import ai.rever.boss.plugin.api.AiModelPricing
 import ai.rever.boss.plugin.api.AiProviderModels
 import ai.rever.boss.plugin.api.LlmApiFormat
 import ai.rever.boss.plugin.api.LlmConfig
+import ai.rever.boss.plugin.api.LlmModelPricingAPI
 import ai.rever.boss.plugin.api.LlmProviderSettingsAPI
+import ai.rever.boss.plugin.logging.BossLogger
+import ai.rever.boss.plugin.logging.LogCategory
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
 /**
  * Serves AI provider configuration to the host and to other plugins.
  *
- * [availableModels] references [AiProviderModels]/[AiAvailableModel], introduced in api
- * 1.0.89. The manifest therefore declares 1.0.89 as its floor: a `LinkageError` guard
- * around construction cannot protect a lazily resolved method signature or a host's
- * pre-registration binary compatibility scan.
+ * [availableModels] references [AiProviderModels]/[AiAvailableModel], and this class implements
+ * [LlmModelPricingAPI], assigned to API 1.0.92 by PR #59. That manifest floor must be retained
+ * when publishing: a `LinkageError` guard around construction cannot protect a lazily resolved
+ * method signature or a host's binary compatibility scan.
  *
  * Reads state from [AiProvidersViewModel] rather than the store directly, so the
  * panel and API can never disagree about which provider is active.
  */
 class LlmProviderSettingsApiImpl(
     private val viewModel: AiProvidersViewModel,
-) : LlmProviderSettingsAPI {
+    private val nowEpochMs: () -> Long = System::currentTimeMillis,
+) : LlmProviderSettingsAPI, LlmModelPricingAPI {
+
+    private companion object {
+        val logger = BossLogger.forComponent("LlmProviderSettingsApi")
+    }
 
     /** This implementation does render a panel, so the host shouldn't show its notice. */
     override val supportsSettingsPanel: Boolean = true
@@ -124,6 +133,81 @@ class LlmProviderSettingsApiImpl(
         }
     }
 
+    /**
+     * Return a fresh, complete rate card for one exact provider/model pair.
+     *
+     * This never falls back to [CatalogState.Failed.lastKnown]: an old model name is useful in
+     * a picker, while an old rate must not authorize another budgeted call. Catalog refresh is
+     * requested asynchronously only when there is no current catalog; until it lands, the safe
+     * synchronous answer is null.
+     * Null means unknown and must not be treated as free; a free model returns explicit zero rates.
+     * Consumers may obtain this companion contract by casting the same `llmProvider` instance.
+     * Consumers pricing a catalog should retain returned cards through [AiModelPricing.validUntilEpochMs]
+     * rather than repeat this provider/model lookup for every rendered row. A cache-seeded card
+     * can already be nearly [ModelCatalog.CACHE_TTL_MS] old when returned; its timestamps are the
+     * authority, not the lookup time.
+     * This API is synchronous and non-throwing by contract. Its containment includes a
+     * synchronously thrown `CancellationException`; this remains sound only while the body has no
+     * suspending or blocking bridge whose cancellation must propagate.
+     */
+    override fun modelPricing(providerId: String, modelId: String): AiModelPricing? =
+        // Non-suspending on purpose: the API boundary contains even malformed host linkage.
+        runCatching {
+            val now = nowEpochMs()
+            val current = currentCatalog(providerId, now) ?: run {
+                // A missing or stale catalog starts asynchronous discovery for a later read.
+                viewModel.ensureCatalogsLoaded()
+                return@runCatching null
+            }
+            pricingFrom(current, providerId, modelId)
+        }.fold(onSuccess = { it }, onFailure = {
+            // No ids, payloads, exception messages or credentials cross this log boundary.
+            val exceptionClass = it.javaClass.simpleName
+            runCatching {
+                logger.debug(
+                    LogCategory.SYSTEM,
+                    "Model pricing lookup failed",
+                    mapOf("exception" to exceptionClass),
+                )
+            }
+            null
+        })
+
+    private data class CurrentCatalog(
+        val catalog: CatalogState.Loaded,
+        val validUntilEpochMs: Long,
+    )
+
+    private fun currentCatalog(providerId: String, now: Long): CurrentCatalog? {
+        val state = viewModel.state.value
+        val descriptor = state.providers.firstOrNull { it.id == providerId } ?: return null
+        val catalog = viewModel.catalogStateOf(providerId) as? CatalogState.Loaded ?: return null
+        val connection = state.connectionOf(providerId)
+        if (!isProviderListed(descriptor, connection, catalog, wasAddedByUser = false)) return null
+        val validUntil = catalog.fetchedAtEpochMs + ModelCatalog.ttlFor(providerId)
+        if (validUntil < catalog.fetchedAtEpochMs || catalog.fetchedAtEpochMs > now || now > validUntil) return null
+        return CurrentCatalog(catalog, validUntil)
+    }
+
+    private fun pricingFrom(
+        current: CurrentCatalog,
+        providerId: String,
+        modelId: String,
+    ): AiModelPricing? {
+        val catalog = current.catalog
+        // Ambiguous model ids must not authorize a budgeted call, even if the picker shows one.
+        val pricing = catalog.models.singleOrNull { it.id == modelId }?.pricing ?: return null
+        return AiModelPricing(
+            providerId = providerId,
+            modelId = modelId,
+            inputUsdPer1M = pricing.inputUsdPer1M,
+            outputUsdPer1M = pricing.outputUsdPer1M,
+            source = AiModelPricing.SOURCE_PROVIDER_CATALOG,
+            fetchedAtEpochMs = catalog.fetchedAtEpochMs,
+            validUntilEpochMs = current.validUntilEpochMs,
+        )
+    }
+
     private fun configFor(providerId: String, requireModel: Boolean = true): LlmConfig? {
         // Every path that hands out a credential goes through here - `activeConfig` and
         // `configuredProviders` both - so this is where a lapsed brokered credential has to be
@@ -165,7 +249,7 @@ class LlmProviderSettingsApiImpl(
 
     /**
      * Map the plugin-local wire format onto the api enum. Every constant here predates
-     * the manifest's 1.0.89 floor, so reflective compatibility branches would be dead code.
+     * the manifest's 1.0.92 floor, so reflective compatibility branches would be dead code.
      */
     private fun WireFormat.toApiFormat(): LlmApiFormat =
         when (this) {

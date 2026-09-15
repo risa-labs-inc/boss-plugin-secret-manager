@@ -3,10 +3,14 @@ package ai.rever.boss.plugin.dynamic.secretmanager.ai
 import ai.rever.boss.plugin.api.SecretEntryData
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -19,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.CoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -26,20 +31,53 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ConsumerProviderDiscoveryTest {
+    private class HoldingDispatcher : CoroutineDispatcher() {
+        private val held = ConcurrentLinkedQueue<Runnable>()
+        private val hold = AtomicBoolean(true)
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            if (hold.get()) held += block else Dispatchers.Default.dispatch(context, block)
+        }
+
+        fun allowNewDispatches() {
+            hold.set(false)
+        }
+
+        fun releaseHeld() {
+            while (true) {
+                val block = held.poll() ?: return
+                Dispatchers.Default.dispatch(kotlin.coroutines.EmptyCoroutineContext, block)
+            }
+        }
+    }
+
     private class Harness(
         keys: Map<String, String> = mapOf("OPENROUTER_API_KEY" to "test-only-key"),
-        response: Pair<Int, String> = 200 to """{"data":[{"id":"consumer/model","name":"Consumer model","context_length":131072}]}""",
+        response: Pair<Int, String> = 200 to """{"data":[{"id":"consumer/model","name":"Consumer model","context_length":131072,"pricing":{"prompt":"0.0000015","completion":"0.000006"}}]}""",
         responses: List<Pair<Int, String>> = emptyList(),
         probe: OllamaSystemCheck = noOllamaOnThisMachine(),
         beforeResponse: () -> Unit = {},
         val nowNanos: AtomicLong = AtomicLong(0),
+        val nowEpochMs: AtomicLong = AtomicLong(System.currentTimeMillis()),
+        clock: () -> Long = { maxOf(System.currentTimeMillis(), nowEpochMs.get()) },
+        cachedAt: Long? = null,
+        duplicateCachedModel: Boolean = false,
+        scopeDispatcher: CoroutineDispatcher = Dispatchers.Default,
     ) : AutoCloseable {
         val root = Files.createTempDirectory("consumer-provider").toFile()
-        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val scope = CoroutineScope(scopeDispatcher + SupervisorJob())
         val env = EnvResolver(root, processEnv = keys::get, systemProperty = { null }, useLaunchctl = false)
         val prefs = ActiveProviderPrefs(bossRootDir = root)
         val http = QueuedHttpClient(responses, always = response, beforeResponse = { beforeResponse() })
-        val catalog = ModelCatalog(ModelCatalogClient(http))
+        val catalog = ModelCatalog(ModelCatalogClient(http), root).also {
+            if (cachedAt != null) {
+                val model = """{"id":"consumer/model","displayName":"Cached","pricing":{"inputUsdPer1M":1.5,"outputUsdPer1M":6.0}}"""
+                val models = if (duplicateCachedModel) "$model,$model" else model
+                java.io.File(root, "ai-model-catalog.json").writeText(
+                    """{"version":2,"providers":{"OPENROUTER":{"fetchedAtEpochMs":$cachedAt,"models":[$models]}}}""",
+                )
+            }
+        }
         val secrets = FakeSecretDataProvider(emptyList())
         val store = ProviderCredentialStore(secrets, env)
         val vm =
@@ -54,7 +92,7 @@ class ConsumerProviderDiscoveryTest {
                 ollamaSystemCheck = probe,
                 monotonicNanos = nowNanos::get,
             )
-        val api = LlmProviderSettingsApiImpl(vm)
+        val api = LlmProviderSettingsApiImpl(vm, clock)
 
         suspend fun load() {
             api.availableModels()
@@ -64,6 +102,25 @@ class ConsumerProviderDiscoveryTest {
         override fun close() {
             scope.cancel()
             root.deleteRecursively()
+        }
+    }
+
+    @Test fun `an invalidation before the ViewModel collector subscribes still reloads credentials`() = runBlocking {
+        val dispatcher = HoldingDispatcher()
+        Harness(scopeDispatcher = dispatcher).use { h ->
+            // The ViewModel's constructor callbacks remain queued while work requested after
+            // construction can run. This deterministically models a busy dispatcher delaying
+            // the invalidation collector without delaying the consumer's initial load.
+            dispatcher.allowNewDispatches()
+            h.load()
+            val pageCount = h.secrets.pageRequests.size
+
+            h.store.invalidate()
+            dispatcher.releaseHeld()
+
+            withTimeout(5000) {
+                while (h.secrets.pageRequests.size <= pageCount) delay(10)
+            }
         }
     }
 
@@ -78,6 +135,147 @@ class ConsumerProviderDiscoveryTest {
             assertEquals(131072, model.contextLength)
             assertEquals(1, h.http.requests.size)
             assertFalse(h.api.configuredProviders().any { it.providerId == ProviderRegistry.OLLAMA })
+        }
+    }
+
+    @Test fun `pricing lookup returns exact fresh OpenRouter catalog rates`() = runBlocking {
+        Harness().use { h ->
+            h.load()
+            val pricing = h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")
+
+            assertEquals(ProviderRegistry.OPENROUTER, pricing?.providerId)
+            assertEquals("consumer/model", pricing?.modelId)
+            assertEquals(1.5, pricing?.inputUsdPer1M)
+            assertEquals(6.0, pricing?.outputUsdPer1M)
+            assertEquals("provider-catalog", pricing?.source)
+            assertEquals(ModelCatalog.CACHE_TTL_MS, pricing!!.validUntilEpochMs - pricing.fetchedAtEpochMs)
+            assertNull(h.api.modelPricing("openrouter", "consumer/model"))
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model-alias"))
+        }
+    }
+
+    @Test fun `fresh pricing lookup does not re-enter shared provider discovery`() = runBlocking {
+        Harness(response = 200 to """{"data":[
+            {"id":"consumer/model","pricing":{"prompt":"0.0000015","completion":"0.000006"}},
+            {"id":"unpriced/model"}
+        ]}""").use { h ->
+            h.load()
+            val hostChecks = AtomicInteger()
+            h.store.brokeredKeys = object : BrokeredKeySource {
+                override suspend fun fetch(brokerId: String) = Result.failure<BrokeredKey>(AssertionError("not used"))
+                override val supportsSharedProviders = true
+                override fun canDiscoverSharedProviders(): Boolean {
+                    hostChecks.incrementAndGet()
+                    return false
+                }
+            }
+
+            assertEquals(1.5, h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")?.inputUsdPer1M)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "unpriced/model"))
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "missing/model"))
+            assertEquals(0, hostChecks.get(), "a fresh in-memory rate card reached the host broker registry")
+        }
+    }
+
+    @Test fun `cold pricing lookup starts discovery for a later synchronous read`() = runBlocking {
+        Harness().use { h ->
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+            withTimeout(5000) { h.vm.catalogsLoaded.first { it } }
+
+            assertEquals(1.5, h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")?.inputUsdPer1M)
+        }
+    }
+
+    @Test fun `cached pricing is served through the API until the inclusive deadline`() = runBlocking {
+        val fetched = System.currentTimeMillis()
+        val clock = AtomicLong(fetched + ModelCatalog.CACHE_TTL_MS)
+        Harness(cachedAt = fetched, clock = clock::get).use { h ->
+            h.load()
+            assertTrue((h.catalog.stateOf(ProviderRegistry.OPENROUTER) as CatalogState.Loaded).fromCache)
+            // ModelCatalog still compares against the real wall clock while this API-boundary
+            // clock is injected. That split is why the cache remains fresh without an HTTP fetch
+            // as the API clock is moved across its exact inclusive deadline below.
+            assertEquals(0, h.http.requests.size)
+            assertEquals(1.5, h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")?.inputUsdPer1M)
+            clock.incrementAndGet()
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+            clock.set(fetched - 1)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+        }
+    }
+
+    @Test fun `duplicate cached model ids are refused at the API boundary`() = runBlocking {
+        Harness(cachedAt = System.currentTimeMillis(), duplicateCachedModel = true).use { h ->
+            h.load()
+            val loaded = h.catalog.stateOf(ProviderRegistry.OPENROUTER) as CatalogState.Loaded
+            assertTrue(loaded.fromCache)
+            assertEquals(2, loaded.models.size)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+        }
+    }
+
+    @Test fun `loaded pricing is withheld without a configured credential`() = runBlocking {
+        Harness(keys = emptyMap()).use { h ->
+            h.load()
+            // A Loaded catalog does not prove the current connection has a credential.
+            val router = ProviderRegistry.OPENROUTER
+            h.catalog.refresh(ProviderRegistry.find(router)!!, "test-only-key", force = true)
+            withTimeout(5000) { h.vm.state.first { it.catalogOf(router) is CatalogState.Loaded } }
+            assertNull(h.api.modelPricing(router, "consumer/model"))
+        }
+    }
+
+    @Test fun `duplicate live model ids retain the picker entry but withhold pricing`() = runBlocking {
+        Harness(response = 200 to """{"data":[
+            {"id":"consumer/model","pricing":{"prompt":"0.000001","completion":"0.000002"}},
+            {"id":"consumer/model","pricing":{"prompt":"0.000003","completion":"0.000004"}}
+        ]}""").use { h ->
+            h.load()
+            assertEquals(1, h.api.availableModels().single().models.size)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+        }
+    }
+
+    @Test fun `pricing lookup converts an implementation failure to unavailable`() = runBlocking {
+        var clockCalls = 0
+        Harness(clock = { clockCalls++; error("broken clock") }).use { h ->
+            h.load()
+
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+            assertEquals(1, clockCalls)
+        }
+    }
+
+    @Test fun `pricing lookup contains a synchronous cancellation-shaped failure`() = runBlocking {
+        var clockCalls = 0
+        Harness(clock = { clockCalls++; throw CancellationException("plugin stopped") }).use { h ->
+            h.load()
+
+            // LlmModelPricingAPI is synchronous and non-throwing; no cancellable work occurs here.
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+            assertEquals(1, clockCalls)
+        }
+    }
+
+    @Test fun `pricing lookup rejects expired and failed catalog entries`() = runBlocking {
+        Harness(
+            responses = listOf(
+                200 to """{"data":[{"id":"consumer/model","pricing":{"prompt":"0.0000015","completion":"0.000006"}}]}""",
+                503 to """{"error":"offline"}""",
+            ),
+        ).use { h ->
+            h.load()
+            val fresh = h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model")!!
+            h.nowEpochMs.set(fresh.validUntilEpochMs + 1)
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
+
+            val descriptor = ProviderRegistry.find(ProviderRegistry.OPENROUTER)!!
+            h.catalog.refresh(descriptor, "test-only-key", force = true)
+            withTimeout(5000) {
+                h.vm.state.first { it.catalogOf(descriptor.id) is CatalogState.Failed }
+            }
+            h.nowEpochMs.set(System.currentTimeMillis())
+            assertNull(h.api.modelPricing(ProviderRegistry.OPENROUTER, "consumer/model"))
         }
     }
 
