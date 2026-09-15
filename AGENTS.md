@@ -613,9 +613,8 @@ false across that invalidation and becomes true only after the replacement sweep
 
 ### Native USD pricing is catalog-derived and freshness-bounded
 
-Release gate: API PR #59 is still pending and assigned v1.0.92; released v1.0.91 lacks the
-pricing types. Both manifest floors are pinned to 1.0.92, and hosted CI must verify against that
-published artifact before this plugin merges.
+API PR #59 shipped as v1.0.92 with the pricing types. Both manifest floors are pinned to 1.0.92,
+and hosted CI resolves and tests against that published artifact before this plugin merges.
 
 `LlmModelPricingAPI.modelPricing(providerId, modelId)` exposes only complete rates retained from a
 provider's live model catalog. OpenRouter is the currently verified source: its documented
