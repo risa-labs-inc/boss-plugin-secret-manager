@@ -1,10 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.*
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersPanel
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
 import ai.rever.boss.plugin.ui.BossAlertDialog
@@ -26,7 +22,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -63,16 +58,6 @@ import kotlinx.coroutines.launch
 enum class SecretPanelSection {
     SECRETS,
     SHARED_WITH_ME,
-
-    /**
-     * AI provider configuration: the same panel the host serves at Settings, AI Providers.
-     *
-     * One definition rendered in two places rather than a second copy. It is here because this
-     * plugin owns every AI credential in BOSS and the panel that holds them was reachable only
-     * through the host's Settings window - two clicks and a different window away from the vault
-     * the keys are actually stored in.
-     */
-    AI_PROVIDERS,
 }
 
 /**
@@ -92,16 +77,7 @@ fun SecretManagerContent(
     sharedSecretsViewModel: SharedSecretsViewModel,
     selectedSection: SecretPanelSection,
     onSelectSection: (SecretPanelSection) -> Unit,
-    /**
-     * The AI providers ViewModel, or null on a host that cannot serve one.
-     *
-     * A **supplier**, not the value: it is built inside `registerAiProviderSettings`'s
-     * `LinkageError` guard, which runs after `registerPanel`, so anything reading it at
-     * registration time would read null forever. Resolved when the section is first shown
-     * instead. Null means AI settings registration could not link, and the tab is not offered
-     * at all - a tab whose only content is "not available here" is noise.
-     */
-    aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
+    grantManager: SecretGrantManager? = null,
 ) {
     BossTheme {
         if (!viewModel.isAvailable()) {
@@ -110,7 +86,7 @@ fun SecretManagerContent(
             SecretManagerView(
                 viewModel = viewModel,
                 sharedSecretsViewModel = sharedSecretsViewModel,
-                aiProvidersViewModel = aiProvidersViewModel,
+                grantManager = grantManager,
                 selectedSection = selectedSection,
                 onSelectSection = onSelectSection,
             )
@@ -165,7 +141,7 @@ private fun SecretManagerView(
     sharedSecretsViewModel: SharedSecretsViewModel,
     selectedSection: SecretPanelSection,
     onSelectSection: (SecretPanelSection) -> Unit,
-    aiProvidersViewModel: () -> AiProvidersViewModel? = { null },
+    grantManager: SecretGrantManager? = null,
 ) {
     val state = viewModel.state
     val sharedState by sharedSecretsViewModel.state.collectAsState()
@@ -174,11 +150,7 @@ private fun SecretManagerView(
     // other is on screen (and on every Refresh), so a state remembered down there would drop
     // the scroll position every time the user looks at the other tab and comes back.
     val sharedListState = rememberLazyListState()
-    val aiScrollState = rememberScrollState()
     val clipboardManager = LocalClipboardManager.current
-    // Resolved here rather than at registration: see the parameter's own note. `remember` with no
-    // key is right - the supplier reads a field that is set once, before any panel is created.
-    val aiViewModel = remember { aiProvidersViewModel() }
     var showAddDropdown by remember { mutableStateOf(false) }
 
     // Fetch on first entry into the section, not on panel open: this is a second secrets RPC
@@ -206,7 +178,6 @@ private fun SecretManagerView(
                 // allShared, not the filtered view: typing in the shared section's filter
                 // would otherwise make the tab report "(1)" while forty are loaded.
                 sharedCount = sharedState.allShared.size,
-                showAiSection = aiViewModel != null,
                 onSelectSection = onSelectSection,
             ) {
                 // Refresh button. Refetches whichever section is on screen - the two read
@@ -215,24 +186,12 @@ private fun SecretManagerView(
                     when (selectedSection) {
                         SecretPanelSection.SECRETS -> state.isLoading
                         SecretPanelSection.SHARED_WITH_ME -> sharedState.isLoading
-                        // The AI section's own rows carry their spinners, and its refresh is
-                        // several independent fetches rather than one load, so there is no single
-                        // flag to disable the button on.
-                        SecretPanelSection.AI_PROVIDERS -> false
                     }
                 IconButton(
                     onClick = {
                         when (selectedSection) {
                             SecretPanelSection.SECRETS -> viewModel.loadSecrets()
                             SecretPanelSection.SHARED_WITH_ME -> sharedSecretsViewModel.refresh()
-                            SecretPanelSection.AI_PROVIDERS ->
-                                aiViewModel?.let {
-                                    // Refresh credentials/environment/local Ollama, gateway presence,
-                                    // and CLI sessions independently while the panel stays open.
-                                    it.refreshConnections()
-                                    it.checkGateway()
-                                    it.refreshCliEngines()
-                                }
                         }
                     },
                     enabled = !isRefreshing,
@@ -295,37 +254,6 @@ private fun SecretManagerView(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Text("Add secret", color = BossThemeColors.TextPrimary, style = SecretPanelType.body)
-                            }
-                        }
-
-                        // Add an AI provider API key. Written through
-                        // ProviderCredentialStore so Settings → AI Providers recognises it.
-                        if (state.canAddAiProviderKey) {
-                            DropdownMenuItem(
-                                onClick = {
-                                    showAddDropdown = false
-                                    // Same reason as Add Secret: the new entry lands in the
-                                    // managed list.
-                                    onSelectSection(SecretPanelSection.SECRETS)
-                                    viewModel.showAiProviderKeyDialog()
-                                }
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.AutoAwesome,
-                                        contentDescription = null,
-                                        tint = BossThemeColors.TextSecondary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        "Add AI provider key",
-                                        color = BossThemeColors.TextPrimary,
-                                        style = SecretPanelType.body
-                                    )
-                                }
                             }
                         }
 
@@ -396,13 +324,6 @@ private fun SecretManagerView(
                         viewModel = viewModel,
                         listState = listState,
                         clipboardManager = clipboardManager,
-                        onOpenAiProvider = { providerId ->
-                            if (aiViewModel?.requestProviderOnEntry(providerId) == true) {
-                                onSelectSection(SecretPanelSection.AI_PROVIDERS)
-                            } else {
-                                viewModel.reportAiProviderUnavailable()
-                            }
-                        },
                         modifier = Modifier.weight(1f),
                     )
 
@@ -419,18 +340,6 @@ private fun SecretManagerView(
                         modifier = Modifier.weight(1f),
                     )
 
-                SecretPanelSection.AI_PROVIDERS ->
-                    // The same composable the host renders at Settings, AI Providers, from one
-                    // definition. It scrolls itself, so it takes the remaining height and no
-                    // scroll container of its own - nesting two would measure with infinite
-                    // height and crash.
-                    //
-                    // `aiViewModel` cannot be null here: the tab is only offered when it is not.
-                    // Guarded anyway rather than asserted, because the day the tab is offered
-                    // some other way, a blank section beats a crash inside a credentials panel.
-                    aiViewModel?.let { model ->
-                        AiProvidersPanel(viewModel = model, modifier = Modifier.weight(1f), scrollState = aiScrollState)
-                    }
             }
         }
     }
@@ -441,23 +350,6 @@ private fun SecretManagerView(
             onConfirm = { viewModel.createSecret(it) },
             onDismiss = { viewModel.hideCreateDialog() },
             isLoading = state.isOperationInProgress
-        )
-    }
-
-
-
-    if (state.showAiProviderKeyDialog) {
-        AiProviderKeyDialog(
-            selectedProviderId = state.aiProviderKeyProviderId,
-            sources = state.aiProviderSources,
-            keyDraft = state.aiProviderKeyDraft,
-            isLoading = state.isOperationInProgress,
-            errorMessage = state.errorMessage,
-            onProviderChange = { viewModel.setAiProviderKeyProvider(it) },
-            onKeyChange = { viewModel.setAiProviderKeyDraft(it) },
-            onOpenConsole = { viewModel.openAiProviderConsole() },
-            onConfirm = { viewModel.saveAiProviderKey() },
-            onDismiss = { viewModel.hideAiProviderKeyDialog() }
         )
     }
 
@@ -497,7 +389,8 @@ private fun SecretManagerView(
             },
             isLoading = state.isOperationInProgress,
             isLoadingShares = state.isLoadingShares,
-            isLoadingUsers = state.isLoadingUsers
+            isLoadingUsers = state.isLoadingUsers,
+            grantManager = grantManager,
         )
     }
 
@@ -541,8 +434,6 @@ private fun SecretsSection(
     viewModel: SecretManagerViewModel,
     listState: LazyListState,
     clipboardManager: ClipboardManager,
-    /** Reveal a provider in the AI section. Given its id, which is the secret's `website`. */
-    onOpenAiProvider: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state = viewModel.state
@@ -606,11 +497,6 @@ private fun SecretsSection(
                             onDelete = { viewModel.showDeleteDialog(secret) },
                             onShare = { viewModel.showShareDialog(secret) },
                             onCopyPassword = { viewModel.copyPasswordToClipboard(secret, clipboardManager) },
-                            isAiProvider = viewModel.isAiProviderSecret(secret),
-                            aiProviderLabel = viewModel.aiProviderDisplayName(secret),
-                            // `website` holds the provider id, which is what makes this land on
-                            // the right row rather than at the top of the list.
-                            onOpenAiProviderSettings = { onOpenAiProvider(viewModel.aiProviderId(secret).orEmpty()) }
                         )
                     }
 
@@ -661,7 +547,6 @@ private fun SecretsSection(
 private fun SectionTabs(
     selectedSection: SecretPanelSection,
     sharedCount: Int,
-    showAiSection: Boolean,
     onSelectSection: (SecretPanelSection) -> Unit,
     actions: @Composable () -> Unit,
 ) {
@@ -689,17 +574,6 @@ private fun SectionTabs(
                 badge = sharedCount,
                 modifier = Modifier.padding(start = 20.dp),
             )
-            // Absent, not disabled, when AI settings registration could not link: the section
-            // cannot render there at all, and a tab that only ever says "not available" is worse
-            // than one tab fewer.
-            if (showAiSection) {
-                SectionTab(
-                    label = "AI",
-                    selected = selectedSection == SecretPanelSection.AI_PROVIDERS,
-                    onClick = { onSelectSection(SecretPanelSection.AI_PROVIDERS) },
-                    modifier = Modifier.padding(start = 20.dp),
-                )
-            }
             Spacer(Modifier.weight(1f))
             Row(
                 modifier = Modifier.padding(bottom = 4.dp),
@@ -947,9 +821,6 @@ private fun SecretCard(
     onDelete: () -> Unit,
     onShare: () -> Unit,
     onCopyPassword: () -> Unit,
-    isAiProvider: Boolean = false,
-    aiProviderLabel: String = "",
-    onOpenAiProviderSettings: () -> Unit = {}
 ) {
     val copyScope = rememberCoroutineScope()
     var justCopied by remember { mutableStateOf(false) }
@@ -962,41 +833,6 @@ private fun SecretCard(
 
     BossCard(modifier = Modifier.fillMaxWidth()) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            // AI provider entries are configuration, not a password: the useful action is to
-            // open the place where the key can be tested and a model picked. That used to be the
-            // host's Settings window, two clicks and a different window away from the vault the
-            // key is stored in; it is now the AI tab of this panel, with this provider selected.
-            if (isAiProvider) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(BossThemeColors.AccentColor.copy(alpha = 0.12f))
-                        .clickable(onClick = onOpenAiProviderSettings)
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        tint = BossThemeColors.AccentColor,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = "AI provider${if (aiProviderLabel.isNotBlank()) " · $aiProviderLabel" else ""}",
-                        color = BossThemeColors.TextPrimary,
-                        style = SecretPanelType.metaStrong,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        text = "Open →",
-                        color = BossThemeColors.AccentColor,
-                        style = SecretPanelType.meta
-                    )
-                }
-            }
-
             // Header: Website/Service and Username with icons, actions on the right
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1651,9 +1487,30 @@ private fun ShareSecretDialog(
     onSearchUsers: (String) -> Unit,
     isLoading: Boolean,
     isLoadingShares: Boolean,
-    isLoadingUsers: Boolean
+    isLoadingUsers: Boolean,
+    grantManager: SecretGrantManager?,
 ) {
     var searchQuery by remember { mutableStateOf("") }
+    val grantScope = rememberCoroutineScope()
+    var principals by remember(secret.id) { mutableStateOf<List<SecretPrincipalData>>(emptyList()) }
+    var executionGrants by remember(secret.id) { mutableStateOf<List<SecretPrincipalGrantData>>(emptyList()) }
+    var grantsLoading by remember(secret.id) { mutableStateOf(grantManager != null) }
+    var grantMutation by remember(secret.id) { mutableStateOf<Pair<String, String>?>(null) }
+    var grantError by remember(secret.id) { mutableStateOf<String?>(null) }
+
+    suspend fun reloadExecutionAccess() {
+        val manager = grantManager ?: return
+        val loadedPrincipals = manager.listPrincipals()
+        val loadedGrants = manager.listGrants(secret.id)
+        principals = loadedPrincipals.getOrElse { emptyList() }
+        executionGrants = loadedGrants.getOrElse { emptyList() }
+        grantError = loadedPrincipals.exceptionOrNull()?.message ?: loadedGrants.exceptionOrNull()?.message
+        grantsLoading = false
+    }
+
+    LaunchedEffect(secret.id, grantManager) {
+        reloadExecutionAccess()
+    }
     // Clicks write `tabSelection`; every read goes through the clamped `selectedTab`.
     // Derived rather than written back, because a permission can be revoked while the
     // dialog is open (the claim refreshes on a timer) and writing snapshot state during
@@ -1664,7 +1521,7 @@ private fun ShareSecretDialog(
 
     BossDialog(onDismissRequest = onDismiss) {
         Surface(
-            modifier = Modifier.width(450.dp).heightIn(max = 500.dp),
+            modifier = Modifier.width(500.dp).heightIn(max = 680.dp),
             color = BossThemeColors.SurfaceColor,
             shape = RoundedCornerShape(8.dp)
         ) {
@@ -1741,6 +1598,91 @@ private fun ShareSecretDialog(
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+
+                if (grantManager != null) {
+                    Text(
+                        "Plugin and tool access",
+                        color = BossThemeColors.TextPrimary,
+                        style = SecretPanelType.metaStrong,
+                    )
+                    Text(
+                        "Only principals enabled here can use this secret. A grant never permits editing or resharing.",
+                        color = BossThemeColors.TextSecondary,
+                        style = SecretPanelType.caption,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    when {
+                        grantsLoading -> CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = BossThemeColors.AccentColor,
+                            strokeWidth = 2.dp,
+                        )
+                        principals.isEmpty() -> Text(
+                            "No installed plugin or MCP tool principals are available.",
+                            color = BossThemeColors.TextSecondary,
+                            style = SecretPanelType.caption,
+                        )
+                        else -> {
+                            val accessByPrincipal = executionGrants.associate {
+                                (it.principalType to it.principalId) to it.accessLevel
+                            }
+                            LazyColumn(
+                                modifier = Modifier.fillMaxWidth().heightIn(max = 150.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                items(principals, key = { "${it.principalType}:${it.principalId}" }) { principal ->
+                                    val key = principal.principalType to principal.principalId
+                                    val accessLevel = accessByPrincipal[key]
+                                    val checked = accessLevel != null
+                                    val immutableOwner = accessLevel == "owner"
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().clickable(
+                                            enabled = grantMutation == null && !immutableOwner,
+                                        ) {
+                                            grantMutation = key
+                                            grantError = null
+                                            grantScope.launch {
+                                                val changed =
+                                                    if (checked) {
+                                                        grantManager.revokeSecret(secret.id, principal.principalType, principal.principalId)
+                                                    } else {
+                                                        grantManager.grantSecret(secret.id, principal.principalType, principal.principalId)
+                                                    }
+                                                changed.fold(
+                                                    onSuccess = { reloadExecutionAccess() },
+                                                    onFailure = { grantError = it.message ?: "Access change failed" },
+                                                )
+                                                grantMutation = null
+                                            }
+                                        }.padding(vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Checkbox(
+                                            checked = checked,
+                                            onCheckedChange = null,
+                                            enabled = grantMutation == null && !immutableOwner,
+                                            colors = CheckboxDefaults.colors(checkedColor = BossThemeColors.AccentColor),
+                                        )
+                                        Column(modifier = Modifier.padding(start = 8.dp)) {
+                                            Text(principal.displayName, color = BossThemeColors.TextPrimary, style = SecretPanelType.meta)
+                                            Text(
+                                                if (immutableOwner) "${principal.principalId} (owner)" else principal.principalId,
+                                                color = BossThemeColors.TextSecondary,
+                                                style = SecretPanelType.micro,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    grantError?.let {
+                        Text(it, color = BossThemeColors.ErrorColor, style = SecretPanelType.caption)
+                    }
                     Spacer(modifier = Modifier.height(16.dp))
                 }
 
@@ -2690,222 +2632,4 @@ private fun formatTimestamp(timestamp: Long): String {
     } catch (_: Exception) {
         "Unknown"
     }
-}
-
-/**
- * Dialog for adding an AI provider API key.
- *
- * Separate from [CreateSecretDialog] because these entries are not passwords: the
- * provider is picked from the registry rather than typed as a website, and the key is
- * written through ProviderCredentialStore so Settings → AI Providers recognises the
- * result. A hand-made secret with the same fields would not be picked up.
- */
-@Composable
-private fun AiProviderKeyDialog(
-    selectedProviderId: String,
-    sources: Map<String, CredentialSource>,
-    keyDraft: String,
-    isLoading: Boolean,
-    errorMessage: String?,
-    onProviderChange: (String) -> Unit,
-    onKeyChange: (String) -> Unit,
-    onOpenConsole: () -> Unit,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    val descriptor = ProviderRegistry.findOrDefault(selectedProviderId)
-    var providerMenuOpen by remember { mutableStateOf(false) }
-
-    val existingSource = sources[descriptor.id] ?: CredentialSource.NONE
-    val alreadyStored = existingSource == CredentialSource.STORED
-    // An env-supplied key cannot be stored here — saveKey rejects it — so say that up
-    // front instead of letting the save fail after the key has been typed.
-    val fromEnvironment = existingSource == CredentialSource.ENVIRONMENT
-
-    BossAlertDialog(
-        onDismissRequest = onDismiss,
-        backgroundColor = BossThemeColors.SurfaceColor,
-        title = {
-            Text(
-                if (alreadyStored) "Change AI provider key" else "Add AI provider key",
-                color = BossThemeColors.TextPrimary,
-                fontWeight = FontWeight.Bold
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Stored as an encrypted secret. Pick a model afterwards in Settings → AI Providers.",
-                    color = BossThemeColors.TextSecondary,
-                    style = SecretPanelType.meta
-                )
-
-                // Say plainly what saving will do to an existing credential.
-                if (alreadyStored) {
-                    Text(
-                        "${descriptor.standardKeyName} is already stored. Entering a new key replaces it.",
-                        color = BossThemeColors.WarningColor,
-                        style = SecretPanelType.meta
-                    )
-                } else if (fromEnvironment) {
-                    Text(
-                        "${descriptor.displayName} is supplied by the environment " +
-                            "(${descriptor.envVarNames.joinToString(" / ")}) and can't be stored here. " +
-                            "Unset that variable to manage the key in BOSS.",
-                        color = BossThemeColors.WarningColor,
-                        style = SecretPanelType.meta
-                    )
-                }
-
-                // Provider picker
-                Box {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(BossThemeColors.BackgroundColor)
-                            .clickable(enabled = !isLoading) { providerMenuOpen = true }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = descriptor.displayName,
-                            color = BossThemeColors.TextPrimary,
-                            style = SecretPanelType.body,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Icon(
-                            Icons.Default.ArrowDropDown,
-                            contentDescription = "Choose provider",
-                            tint = BossThemeColors.TextSecondary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    DropdownMenu(
-                        expanded = providerMenuOpen,
-                        onDismissRequest = { providerMenuOpen = false },
-                        modifier = Modifier.background(BossThemeColors.SurfaceColor)
-                    ) {
-                        // userKeyed, not all: a keyless or brokered provider has no key to
-                        // store here. See ProviderRegistry.userKeyed.
-                        ProviderRegistry.userKeyed.forEach { candidate ->
-                            DropdownMenuItem(
-                                onClick = {
-                                    providerMenuOpen = false
-                                    onProviderChange(candidate.id)
-                                }
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        candidate.displayName,
-                                        color = BossThemeColors.TextPrimary,
-                                        style = SecretPanelType.body,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    // Marking configured providers means "already set" is
-                                    // visible before picking, not after.
-                                    when (sources[candidate.id]) {
-                                        CredentialSource.STORED -> Text(
-                                            "set",
-                                            color = BossThemeColors.SuccessColor,
-                                            style = SecretPanelType.caption
-                                        )
-                                        CredentialSource.ENVIRONMENT -> Text(
-                                            "env",
-                                            color = BossThemeColors.SecondaryColor,
-                                            style = SecretPanelType.caption
-                                        )
-                                        else -> Unit
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                OutlinedTextField(
-                    value = keyDraft,
-                    onValueChange = onKeyChange,
-                    label = {
-                        Text(
-                            if (alreadyStored) "New API key" else "API key",
-                            color = BossThemeColors.TextSecondary
-                        )
-                    },
-                    placeholder = {
-                        Text(
-                            if (alreadyStored) "Enter a new key to replace the stored one"
-                            else descriptor.keyPlaceholder,
-                            color = BossThemeColors.TextMuted
-                        )
-                    },
-                    singleLine = true,
-                    enabled = !isLoading && !fromEnvironment,
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                // Same affordance as Settings → AI Providers: don't make someone without a
-                // key hunt for the console themselves.
-                if (descriptor.consoleUrl != null) {
-                    OutlinedButton(
-                        onClick = onOpenConsole,
-                        enabled = !isLoading,
-                        border = BorderStroke(1.dp, BossThemeColors.BorderColor)
-                    ) {
-                        Icon(
-                            Icons.Default.OpenInNew,
-                            contentDescription = null,
-                            tint = BossThemeColors.TextSecondary,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            "Get API key",
-                            color = BossThemeColors.TextPrimary,
-                            style = SecretPanelType.meta
-                        )
-                    }
-                }
-
-                if (descriptor.envVarNames.isNotEmpty()) {
-                    Text(
-                        "Or set ${descriptor.envVarNames.joinToString(" / ")} in the environment.",
-                        color = BossThemeColors.TextMuted,
-                        style = SecretPanelType.caption
-                    )
-                }
-
-                errorMessage?.let {
-                    Text(it, color = BossThemeColors.ErrorColor, style = SecretPanelType.meta)
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = onConfirm,
-                enabled = !isLoading && !fromEnvironment && keyDraft.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(
-                    backgroundColor = BossThemeColors.AccentColor
-                )
-            ) {
-                Text(
-                    when {
-                        isLoading -> "Saving…"
-                        alreadyStored -> "Replace"
-                        else -> "Save"
-                    }
-                )
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !isLoading) {
-                Text("Cancel", color = BossThemeColors.TextSecondary)
-            }
-        }
-    )
 }

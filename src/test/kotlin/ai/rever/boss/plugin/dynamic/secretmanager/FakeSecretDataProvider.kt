@@ -1,4 +1,4 @@
-package ai.rever.boss.plugin.dynamic.secretmanager.ai
+package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.CreateSecretRequestData
 import ai.rever.boss.plugin.api.PaginatedSecretsData

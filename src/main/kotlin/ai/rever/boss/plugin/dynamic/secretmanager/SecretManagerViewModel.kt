@@ -1,12 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.*
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.SharedProviderDefinition
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.bossAiDefinitionRequest
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.managedProviderUpdate
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import androidx.compose.runtime.getValue
@@ -51,10 +45,6 @@ class SecretManagerViewModel(
     private val supabaseDataProvider: SupabaseDataProvider?,
     private val pluginStoreApiKeyProvider: PluginStoreApiKeyProvider?,
     private val scope: CoroutineScope,
-    /** Writes AI provider keys through the same store the AI Providers panel uses. */
-    private val aiProviderStore: ProviderCredentialStore? = null,
-    /** Opens a provider's key console, same affordance as the AI Providers panel. */
-    private val splitViewOperations: SplitViewOperations? = null,
     /** Read-only: decides whether the share dialog offers role targets at all. */
     private val authDataProvider: AuthDataProvider? = null
 ) {
@@ -120,7 +110,6 @@ class SecretManagerViewModel(
      * a single network round-trip instead of three.
      */
     fun initialize() {
-        state = state.copy(canAddAiProviderKey = aiProviderStore != null)
         observeRoleSharePermission()
         if (secretDataProvider != null) {
             loadSecrets()
@@ -176,9 +165,6 @@ class SecretManagerViewModel(
             secrets = emptyList(),
             selectedSecret = null,
             secretShares = emptyList(),
-            // Closing the panel with the AI-provider dialog open would otherwise leave the
-            // raw key in state; hideAiProviderKeyDialog() clears it for the same reason.
-            aiProviderKeyDraft = "",
         )
     }
 
@@ -385,193 +371,6 @@ class SecretManagerViewModel(
         state = state.copy(showDeleteDialog = false, selectedSecret = null)
     }
 
-    // ==================== AI provider keys ====================
-
-    /** True when [secret] is AI provider configuration rather than a password entry. */
-    fun isAiProviderSecret(secret: SecretEntryData): Boolean =
-        secret.tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER)
-
-    fun aiProviderId(secret: SecretEntryData): String? =
-        ProviderRegistry.storedProviderId(secret.website, secret.tags)
-
-    /** Display name for an AI provider entry, falling back to the stored website value. */
-    fun aiProviderDisplayName(secret: SecretEntryData): String =
-        aiProviderId(secret)?.let(ProviderRegistry::find)?.displayName ?: secret.website
-
-    /**
-     * Open the provider-key dialog, then load which providers already have a credential.
-     *
-     * The dialog needs this to tell adding from changing: without it, a provider whose key
-     * is already stored looks identical to one that has none, and saving silently replaces
-     * a working key with no warning.
-     */
-    fun showAiProviderKeyDialog() {
-        state = state.copy(
-            showAiProviderKeyDialog = true,
-            aiProviderKeyProviderId = ProviderRegistry.default.id,
-            aiProviderKeyDraft = "",
-            errorMessage = null
-        )
-
-        val store = aiProviderStore ?: return
-        scope.launch {
-            val sources =
-                store.loadAll().connections.mapValues { (_, connection) -> connection.source }
-
-            // Pre-select the first provider that has no key yet, since adding is the
-            // common case; changing an existing one is then an explicit pick.
-            // Over the same list the dialog offers, or this pre-selects a provider the user
-            // cannot then see in the picker.
-            val firstUnset = ProviderRegistry.userKeyed
-                .firstOrNull { (sources[it.id] ?: CredentialSource.NONE) == CredentialSource.NONE }
-                ?.id
-
-            // Only pre-select if the user hasn't chosen in the meantime. loadAll() pages the
-            // whole store, so on a large one this lands well after the dialog is usable and
-            // would otherwise overwrite an explicit pick.
-            val userHasPicked = state.aiProviderKeyProviderId != ProviderRegistry.default.id ||
-                state.aiProviderKeyDraft.isNotEmpty()
-
-            state = state.copy(
-                aiProviderSources = sources,
-                aiProviderKeyProviderId =
-                    if (userHasPicked) {
-                        state.aiProviderKeyProviderId
-                    } else {
-                        firstUnset ?: state.aiProviderKeyProviderId
-                    }
-            )
-        }
-    }
-
-    fun hideAiProviderKeyDialog() {
-        // errorMessage is shared panel state, so a failed save would otherwise leave its
-        // banner behind after the dialog it belonged to is gone.
-        // Clear the draft on close so key material doesn't linger in state.
-        state = state.copy(showAiProviderKeyDialog = false, aiProviderKeyDraft = "", errorMessage = null)
-    }
-
-    fun setAiProviderKeyProvider(providerId: String) {
-        state = state.copy(aiProviderKeyProviderId = providerId, errorMessage = null)
-    }
-
-    fun setAiProviderKeyDraft(value: String) {
-        state = state.copy(aiProviderKeyDraft = value, errorMessage = null)
-    }
-
-    /**
-     * Save the entered key through [ProviderCredentialStore] rather than `createSecret`,
-     * so it lands with the tags, website and notes shape the AI Providers panel reads —
-     * a hand-rolled secret would not be recognised as provider configuration.
-     */
-    fun saveAiProviderKey() {
-        val store = aiProviderStore ?: return
-        val providerId = state.aiProviderKeyProviderId
-        val key = state.aiProviderKeyDraft.trim()
-        if (key.isBlank()) {
-            state = state.copy(errorMessage = "Enter an API key first.")
-            return
-        }
-
-        scope.launch {
-            state = state.copy(isOperationInProgress = true)
-            store.saveKey(providerId, key)
-                .onSuccess {
-                    state = state.copy(
-                        isOperationInProgress = false,
-                        showAiProviderKeyDialog = false,
-                        aiProviderKeyDraft = "",
-                        errorMessage = null,
-                        aiProviderSources = state.aiProviderSources +
-                            (providerId to CredentialSource.STORED)
-                    )
-                    loadSecrets()
-                }
-                .onFailure { error ->
-                    state = state.copy(
-                        isOperationInProgress = false,
-                        errorMessage = error.message ?: "Could not save the provider key."
-                    )
-                }
-        }
-    }
-
-    /**
-     * Create the canonical BOSS AI definition, or upgrade the matching inert entry
-     * someone already entered by hand. Sharing remains an explicit second action on
-     * the resulting card so the existing permission-checked share dialog owns targets.
-     */
-    fun prepareBossAiProviderDefinition() {
-        val provider = secretDataProvider ?: return
-        state = state.copy(isOperationInProgress = true, errorMessage = null)
-        scope.launch {
-            val candidates = provider.searchSecrets(SharedProviderDefinition.BOSS_AI_WEBSITE, limit = 50)
-                .getOrElse { error ->
-                    state = state.copy(
-                        isOperationInProgress = false,
-                        errorMessage = error.message ?: "Could not look for an existing BOSS AI definition.",
-                    )
-                    return@launch
-                }
-                .data
-                .filter {
-                    it.website == SharedProviderDefinition.BOSS_AI_WEBSITE &&
-                        it.username == SharedProviderDefinition.BOSS_AI_USERNAME
-                }
-
-            if (candidates.size > 1) {
-                state = state.copy(
-                    isOperationInProgress = false,
-                    errorMessage = "More than one BOSS AI definition exists. Remove duplicates before publishing.",
-                )
-                return@launch
-            }
-
-            val write = candidates.singleOrNull()?.let { existing ->
-                managedProviderUpdate(existing).fold(
-                    onSuccess = { provider.updateSecret(it) },
-                    onFailure = { Result.failure(it) },
-                )
-            } ?: provider.createSecret(bossAiDefinitionRequest())
-
-            write.onSuccess {
-                aiProviderStore?.invalidate()
-                state = state.copy(isOperationInProgress = false, errorMessage = null)
-                loadSecrets()
-            }.onFailure { error ->
-                state = state.copy(
-                    isOperationInProgress = false,
-                    errorMessage = error.message ?: "Could not prepare the BOSS AI definition.",
-                )
-            }
-        }
-    }
-
-    /**
-     * Open the selected provider's key console in a BOSS tab.
-     *
-     * Same affordance as the AI Providers settings panel, so the dialog isn't a dead end
-     * for someone who doesn't have a key yet.
-     */
-    fun openAiProviderConsole() {
-        val descriptor = ProviderRegistry.findOrDefault(state.aiProviderKeyProviderId)
-        val url = descriptor.consoleUrl
-        if (url == null) {
-            state = state.copy(errorMessage = "${descriptor.displayName} has no key console.")
-            return
-        }
-        val operations = splitViewOperations
-        if (operations == null) {
-            state = state.copy(errorMessage = "Open $url to create a key.")
-            return
-        }
-        runCatching {
-            operations.openUrlInActivePanel(url, "${descriptor.displayName} API keys", forceNewTab = true)
-        }.onFailure {
-            state = state.copy(errorMessage = "Open $url to create a key.")
-        }
-    }
-
     fun showShareDialog(secret: SecretEntryData) {
         state = state.copy(
             showShareDialog = true,
@@ -613,10 +412,6 @@ class SecretManagerViewModel(
 
         scope.launch {
             val result = secretDataProvider?.createSecret(request)
-            // The AI provider cache is keyed off these same secrets; without this a
-            // deleted or hand-edited ai-provider entry keeps being served to other
-            // plugins (and shown as connected) for the rest of the session.
-            aiProviderStore?.invalidate()
 
             result?.onSuccess {
                 state = state.copy(isOperationInProgress = false)
@@ -639,10 +434,6 @@ class SecretManagerViewModel(
 
         scope.launch {
             val result = secretDataProvider?.updateSecret(request)
-            // The AI provider cache is keyed off these same secrets; without this a
-            // deleted or hand-edited ai-provider entry keeps being served to other
-            // plugins (and shown as connected) for the rest of the session.
-            aiProviderStore?.invalidate()
 
             result?.onSuccess {
                 state = state.copy(isOperationInProgress = false)
@@ -665,10 +456,6 @@ class SecretManagerViewModel(
 
         scope.launch {
             val result = secretDataProvider?.deleteSecret(secretId)
-            // The AI provider cache is keyed off these same secrets; without this a
-            // deleted or hand-edited ai-provider entry keeps being served to other
-            // plugins (and shown as connected) for the rest of the session.
-            aiProviderStore?.invalidate()
 
             result?.onSuccess {
                 state = state.copy(isOperationInProgress = false)
@@ -1133,12 +920,4 @@ data class SecretManagerState(
     val apiKeys: List<ApiKeyInfo> = emptyList(),
     val isLoadingApiKeys: Boolean = false,
     val apiKeyCreatedSuccessfully: Boolean = false, // Flag to show success message
-    // AI provider key entry (writes through ProviderCredentialStore, not createSecret,
-    // so the entry is tagged and shaped the way the AI Providers panel expects)
-    val showAiProviderKeyDialog: Boolean = false,
-    val aiProviderKeyProviderId: String = ProviderRegistry.default.id,
-    val aiProviderKeyDraft: String = "",
-    val canAddAiProviderKey: Boolean = false,
-    /** Where each provider's credential currently comes from, for add-vs-change. */
-    val aiProviderSources: Map<String, CredentialSource> = emptyMap()
 )
