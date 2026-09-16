@@ -1,7 +1,6 @@
 package ai.rever.boss.plugin.dynamic.secretmanager
 
 import ai.rever.boss.plugin.api.SecretEntryWithSharingData
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
 import ai.rever.boss.plugin.scrollbar.lazyListScrollbar
 import ai.rever.boss.plugin.ui.BossCard
@@ -340,7 +339,7 @@ private fun SharedSecretCard(
 ) {
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val isApiKey = secret.tags.contains(ProviderCredentialStore.TAG_API_KEY)
+    val isApiKey = secret.tags.contains("api_key")
 
     BossCard(modifier = Modifier.fillMaxWidth()) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

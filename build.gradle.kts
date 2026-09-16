@@ -60,8 +60,9 @@ repositories {
 dependencies {
     if (useLocalDependencies) {
         // Local development: use boss-plugin-api JAR from sibling repo.
-        // plugin.json declares 1.0.92, the release assigned to API PR #59. The adapter implements
-        // the new interface and names its types, so a construction-time LinkageError guard cannot
+        // plugin.json declares 1.0.94, which adds scoped secret access and human grants. This
+        // plugin implements the new interface and names its types, so a construction-time
+        // LinkageError guard cannot
         // make an older host safe: method types may resolve later and the host can scan constant-
         // pool references before registration.
         // See AGENTS.md "Linkage containment".
@@ -220,15 +221,13 @@ val verifyPackagedJar: (File, String) -> Unit = { jar, expectedVersion ->
  * the plugin.json stamp assertion: the invariant nothing else can reach is the one worth pinning
  * at build time.
  *
- * Scoped to the two files that were converted. `ai/AiProvidersPanel.kt` is in the same sweep now,
- * so if it ever needs to be exempted again, add it here rather than dropping the check.
+ * Scoped to the two Secret Manager surfaces that use the shared type scale.
  */
 fun verifyNoLooseFontSizes() {
     val guarded =
         listOf(
             "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/SecretManagerContent.kt",
-            "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/SharedSecretsSection.kt",
-            "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/ai/AiProvidersPanel.kt"
+            "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/SharedSecretsSection.kt"
         ).map { file(it) }
 
     // A missing file must fail, not silently pass: a rename would otherwise retire the guard.

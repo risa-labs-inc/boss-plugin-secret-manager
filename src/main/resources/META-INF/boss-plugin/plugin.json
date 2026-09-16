@@ -3,32 +3,19 @@
   "pluginId": "ai.rever.boss.plugin.dynamic.secretmanager",
   "displayName": "Secret Manager (Dynamic)",
   "version": "0.0.0-unstamped",
-  "apiVersion": "1.0.92",
-  "minApiVersion": "1.0.92",
+  "apiVersion": "1.0.94",
+  "minApiVersion": "1.0.94",
   "minBossVersion": "9.4.2",
   "mainClass": "ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin",
   "type": "panel",
-  "description": "Your credentials, secrets shared with you, Plugin Store publish keys and AI provider settings",
+  "description": "Save encrypted credentials, review human shares, and explicitly grant access to plugins and MCP tools",
   "author": "Risa Labs",
   "url": "https://github.com/risa-labs-inc/boss-plugin-secret-manager",
   "requiresAdmin": false,
   "requiredPermissions": ["secret.read"],
-  "dependencies": [
-    {
-      "pluginId": "ai.rever.boss.plugin.dynamic.aigateway",
-      "optional": true
-    }
-  ],
   "panel": {
     "position": "right_top_bottom",
     "priority": 24
   },
-  "sandbox": {
-    "maxThreads": 4,
-    "maxRestartAttempts": 3,
-    "heartbeatIntervalMs": 5000
-  },
-  "isolationMode": "out-of-process",
-  "fallback": "in-process",
-  "stateHolderClass": "ai.rever.boss.plugin.runtime.stateholders.SecretManagerStateHolder"
+  "isolationMode": "in-process"
 }

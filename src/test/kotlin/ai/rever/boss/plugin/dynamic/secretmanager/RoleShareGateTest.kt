@@ -9,7 +9,6 @@ import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.api.ShareSecretRequestData
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.api.UserData
-import ai.rever.boss.plugin.dynamic.secretmanager.ai.FakeSecretDataProvider
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -225,19 +224,6 @@ class RoleShareGateTest {
         advanceUntilIdle()
 
         assertEquals(1, vm.state.secrets.size)
-    }
-
-    /** A typed-but-unsaved provider key must not survive the panel either. */
-    @Test
-    fun `dispose clears a typed AI provider key`() = runTest {
-        val (vm, _) = viewModel(this, permissions = emptySet())
-        advanceUntilIdle()
-        vm.setAiProviderKeyDraft("sk-typed-but-never-saved")
-        assertEquals("sk-typed-but-never-saved", vm.state.aiProviderKeyDraft)
-
-        vm.dispose()
-
-        assertEquals("", vm.state.aiProviderKeyDraft)
     }
 
     /**

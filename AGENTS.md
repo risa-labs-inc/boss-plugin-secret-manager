@@ -4,11 +4,20 @@
 
 **Secret Manager (Dynamic)** (`ai.rever.boss.plugin.dynamic.secretmanager`) is a dynamic plugin for the BOSS desktop application.
 
-Your credentials, secrets shared with you, Plugin Store API keys and AI provider settings
+Your credentials, secrets shared with you, Plugin Store API keys, and human-managed execution
+grants. AI provider/model configuration moved to AI Gateway; do not add it back here.
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.secretmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.secretmanager.SecretManagerDynamicPlugin`
-- **API Version**: 1.0.92 (`plugin.json` `apiVersion` and `minApiVersion`)
+- **API Version**: 1.0.94 (`plugin.json` `apiVersion` and `minApiVersion`)
+
+### Current security boundary
+
+- The broad `SecretDataProvider` is for this trusted human vault only.
+- MCP handlers use `SecretAccessProvider`; the host binds each invocation to the exact tool.
+- Ownerless legacy secrets remain human/browser-only until a human grants use.
+- A use grant permits explicit plaintext retrieval, but never update, delete, or re-share.
+- `SecretGrantManager` is a human UI capability and must not be exposed through MCP tools.
 
 ## Essential Commands
 
@@ -270,7 +279,14 @@ a real sidebar width rather than assuming the popup would cope. `showAddDropdown
 flipped to `true` for one build to get it on screen, the same trick as defaulting `selectedSection` to
 the shared tab; both are reverted, and `git diff` on those two lines is empty.
 
-## Three sections, and the AI one is not owned by the panel
+## Historical AI implementation notes (do not implement here)
+
+The material through the former AI-provider section below records the implementation that moved
+to `boss-plugin-ai-gateway`. It is retained temporarily to preserve migration rationale, but it is
+not current architecture. Secret Manager now has only Secrets and Shared with me; all provider,
+model, CLI, discovery, pricing, and usage work belongs in AI Gateway.
+
+### Former three-section design
 
 The panel is segmented into **Secrets**, **Shared with me** and **AI**. `AiProvidersPanel` also
 remains available through the compatibility settings API for older hosts, from one definition. It is there because this plugin owns every AI credential in BOSS while the panel
@@ -363,7 +379,7 @@ comes out of the built jar as this plugin's own version - "requires aigateway 1.
 ignores the field anyway (`missingFor` matches on id alone). This exact trap was hit once in
 `user-secret-list` and was invisible in the committed file.
 
-## AI Providers (`ai/` package)
+## Former AI Providers (`ai/` package, now removed)
 
 This plugin owns AI provider configuration **and is now the only place it is edited**. The host's
 `Settings > AI Providers` section is gone, along with the `LlmProviderAPIAccess` singleton that

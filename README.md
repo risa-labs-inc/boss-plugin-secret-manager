@@ -1,12 +1,10 @@
 # BOSS Secret Manager
 
-Encrypted credentials, the secrets other people share with you, Plugin Store publish keys, and
-every AI provider setting in BOSS.
+Encrypted credentials, the secrets other people share with you, and Plugin Store publish keys.
 
-A right-hand sidebar panel over the host's `SecretDataProvider`, plus the `Settings > AI
-Providers` section: this plugin owns **all** AI provider configuration for the application.
-The host has none of its own, and `PluginContext.llmProvider` is relayed from the instance
-registered here.
+A right-hand sidebar panel over the host's human-only `SecretDataProvider`. AI provider and model
+configuration now belongs to the AI Gateway plugin. Secret Manager only stores credentials and
+lets a human grant a plugin or MCP tool permission to use a specific secret.
 
 It is also the *only* secrets plugin: the separate **My Secrets** (`user-secret-list`) panel
 is retired, and its list is this panel's "Shared with me" section. See
@@ -22,23 +20,15 @@ is retired, and its list is this panel's "Shared with me" section. See
   or re-share control exists anywhere in that section.
 - **Sharing**: share a secret with individual users (searched through Supabase) or with whole
   RBAC roles, each at an access level, and unshare again.
-- **AI**: a third section holding every AI credential in BOSS - local CLI sessions (a `claude` or
-  `codex` login you already have), provider API keys, and a model picker driven by each provider's
-  live list. The same panel the host renders at Settings, AI Providers, from one definition rather
-  than a second copy: the keys live in this vault, so the page that manages them belongs here too.
-  When the AI Gateway plugin is missing the section says so and offers to install it, because
-  without the gateway there are no CLI sessions and no common AI interface for other plugins.
+- **Execution access**: a secret owner can explicitly grant use to an installed plugin or an
+  individual MCP tool, and revoke it immediately. A grant permits retrieval for use; it never
+  permits the recipient to edit, delete, or re-share the secret. A plugin/tool creator-owner is
+  shown as immutable so it cannot be mistaken for a revocable grant.
 - **Plugin Store publish keys**: create, list and revoke them, with a `publish` scope checkbox. The
   key is shown once at creation and never again.
-- **AI providers**: Anthropic, OpenAI, Google Gemini, xAI Grok, Moonshot (Kimi), Together AI,
-  and any custom OpenAI-compatible endpoint.
-- **Model lists are fetched live** from each provider's own models endpoint and cached for six
-  hours. There is deliberately no bundled fallback list: a provider with no credential reports
-  "not configured" rather than guessing from a hardcoded list that drifts out of date.
-
-Credential precedence is environment, then stored, then none. Environment values resolve from
-the process environment, system properties, macOS `launchctl`, and finally `~/.boss/env_vars`.
-**A key supplied by the environment is never written back to disk.**
+Secrets with no execution owner retain their existing browser and human-vault behavior. They are
+not visible to any plugin, agent, or tool until a human explicitly shares them. Secrets created
+through a plugin or tool's scoped API are visible only to that exact owner unless shared later.
 
 ## Two sections, not two panels
 
@@ -46,7 +36,7 @@ The panel has two segmented sections, and they partition the vault rather than o
 
 | Section | Reads | Rows | Controls |
 |---|---|---|---|
-| **Secrets** | `getUserSecrets` | your own plus your organisation's | full CRUD, sharing, API keys, AI provider keys |
+| **Secrets** | `getUserSecrets` | your own plus your organisation's | full CRUD, sharing, API keys, execution grants |
 | **Shared with me** | `getUserSecretsWithSharingInfo` | only what was shared with you | none - read-only |
 
 Those were two separate plugins, `secret-manager` and `user-secret-list`, and **both listed
@@ -87,24 +77,15 @@ without that test turned one tab switch into hundreds of sequential requests.
 | `secret_search` | Search secrets by query, metadata only |
 | `secret_get` | Reveal password, notes and 2FA for one secret id |
 | `secret_create` | Create a secret |
-| `secret_delete` | Delete a secret |
-| `my_secrets_list` | Your own **and** shared-with-you secrets, with owner/access, metadata only |
-| `my_secret_get` | Reveal one secret by id, including one shared with you |
+| `secret_update` | Update a secret created by this exact tool |
+| `secret_delete` | Delete a secret created by this exact tool |
+| `my_secrets_list` | Compatibility alias with its own exact-tool access scope |
+| `my_secret_get` | Compatibility alias with its own exact-tool access scope |
 
-The `my_*` pair came from the retired `user-secret-list` plugin and keeps its original names:
-agents, prompts and skills already call them, and `getUserSecretsWithSharingInfo` is the only
-call that reports *how* a secret reached you. `secrets_list` / `secret_get` still read only
-what you can manage.
-
-**`secret_get` and `my_secret_get` both refuse any secret tagged `ai-provider`.** A `*_list`
-tool hands out ids and a `*_get` tool hands out the plaintext password, so without that gate a
-prompt-injected agent is two tool calls away from every configured provider key. An agent that
-needs to *use* a provider goes through `PluginContext.llmProvider` and never needs the raw
-value.
-
-Both call one function (`aiProviderRefusal`) rather than repeating the check, because repeating
-it is exactly how `my_secret_get` shipped *without* it in the sibling plugin and read the keys
-`secret_get` withheld. Any new tool here that returns a password calls it too.
+Every tool call is bound by the host to its exact provider/tool identity. Listing and search are
+metadata-only. `secret_get` is the explicit plaintext operation and succeeds only for secrets
+created by that tool or granted to it by a human. Grants are use-only, so update and delete remain
+owner-only.
 
 ## Permissions
 
@@ -115,9 +96,8 @@ authenticated user. It was admin-only until migration `20260809000000`, which is
 rather than a widening: the vault was always per-user server-side (every RPC is granted to
 `authenticated` and self-scopes with `auth.uid()`, and all four RLS policies on `secrets` are
 `auth.uid() = user_id`). The old gate was inherited from the pre-RBAC `requiresAdmin` flag, and
-since AI provider settings moved into this plugin it also meant no non-admin could add a model
-API key at all. The permission is still revocable, so a locked-down deployment removes it from
-`user`.
+it also meant non-admin users could not manage their own vault. The permission is still
+revocable, so a locked-down deployment removes it from `user`.
 
 Writes are intentionally gated on `secret.read` rather than granular `secrets.create` /
 `secrets.delete`: those are not seeded in the RBAC catalog, so gating on them would silently
@@ -138,19 +118,14 @@ ungated, and sharing with an organisation already requires membership of it.
 
 ## Requirements
 
-- BOSS >= 9.4.2, boss-plugin-api >= 1.0.73 (both from `plugin.json`; the older 9.2.20 /
-  1.0.20 pair stated here was stale)
+- BOSS >= 9.4.2, boss-plugin-api >= 1.0.94
 - The panel is visible to every authenticated user only on a host carrying migration
   `20260809000000`, which grants `secret.read` to the baseline `user` role. On an older
   host only admins and `boss_admin` can open it, and nothing else changes.
-- `secretDataProvider` is required. Without it only a no-provider stub panel registers and no
-  MCP tools are contributed.
+- `secretDataProvider` is required for the human vault. `secretAccessProvider` scopes MCP tools,
+  and `secretGrantManager` supplies the trusted human grant controls.
 - Optional: `supabaseDataProvider` (user and role search for sharing),
   `pluginStoreApiKeyProvider`, `settingsProvider`, `splitViewOperations`, `cacheProvider`.
-- Network egress to each provider's models endpoint.
-- The AI providers section additionally needs **api 1.0.71**. That dependency is confined to
-  one file and registered inside a `LinkageError` guard, so on an older host the AI section is
-  simply absent and secret management still works.
 
 ## Build
 
