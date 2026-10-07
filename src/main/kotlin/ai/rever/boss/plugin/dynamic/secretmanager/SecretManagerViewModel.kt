@@ -27,6 +27,11 @@ import ai.rever.boss.plugin.dynamic.secretmanager.security.PersonalVaultOwnershi
 import ai.rever.boss.plugin.dynamic.secretmanager.security.VaultHealth
 import ai.rever.boss.plugin.dynamic.secretmanager.security.VaultHealthScanner
 import ai.rever.boss.plugin.dynamic.secretmanager.security.VaultHealthScanException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import ai.rever.boss.plugin.dynamic.secretmanager.security.VaultBackupService
+import ai.rever.boss.plugin.dynamic.secretmanager.security.VaultBackupFiles
+import java.io.File
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -71,6 +76,8 @@ class SecretManagerViewModel(
     // Job tracking to prevent race conditions
     private var loadJob: Job? = null
     private var searchJob: Job? = null
+    private var backupJob: Job? = null
+    private var backupGeneration = 0L
     private var healthJob: Job? = null
     private var healthGeneration = 0L
     private var prepareDefinitionJob: Job? = null
@@ -186,10 +193,14 @@ class SecretManagerViewModel(
         permissionJob = null
         loadJob?.cancel()
         searchJob?.cancel()
+        backupJob?.cancel()
         healthJob?.cancel()
         prepareDefinitionJob?.cancel()
         state = state.copy(
             secrets = emptyList(),
+            showBackupDialog = false,
+            isBackupBusy = false,
+            backupError = null,
             secretAccess = emptyMap(),
             healthReport = null,
             healthError = null,
@@ -453,6 +464,97 @@ class SecretManagerViewModel(
             }.also { job ->
                 job.invokeOnCompletion {
                     if (!disposed && healthGeneration == generation) state = state.copy(isCheckingHealth = false)
+                }
+            }
+    }
+
+    fun showBackupDialog() {
+        if (disposed || state.isBackupBusy) return
+        state = state.copy(showBackupDialog = true, backupStatus = null, backupError = null)
+    }
+
+    fun hideBackupDialog() {
+        state = state.copy(showBackupDialog = false)
+    }
+
+    /** Export verified personal-owned secrets to a file only [passphrase] can open. */
+    fun exportVaultToFile(
+        file: File,
+        passphrase: CharArray,
+    ) {
+        val provider = secretDataProvider
+        if (provider == null || disposed || state.isBackupBusy) {
+            passphrase.fill('\u0000')
+            return
+        }
+        val generation = ++backupGeneration
+        state = state.copy(isBackupBusy = true, backupStatus = null, backupError = null)
+        backupJob =
+            scope.launch {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val bytes = VaultBackupService.exportVault(provider, passphrase)
+                        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                        val context = kotlinx.coroutines.currentCoroutineContext()
+                        VaultBackupFiles.write(file, bytes) { context.ensureActive() }
+                    }
+                }.onSuccess {
+                    if (!disposed) state = state.copy(isBackupBusy = false, backupStatus = "Backup saved to ${file.name}")
+                }.onFailure { error ->
+                    if (error is CancellationException) return@onFailure
+                    if (!disposed) {
+                        state = state.copy(isBackupBusy = false, backupError = if (error is PersonalVaultOwnershipException) error.message else "Backup failed. Check the destination file and vault access before trying again.")
+                    }
+                }
+            }.also { job ->
+                job.invokeOnCompletion {
+                    passphrase.fill('\u0000')
+                    if (!disposed && backupGeneration == generation) state = state.copy(isBackupBusy = false)
+                }
+            }
+    }
+
+    /** Restore entries from an encrypted backup [file], skipping ones already present. */
+    fun importVaultFromFile(
+        file: File,
+        passphrase: CharArray,
+    ) {
+        val provider = secretDataProvider
+        if (provider == null || disposed || state.isBackupBusy) {
+            passphrase.fill('\u0000')
+            return
+        }
+        val generation = ++backupGeneration
+        state = state.copy(isBackupBusy = true, backupStatus = null, backupError = null)
+        backupJob =
+            scope.launch {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val bytes = VaultBackupFiles.read(file)
+                        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                        VaultBackupService.importVault(bytes, passphrase, provider)
+                    }
+                }.onSuccess { outcome ->
+                    if (!disposed) {
+                        state =
+                            state.copy(
+                                isBackupBusy = false,
+                                backupStatus =
+                                    "Restored ${outcome.imported}, skipped ${outcome.skipped}, failed ${outcome.failed}. " +
+                                        "${outcome.unsupportedTwofa} entries with 2FA seeds could not be restored.",
+                            )
+                        loadSecrets()
+                    }
+                }.onFailure { error ->
+                    if (error is CancellationException) return@onFailure
+                    if (!disposed) {
+                        state = state.copy(isBackupBusy = false, backupError = if (error is PersonalVaultOwnershipException) error.message else "Restore failed. Check the passphrase, backup format and vault access. Some entries may already have been restored.")
+                    }
+                }
+            }.also { job ->
+                job.invokeOnCompletion {
+                    passphrase.fill('\u0000')
+                    if (!disposed && backupGeneration == generation) state = state.copy(isBackupBusy = false)
                 }
             }
     }
@@ -1319,6 +1421,11 @@ data class SecretManagerState(
     val healthReport: VaultHealth.Report? = null,
     val isCheckingHealth: Boolean = false,
     val healthError: String? = null,
+    val showBackupDialog: Boolean = false,
+    val isBackupBusy: Boolean = false,
+    val backupError: String? = null,
+    /** Result line from the last export/restore, or null. */
+    val backupStatus: String? = null,
     // Sharing-related state
     val showShareDialog: Boolean = false,
     val secretShares: List<SecretShareData> = emptyList(),

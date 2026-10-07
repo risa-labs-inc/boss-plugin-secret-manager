@@ -1443,3 +1443,11 @@ empty legacy result is safe to report as zero personal passwords; nonempty
 ambiguous owner results fail closed. Advance offsets by raw rows, fail on capped
 or inconsistent scans, and check cancellation after provider returns as well as
 between pages.
+
+Backup format v2 authenticates the envelope header with AES-GCM and uses
+PBKDF2-HMAC-SHA256 at 600,000 iterations; the reader retains prototype v1 support.
+Reads are bounded at 64 MiB and 5,000 scanned rows/entries. Restore is additive and
+may be partial on write failure or cancellation. The current create/update API
+cannot write a 2FA seed: leave such entries untouched and report `unsupportedTwofa`
+rather than claiming they were restored. Always clear caller-owned passphrase
+arrays on completion, including a launch cancelled before entering its body.
