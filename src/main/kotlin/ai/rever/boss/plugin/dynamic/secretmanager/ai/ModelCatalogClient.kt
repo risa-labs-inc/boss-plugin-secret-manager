@@ -38,6 +38,7 @@ import java.util.Locale
  */
 class ModelCatalogClient(
     private val httpClient: HttpClient = defaultHttpClient(),
+    private val retryDelaysMs: List<Long> = TRANSIENT_RETRY_DELAYS_MS,
 ) {
     private val logger = BossLogger.forComponent("AiModelCatalogClient")
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -177,7 +178,7 @@ class ModelCatalogClient(
 
             runCatching {
                 // A GET is safe to resend when a pooled connection was already closed.
-                val response = retryTransient { httpClient.send(request, HttpResponse.BodyHandlers.ofString()) }
+                val response = retryTransient(retryDelaysMs) { httpClient.send(request, HttpResponse.BodyHandlers.ofString()) }
                 if (response.statusCode() !in 200..299) {
                     throw HttpStatusFailure(response.statusCode(), describeFailure(descriptor, response.statusCode()))
                 }

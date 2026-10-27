@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.QueryFilter
 import ai.rever.boss.plugin.api.QueryRange
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.QueuedHttpClient.Companion.DROPPED
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.QueuedHttpClient.Companion.REFUSED
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.QueuedHttpClient.Companion.TIMED_OUT
 import java.io.File
 import java.nio.file.Files
@@ -64,6 +65,19 @@ class TransientRetryTest {
         assertIs<TransientBrokerFailure>(error)
         assertEquals("Could not authorize BOSS AI (IOException). Retry using Refresh.", error.message)
         assertEquals(3, http.requests.size)
+    }
+
+    @Test fun `a 5xx that persists names its status`() = runBlocking {
+        val (_, source) = source(Rpc(), 503 to "")
+        val error = source.fetch(BossAiDiscovery.BROKER_ID).exceptionOrNull()
+        assertIs<TransientBrokerFailure>(error)
+        assertEquals("Could not authorize BOSS AI (HTTP 503). Retry using Refresh.", error.message)
+    }
+
+    @Test fun `a refused connection is not retried`() = runBlocking {
+        val (http, source) = source(Rpc(), REFUSED to "")
+        assertFalse(source.fetch(BossAiDiscovery.BROKER_ID).exceptionOrNull() is TransientBrokerFailure)
+        assertEquals(1, http.requests.size, "a stopped server stays stopped")
     }
 
     @Test fun `a refusal is not retried and is not transient`() = runBlocking {
@@ -133,5 +147,32 @@ class TransientRetryTest {
         store.loadAll()
         Thread.sleep(40)
         assertFalse(store.brokeredCredentialLapsed(broker), "a refusal keeps the long backoff")
+    }
+
+    @Test fun `BOSS AI discovery after a transient failure retries after 2 s, longer while it keeps failing`() = runBlocking {
+        val dir: File = Files.createTempDirectory("transient-discovery").toFile().also { File(it, "env_vars").writeText("") }
+        val env = EnvResolver(bossRootDir = dir, processEnv = { null }, systemProperty = { null }, useLaunchctl = false)
+        var now = 0L
+        val second = 1_000_000_000L
+        val failing = object : BrokeredKeySource {
+            override val discoversBossAi = true
+            override fun bossAiScope() = BossAiCredentialSource.API_SCOPE
+            override suspend fun fetch(brokerId: String) =
+                Result.failure<BrokeredKey>(TransientBrokerFailure("Could not authorize BOSS AI (IOException)."))
+        }
+        val store = ProviderCredentialStore(FakeSecretDataProvider(emptyList()), env, monotonicNanos = { now })
+        store.brokeredKeys = failing
+
+        store.loadAll()
+        now += second
+        assertFalse(store.sharedDefinitionsStale())
+        now += 2 * second
+        assertTrue(store.sharedDefinitionsStale(), "a blip must not hold BOSS AI unconfigured for 15 s")
+
+        store.loadAll()
+        now += 3 * second
+        assertFalse(store.sharedDefinitionsStale(), "a second failure in a row waits longer")
+        now += 2 * second
+        assertTrue(store.sharedDefinitionsStale())
     }
 }

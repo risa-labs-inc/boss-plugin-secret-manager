@@ -58,7 +58,7 @@ class BossAiDiscovery(
             throw cancelled
         } catch (error: Exception) {
             // Never surface HTTP/header exceptions that may contain the minted credential: only the class name escapes.
-            val reason = "Could not read trusted BOSS AI provider metadata (${error::class.simpleName}). Retry using Refresh."
+            val reason = "Could not read trusted BOSS AI provider metadata (${failureLabel(error)}). Retry using Refresh."
             Result.failure(if (isTransient(error)) TransientBrokerFailure(reason) else IllegalStateException(reason))
         }
     }

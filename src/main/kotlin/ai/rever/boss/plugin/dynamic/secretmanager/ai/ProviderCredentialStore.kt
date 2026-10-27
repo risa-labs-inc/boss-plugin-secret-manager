@@ -70,7 +70,7 @@ class ProviderCredentialStore(
      * to outwait it, which is how an untested guard ends up wrong.
      */
     private val mintRetryBackoffMs: Long = DEFAULT_MINT_RETRY_BACKOFF_MS,
-    /** The same wait after a mint failed in transit, which a moment usually fixes. */
+    /** The first wait after a mint failed in transit, doubling while it keeps failing, up to [mintRetryBackoffMs]. */
     private val transientMintRetryBackoffMs: Long = DEFAULT_TRANSIENT_MINT_RETRY_BACKOFF_MS,
     private val monotonicNanos: () -> Long = System::nanoTime,
     private val bossAiDiscovery: BossAiDiscovery = BossAiDiscovery(),
@@ -120,8 +120,12 @@ class ProviderCredentialStore(
      */
     private val lastMintFailureNanos = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    /** Brokers whose last mint failed in transit, so the read path retries after the short backoff. */
-    private val transientMintFailures = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /**
+     * Consecutive in-transit mint failures per broker, so the read path retries after a short
+     * backoff that grows during a real outage. Written apart from [lastMintFailureNanos]: a read
+     * between the two writes pairs one failure with the other's backoff, which is harmless.
+     */
+    private val transientMintStreak = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     /**
      * Brokers whose reuse window is currently being shortened by the expiry, so the log line
@@ -180,17 +184,15 @@ class ProviderCredentialStore(
         val scope: String?,
         val generation: Long,
         val fetchedAtNanos: Long,
-        /** Failed in transit: retried after seconds, not [SHARED_RETRY_NANOS], or every model call waits it out. */
-        val transient: Boolean = false,
+        /** Shorter after a failure in transit, or every model call waits out [SHARED_RETRY_NANOS]. */
+        val retryNanos: Long = SHARED_RETRY_NANOS,
     ) {
-        val ttlNanos: Long get() = when {
-            result.isSuccess -> SHARED_DISCOVERY_TTL_NANOS
-            transient -> TRANSIENT_RETRY_NANOS
-            else -> SHARED_RETRY_NANOS
-        }
+        val ttlNanos: Long get() = if (result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else retryNanos
     }
     private val bossAiMutex = Mutex()
     @Volatile private var cachedBossAi: CachedBossAi? = null
+    /** Consecutive in-transit discovery failures; guarded by [bossAiMutex]. */
+    private var bossAiTransientStreak = 0
 
     private suspend fun loadBossAi(): Result<ProviderDescriptor>? = bossAiMutex.withLock {
         val broker = brokeredKeys?.takeIf { it.discoversBossAi } ?: return@withLock null
@@ -205,13 +207,18 @@ class ProviderCredentialStore(
                 Result.failure(IllegalStateException("BOSS AI is unavailable within its trusted API scope."))
             else -> {
                 val token = resolveBrokered(BossAiDiscovery.BROKER_ID)
-                if (token.isBlank()) Result.failure(IllegalStateException("Sign in to BOSS and retry BOSS AI using Refresh."))
-                else bossAiDiscovery.fetch(scope, token)
+                when {
+                    token.isNotBlank() -> bossAiDiscovery.fetch(scope, token)
+                    transientMintStreak.containsKey(BossAiDiscovery.BROKER_ID) ->
+                        Result.failure(TransientBrokerFailure("BOSS AI is temporarily unreachable. Retry using Refresh."))
+                    else -> Result.failure(IllegalStateException("Sign in to BOSS and retry BOSS AI using Refresh."))
+                }
             }
         }
-        val transient = result.exceptionOrNull() is TransientBrokerFailure ||
-            (result.isFailure && BossAiDiscovery.BROKER_ID in transientMintFailures)
-        if (generation.get() == startedAt) cachedBossAi = CachedBossAi(result, scope, startedAt, monotonicNanos(), transient)
+        bossAiTransientStreak = if (result.exceptionOrNull() is TransientBrokerFailure) bossAiTransientStreak + 1 else 0
+        val retryNanos = if (bossAiTransientStreak == 0) SHARED_RETRY_NANOS
+            else grownBackoff(TRANSIENT_RETRY_NANOS, bossAiTransientStreak, SHARED_RETRY_NANOS)
+        if (generation.get() == startedAt) cachedBossAi = CachedBossAi(result, scope, startedAt, monotonicNanos(), retryNanos)
         result
     }
 
@@ -265,7 +272,7 @@ class ProviderCredentialStore(
         // and a credential minted for the previous session must not outlive it.
         brokeredCache.clear()
         lastMintFailureNanos.clear()
-        transientMintFailures.clear()
+        transientMintStreak.clear()
         cappedBrokers.clear()
         _invalidations.value = _invalidations.value + 1
     }
@@ -538,7 +545,8 @@ class ProviderCredentialStore(
         // wedge from a different cause. The expiry comparison above genuinely needs wall time,
         // because it is checked against an absolute timestamp from the broker.
         val failedAt = lastMintFailureNanos[brokerId] ?: return false
-        val backoffMs = if (brokerId in transientMintFailures) transientMintRetryBackoffMs else mintRetryBackoffMs
+        val backoffMs = transientMintStreak[brokerId]
+            ?.let { grownBackoff(transientMintRetryBackoffMs, it, mintRetryBackoffMs) } ?: mintRetryBackoffMs
         return System.nanoTime() - failedAt >= backoffMs * NANOS_PER_MILLI
     }
 
@@ -659,7 +667,7 @@ class ProviderCredentialStore(
             .fold(
                 onSuccess = { credential ->
                     lastMintFailureNanos.remove(brokerId)
-                    transientMintFailures.remove(brokerId)
+                    transientMintStreak.remove(brokerId)
                     if (generation.get() == startedAt) {
                         brokeredCache[brokerId] =
                             CachedBrokeredKey(
@@ -672,7 +680,8 @@ class ProviderCredentialStore(
                 onFailure = { error ->
                     brokeredCache.remove(brokerId)
                     lastMintFailureNanos[brokerId] = System.nanoTime()
-                    if (error is TransientBrokerFailure) transientMintFailures.add(brokerId) else transientMintFailures.remove(brokerId)
+                    if (error is TransientBrokerFailure) transientMintStreak.merge(brokerId, 1, Int::plus)
+                    else transientMintStreak.remove(brokerId)
                     logger.info(
                         LogCategory.SYSTEM,
                         "Brokered credential unavailable",
@@ -969,6 +978,10 @@ class ProviderCredentialStore(
 
         /** After a mint failed in transit: past the in-call retries, still short of a model call's own retry. */
         private const val DEFAULT_TRANSIENT_MINT_RETRY_BACKOFF_MS = 2_000L
+
+        /** [first] doubled per consecutive failure after the first, capped at [cap]. */
+        private fun grownBackoff(first: Long, streak: Int, cap: Long): Long =
+            minOf(first shl (streak - 1).coerceIn(0, 16), cap)
     }
 }
 

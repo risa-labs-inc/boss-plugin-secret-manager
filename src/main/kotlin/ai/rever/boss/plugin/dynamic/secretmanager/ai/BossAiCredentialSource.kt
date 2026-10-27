@@ -48,13 +48,19 @@ internal class BossAiCredentialSource(
                 throw cancelled
             } catch (error: Exception) {
                 // RPC/HTTP/parser errors may contain ticket or token material: only the class name escapes.
-                val reason = "Could not authorize BOSS AI (${error::class.simpleName}). Retry using Refresh."
+                val reason = "Could not authorize BOSS AI (${failureLabel(error)}). Retry using Refresh."
                 Result.failure(if (isTransient(error)) TransientBrokerFailure(reason) else IllegalStateException(reason))
             }
         }
     }
 
-    /** One ticket and exchange. Throws a transient failure for [retryTransient]; a refusal is a result. */
+    /**
+     * One ticket and exchange. Throws a transient failure for [retryTransient]; a refusal is a result.
+     *
+     * The ticket leg is retried only when the host hands back the transport's own [java.io.IOException].
+     * Out of process it arrives as a plain exception carrying a message, which cannot be told apart
+     * from a refusal, so there only the exchange POST is retried.
+     */
     private suspend fun exchange(): Result<BrokeredKey> {
         val payload = supabase.rpc("boss_ai_create_exchange_ticket").getOrElse {
             if (isTransient(it)) throw it
