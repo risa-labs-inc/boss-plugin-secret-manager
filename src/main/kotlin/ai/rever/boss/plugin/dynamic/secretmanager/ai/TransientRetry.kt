@@ -6,6 +6,7 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.UnknownHostException
 import java.net.http.HttpTimeoutException
+import javax.net.ssl.SSLException
 import kotlin.random.Random
 
 /** A failure that a moment's wait fixes: the network or the server, never the credential. */
@@ -21,11 +22,12 @@ internal val TRANSIENT_RETRY_DELAYS_MS = listOf(250L, 1_000L)
  * A dropped connection or a 5xx. Not a timeout: a timed-out request already spent its whole
  * wait, and three of them would hold the caller for a minute. Not a refused connection or an
  * unknown host either: a stopped local server or an offline machine stays that way, and every
- * provider's catalog fetch would pay the retries for nothing.
+ * provider's catalog fetch would pay the retries for nothing. Nor a TLS failure: an
+ * intercepting proxy or a bad certificate does not fix itself.
  */
 internal fun isTransient(error: Throwable): Boolean =
     error is IOException && error !is HttpTimeoutException &&
-        error !is ConnectException && error !is UnknownHostException
+        error !is ConnectException && error !is UnknownHostException && error !is SSLException
 
 /** What a failure message may say about [error]: its class, or the status of a 5xx. Never its text. */
 internal fun failureLabel(error: Throwable): String =

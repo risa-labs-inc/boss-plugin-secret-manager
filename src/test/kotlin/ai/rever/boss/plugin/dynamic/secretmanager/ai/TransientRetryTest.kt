@@ -126,6 +126,14 @@ class TransientRetryTest {
         Unit
     }
 
+    @Test fun `a model list fetch retries a dropped connection`() = runBlocking {
+        val http = QueuedHttpClient(listOf(DROPPED to "", 200 to """{"data":[{"id":"m"}]}"""))
+        val openai = assertNotNull(ProviderRegistry.find(ProviderRegistry.OPENAI))
+        val models = ModelCatalogClient(http, retryDelaysMs = noWait).fetch(openai, "k").getOrThrow()
+        assertEquals(listOf("m"), models.map { it.id })
+        assertEquals(2, http.requests.size)
+    }
+
     @Test fun `a transient mint failure is retried after the short backoff, a refusal after the long one`() = runBlocking {
         val dir: File = Files.createTempDirectory("transient-env").toFile().also { File(it, "env_vars").writeText("") }
         val env = EnvResolver(bossRootDir = dir, processEnv = { null }, systemProperty = { null }, useLaunchctl = false)

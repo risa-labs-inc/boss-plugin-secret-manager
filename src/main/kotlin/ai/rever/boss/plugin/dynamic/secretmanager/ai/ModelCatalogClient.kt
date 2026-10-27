@@ -183,6 +183,10 @@ class ModelCatalogClient(
                     throw HttpStatusFailure(response.statusCode(), describeFailure(descriptor, response.statusCode()))
                 }
                 parsePage(descriptor, response.body())
+            }.onFailure {
+                // The retry's back-off suspends: a cancelled sweep is not a failed fetch. (withContext
+                // rethrows it to the caller anyway; this keeps the failure path from describing it.)
+                if (it is kotlinx.coroutines.CancellationException) throw it
             }.recoverCatching { cause ->
                 // Anything from send/parse that isn't already one of our messages
                 // (timeouts, TLS, malformed JSON) is reported without its text, since

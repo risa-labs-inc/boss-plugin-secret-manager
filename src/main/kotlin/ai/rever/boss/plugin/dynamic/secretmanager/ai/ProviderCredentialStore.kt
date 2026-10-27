@@ -184,15 +184,18 @@ class ProviderCredentialStore(
         val scope: String?,
         val generation: Long,
         val fetchedAtNanos: Long,
-        /** Shorter after a failure in transit, or every model call waits out [SHARED_RETRY_NANOS]. */
-        val retryNanos: Long = SHARED_RETRY_NANOS,
+        /** Consecutive failures in transit; kept on the entry so sign-out and Refresh reset it with the cache. */
+        val transientStreak: Int = 0,
     ) {
-        val ttlNanos: Long get() = if (result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else retryNanos
+        /** Shorter after a failure in transit, or every model call waits out [SHARED_RETRY_NANOS]. */
+        val ttlNanos: Long get() = when {
+            result.isSuccess -> SHARED_DISCOVERY_TTL_NANOS
+            transientStreak > 0 -> grownBackoff(TRANSIENT_RETRY_NANOS, transientStreak, SHARED_RETRY_NANOS)
+            else -> SHARED_RETRY_NANOS
+        }
     }
     private val bossAiMutex = Mutex()
     @Volatile private var cachedBossAi: CachedBossAi? = null
-    /** Consecutive in-transit discovery failures; guarded by [bossAiMutex]. */
-    private var bossAiTransientStreak = 0
 
     private suspend fun loadBossAi(): Result<ProviderDescriptor>? = bossAiMutex.withLock {
         val broker = brokeredKeys?.takeIf { it.discoversBossAi } ?: return@withLock null
@@ -215,10 +218,9 @@ class ProviderCredentialStore(
                 }
             }
         }
-        bossAiTransientStreak = if (result.exceptionOrNull() is TransientBrokerFailure) bossAiTransientStreak + 1 else 0
-        val retryNanos = if (bossAiTransientStreak == 0) SHARED_RETRY_NANOS
-            else grownBackoff(TRANSIENT_RETRY_NANOS, bossAiTransientStreak, SHARED_RETRY_NANOS)
-        if (generation.get() == startedAt) cachedBossAi = CachedBossAi(result, scope, startedAt, monotonicNanos(), retryNanos)
+        val streak = if (result.exceptionOrNull() !is TransientBrokerFailure) 0
+            else 1 + (cachedBossAi?.takeIf { it.generation == startedAt }?.transientStreak ?: 0)
+        if (generation.get() == startedAt) cachedBossAi = CachedBossAi(result, scope, startedAt, monotonicNanos(), streak)
         result
     }
 
@@ -979,7 +981,7 @@ class ProviderCredentialStore(
         /** After a mint failed in transit: past the in-call retries, still short of a model call's own retry. */
         private const val DEFAULT_TRANSIENT_MINT_RETRY_BACKOFF_MS = 2_000L
 
-        /** [first] doubled per consecutive failure after the first, capped at [cap]. */
+        /** [first] doubled per consecutive failure after the first, capped at [cap]. The shift cap only guards overflow. */
         private fun grownBackoff(first: Long, streak: Int, cap: Long): Long =
             minOf(first shl (streak - 1).coerceIn(0, 16), cap)
     }
