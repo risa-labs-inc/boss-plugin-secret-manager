@@ -70,6 +70,8 @@ class ProviderCredentialStore(
      * to outwait it, which is how an untested guard ends up wrong.
      */
     private val mintRetryBackoffMs: Long = DEFAULT_MINT_RETRY_BACKOFF_MS,
+    /** The same wait after a mint failed in transit, which a moment usually fixes. */
+    private val transientMintRetryBackoffMs: Long = DEFAULT_TRANSIENT_MINT_RETRY_BACKOFF_MS,
     private val monotonicNanos: () -> Long = System::nanoTime,
     private val bossAiDiscovery: BossAiDiscovery = BossAiDiscovery(),
 ) {
@@ -117,6 +119,9 @@ class ProviderCredentialStore(
      * it while the deadline was in the future.
      */
     private val lastMintFailureNanos = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Brokers whose last mint failed in transit, so the read path retries after the short backoff. */
+    private val transientMintFailures = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /**
      * Brokers whose reuse window is currently being shortened by the expiry, so the log line
@@ -175,7 +180,15 @@ class ProviderCredentialStore(
         val scope: String?,
         val generation: Long,
         val fetchedAtNanos: Long,
-    )
+        /** Failed in transit: retried after seconds, not [SHARED_RETRY_NANOS], or every model call waits it out. */
+        val transient: Boolean = false,
+    ) {
+        val ttlNanos: Long get() = when {
+            result.isSuccess -> SHARED_DISCOVERY_TTL_NANOS
+            transient -> TRANSIENT_RETRY_NANOS
+            else -> SHARED_RETRY_NANOS
+        }
+    }
     private val bossAiMutex = Mutex()
     @Volatile private var cachedBossAi: CachedBossAi? = null
 
@@ -184,8 +197,7 @@ class ProviderCredentialStore(
         val startedAt = generation.get()
         val scope = broker.bossAiScope()
         cachedBossAi?.takeIf {
-            it.scope == scope && it.generation == startedAt && monotonicNanos() - it.fetchedAtNanos <
-                (if (it.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS)
+            it.scope == scope && it.generation == startedAt && monotonicNanos() - it.fetchedAtNanos < it.ttlNanos
         }?.let { return@withLock it.result }
         val result = when {
             scope == null -> Result.failure(IllegalStateException("BOSS AI authentication is unavailable."))
@@ -197,7 +209,9 @@ class ProviderCredentialStore(
                 else bossAiDiscovery.fetch(scope, token)
             }
         }
-        if (generation.get() == startedAt) cachedBossAi = CachedBossAi(result, scope, startedAt, monotonicNanos())
+        val transient = result.exceptionOrNull() is TransientBrokerFailure ||
+            (result.isFailure && BossAiDiscovery.BROKER_ID in transientMintFailures)
+        if (generation.get() == startedAt) cachedBossAi = CachedBossAi(result, scope, startedAt, monotonicNanos(), transient)
         result
     }
 
@@ -211,8 +225,7 @@ class ProviderCredentialStore(
         if (brokeredKeys?.discoversBossAi == true) {
             val cache = cachedBossAi
             if (cache == null || cache.generation != generation.get() ||
-                monotonicNanos() - cache.fetchedAtNanos >=
-                (if (cache.result.isSuccess) SHARED_DISCOVERY_TTL_NANOS else SHARED_RETRY_NANOS)) return true
+                monotonicNanos() - cache.fetchedAtNanos >= cache.ttlNanos) return true
         }
         if (brokeredKeys?.canDiscoverSharedProviders() != true) return false
         val cache = cachedShared ?: return true
@@ -252,6 +265,7 @@ class ProviderCredentialStore(
         // and a credential minted for the previous session must not outlive it.
         brokeredCache.clear()
         lastMintFailureNanos.clear()
+        transientMintFailures.clear()
         cappedBrokers.clear()
         _invalidations.value = _invalidations.value + 1
     }
@@ -524,7 +538,8 @@ class ProviderCredentialStore(
         // wedge from a different cause. The expiry comparison above genuinely needs wall time,
         // because it is checked against an absolute timestamp from the broker.
         val failedAt = lastMintFailureNanos[brokerId] ?: return false
-        return System.nanoTime() - failedAt >= mintRetryBackoffMs * NANOS_PER_MILLI
+        val backoffMs = if (brokerId in transientMintFailures) transientMintRetryBackoffMs else mintRetryBackoffMs
+        return System.nanoTime() - failedAt >= backoffMs * NANOS_PER_MILLI
     }
 
     /**
@@ -644,6 +659,7 @@ class ProviderCredentialStore(
             .fold(
                 onSuccess = { credential ->
                     lastMintFailureNanos.remove(brokerId)
+                    transientMintFailures.remove(brokerId)
                     if (generation.get() == startedAt) {
                         brokeredCache[brokerId] =
                             CachedBrokeredKey(
@@ -656,6 +672,7 @@ class ProviderCredentialStore(
                 onFailure = { error ->
                     brokeredCache.remove(brokerId)
                     lastMintFailureNanos[brokerId] = System.nanoTime()
+                    if (error is TransientBrokerFailure) transientMintFailures.add(brokerId) else transientMintFailures.remove(brokerId)
                     logger.info(
                         LogCategory.SYSTEM,
                         "Brokered credential unavailable",
@@ -932,6 +949,7 @@ class ProviderCredentialStore(
         internal const val MAX_SHARED_PROVIDERS = 32
         private const val SHARED_DISCOVERY_TTL_NANOS = 5 * 60 * 1_000_000_000L
         private const val SHARED_RETRY_NANOS = 15 * 1_000_000_000L
+        private const val TRANSIENT_RETRY_NANOS = 2 * 1_000_000_000L
         private const val MILLIS_PER_SECOND = 1000L
         private const val NANOS_PER_MILLI = 1_000_000L
 
@@ -948,6 +966,9 @@ class ProviderCredentialStore(
 
         /** How long to wait after a failed mint before the read path tries again. */
         private const val DEFAULT_MINT_RETRY_BACKOFF_MS = 15_000L
+
+        /** After a mint failed in transit: past the in-call retries, still short of a model call's own retry. */
+        private const val DEFAULT_TRANSIENT_MINT_RETRY_BACKOFF_MS = 2_000L
     }
 }
 

@@ -176,7 +176,8 @@ class ModelCatalogClient(
                     }
 
             runCatching {
-                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                // A GET is safe to resend when a pooled connection was already closed.
+                val response = retryTransient { httpClient.send(request, HttpResponse.BodyHandlers.ofString()) }
                 if (response.statusCode() !in 200..299) {
                     throw HttpStatusFailure(response.statusCode(), describeFailure(descriptor, response.statusCode()))
                 }

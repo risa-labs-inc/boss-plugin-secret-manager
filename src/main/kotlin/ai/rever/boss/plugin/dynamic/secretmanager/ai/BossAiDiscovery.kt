@@ -22,6 +22,7 @@ class BossAiDiscovery(
         .connectTimeout(Duration.ofSeconds(15))
         .followRedirects(HttpClient.Redirect.NEVER)
         .build(),
+    private val retryDelaysMs: List<Long> = TRANSIENT_RETRY_DELAYS_MS,
 ) {
     internal suspend fun fetch(scope: String, token: String): Result<ProviderDescriptor> = withContext(Dispatchers.IO) {
         try {
@@ -31,7 +32,11 @@ class BossAiDiscovery(
                 .header("Authorization", "Bearer $token")
                 .header("Accept", "application/json")
                 .GET().build()
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+            val response = retryTransient(retryDelaysMs) {
+                httpClient.send(request, HttpResponse.BodyHandlers.ofString()).also {
+                    if (it.statusCode() >= 500) throw ServerStatusFailure(it.statusCode())
+                }
+            }
             if (response.statusCode() !in 200..299) {
                 return@withContext Result.failure(IllegalStateException(
                     if (response.statusCode() == 404) "BOSS AI provider metadata is not deployed yet."
@@ -51,9 +56,10 @@ class BossAiDiscovery(
             Result.success(descriptor)
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Exception) {
-            // Never surface HTTP/header exceptions that may contain the minted credential.
-            Result.failure(IllegalStateException("Could not read trusted BOSS AI provider metadata. Retry using Refresh."))
+        } catch (error: Exception) {
+            // Never surface HTTP/header exceptions that may contain the minted credential: only the class name escapes.
+            val reason = "Could not read trusted BOSS AI provider metadata (${error::class.simpleName}). Retry using Refresh."
+            Result.failure(if (isTransient(error)) TransientBrokerFailure(reason) else IllegalStateException(reason))
         }
     }
 

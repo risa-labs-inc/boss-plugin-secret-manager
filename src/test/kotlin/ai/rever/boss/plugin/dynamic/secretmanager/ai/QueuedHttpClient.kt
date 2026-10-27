@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * behaviour reachable at all — cursor-following, the page cap, the primary-then-fallback
  * path, and any test that needs one genuinely successful fetch to exercise a write path.
  * Once [responses] is exhausted it serves [always], or repeats the last response.
+ * Status [DROPPED] throws an [java.io.IOException] and [TIMED_OUT] an [java.net.http.HttpTimeoutException].
  */
 internal class QueuedHttpClient(
     private val responses: List<Pair<Int, String>>,
@@ -27,10 +28,18 @@ internal class QueuedHttpClient(
         val index = nextResponse.getAndIncrement()
         requests += request.uri().toString()
         beforeResponse(request)
-        return responses.getOrNull(index)
+        val response = responses.getOrNull(index)
             ?: always
             ?: responses.lastOrNull()
             ?: (200 to "{}")
+        if (response.first == DROPPED) throw java.io.IOException("closed")
+        if (response.first == TIMED_OUT) throw java.net.http.HttpTimeoutException("request timed out")
+        return response
+    }
+
+    companion object {
+        const val DROPPED = -1
+        const val TIMED_OUT = -2
     }
 
     override fun cookieHandler() = java.util.Optional.empty<java.net.CookieHandler>()
