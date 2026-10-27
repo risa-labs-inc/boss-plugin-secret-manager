@@ -1122,8 +1122,11 @@ the store-level tests would still have passed, because they call `loadAll` direc
   `TransientBrokerFailure` and the read path retries after `transientMintRetryBackoffMs` (2s),
   doubling per consecutive failure up to the 15s backoff. Max retries a model call after about
   1 s and 3 s: with the 15s backoff every retry of a blip failed too (2026-10-27, Optimist pods).
-  Timeouts, refused connections and unknown hosts are not transient: they already spent their
-  wait, or stay that way. Messages name only the exception class or the HTTP status, never the
+  Timeouts (including socket timeouts), refused connections, unknown hosts and TLS failures are
+  not transient: they already spent their wait, or stay that way. Only BOSS AI produces
+  `TransientBrokerFailure`; other brokers keep the 15s backoff. On the consumer read path the
+  view model's 5s refresh floor applies after the first retry, so a blip longer than the
+  in-call retries is ridden out by Max's own mint window (boss-plugin-max #113), not here. Messages name only the exception class or the HTTP status, never the
   exception text, which can carry the ticket or token.
 
 **The interval and the backoff are constructor parameters, not constants.** Hard-coded, every
