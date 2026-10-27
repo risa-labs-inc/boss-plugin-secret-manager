@@ -38,6 +38,7 @@ import java.util.Locale
  */
 class ModelCatalogClient(
     private val httpClient: HttpClient = defaultHttpClient(),
+    private val retryDelaysMs: List<Long> = TRANSIENT_RETRY_DELAYS_MS,
 ) {
     private val logger = BossLogger.forComponent("AiModelCatalogClient")
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -176,11 +177,16 @@ class ModelCatalogClient(
                     }
 
             runCatching {
-                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                // A GET is safe to resend when a pooled connection was already closed.
+                val response = retryTransient(retryDelaysMs) { httpClient.send(request, HttpResponse.BodyHandlers.ofString()) }
                 if (response.statusCode() !in 200..299) {
                     throw HttpStatusFailure(response.statusCode(), describeFailure(descriptor, response.statusCode()))
                 }
                 parsePage(descriptor, response.body())
+            }.onFailure {
+                // The retry's back-off suspends: a cancelled sweep is not a failed fetch. (withContext
+                // rethrows it to the caller anyway; this keeps the failure path from describing it.)
+                if (it is kotlinx.coroutines.CancellationException) throw it
             }.recoverCatching { cause ->
                 // Anything from send/parse that isn't already one of our messages
                 // (timeouts, TLS, malformed JSON) is reported without its text, since

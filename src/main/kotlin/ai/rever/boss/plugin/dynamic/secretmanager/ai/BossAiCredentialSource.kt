@@ -26,6 +26,7 @@ internal class BossAiCredentialSource(
         .connectTimeout(Duration.ofSeconds(15))
         .followRedirects(HttpClient.Redirect.NEVER)
         .build(),
+    private val retryDelaysMs: List<Long> = TRANSIENT_RETRY_DELAYS_MS,
 ) : BrokeredKeySource {
     override val discoversBossAi = true
     override fun bossAiScope(): String = API_SCOPE
@@ -41,37 +42,52 @@ internal class BossAiCredentialSource(
             ?: Result.failure(IllegalStateException("This provider is unavailable."))
         return withContext(Dispatchers.IO) {
             try {
-                val payload = supabase.rpc("boss_ai_create_exchange_ticket").getOrElse {
-                    return@withContext Result.failure(IllegalStateException(
-                        "Could not authorize BOSS AI. Sign in and check that BOSS AI access is enabled.",
-                    ))
-                }
-                val ticket = Json.parseToJsonElement(payload).jsonObject["ticket"]?.jsonPrimitive?.content
-                require(ticket != null && ticket.matches(Regex("[a-f0-9]{64}")))
-                val request = HttpRequest.newBuilder(URI.create(EXCHANGE_URL))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"ticket\":\"$ticket\"}"))
-                    .build()
-                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-                if (response.statusCode() !in 200..299) return@withContext Result.failure(IllegalStateException(
-                    "BOSS AI authorization failed (HTTP ${response.statusCode()}). Retry using Refresh.",
-                ))
-                val body = Json.parseToJsonElement(response.body()).jsonObject
-                val token = body["access_token"]?.jsonPrimitive?.content
-                val expiry = body["expires_at"]?.jsonPrimitive?.content
-                val refresh = body["refresh_after_seconds"]?.jsonPrimitive?.longOrNull
-                require(!token.isNullOrBlank() && token.length <= 16384 && token.none(Char::isWhitespace))
-                require(expiry != null && Instant.parse(expiry).isAfter(Instant.now()))
-                require(refresh != null && refresh > 0)
-                Result.success(BrokeredKey(token, refresh, expiry))
+                // A fresh ticket per attempt: a ticket is single-use, and a dropped exchange may have spent it.
+                retryTransient(retryDelaysMs) { exchange() }
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
-                // RPC/HTTP/parser errors may contain ticket or token material.
-                Result.failure(IllegalStateException("Could not authorize BOSS AI. Retry using Refresh."))
+            } catch (error: Exception) {
+                // RPC/HTTP/parser errors may contain ticket or token material: only the class name escapes.
+                val reason = "Could not authorize BOSS AI (${failureLabel(error)}). Retry using Refresh."
+                Result.failure(if (isTransient(error)) TransientBrokerFailure(reason) else IllegalStateException(reason))
             }
         }
+    }
+
+    /**
+     * One ticket and exchange. Throws a transient failure for [retryTransient]; a refusal is a result.
+     *
+     * The ticket leg is retried only when the host hands back the transport's own [java.io.IOException].
+     * Out of process it arrives as a plain exception carrying a message, which cannot be told apart
+     * from a refusal, so there only the exchange POST is retried.
+     */
+    private suspend fun exchange(): Result<BrokeredKey> {
+        val payload = supabase.rpc("boss_ai_create_exchange_ticket").getOrElse {
+            if (isTransient(it)) throw it
+            return Result.failure(IllegalStateException(
+                "Could not authorize BOSS AI. Sign in and check that BOSS AI access is enabled.",
+            ))
+        }
+        val ticket = Json.parseToJsonElement(payload).jsonObject["ticket"]?.jsonPrimitive?.content
+        require(ticket != null && ticket.matches(Regex("[a-f0-9]{64}")))
+        val request = HttpRequest.newBuilder(URI.create(EXCHANGE_URL))
+            .timeout(Duration.ofSeconds(20))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("{\"ticket\":\"$ticket\"}"))
+            .build()
+        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+        if (response.statusCode() >= 500) throw ServerStatusFailure(response.statusCode())
+        if (response.statusCode() !in 200..299) return Result.failure(IllegalStateException(
+            "BOSS AI authorization failed (HTTP ${response.statusCode()}). Retry using Refresh.",
+        ))
+        val body = Json.parseToJsonElement(response.body()).jsonObject
+        val token = body["access_token"]?.jsonPrimitive?.content
+        val expiry = body["expires_at"]?.jsonPrimitive?.content
+        val refresh = body["refresh_after_seconds"]?.jsonPrimitive?.longOrNull
+        require(!token.isNullOrBlank() && token.length <= 16384 && token.none(Char::isWhitespace))
+        require(expiry != null && Instant.parse(expiry).isAfter(Instant.now()))
+        require(refresh != null && refresh > 0)
+        return Result.success(BrokeredKey(token, refresh, expiry))
     }
 
     companion object {

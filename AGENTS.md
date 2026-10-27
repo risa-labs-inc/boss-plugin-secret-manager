@@ -447,7 +447,8 @@ The managed-provider predicates include both this id and legacy `shared:` ids.
 
 Discovery failures keep a display-only BOSS AI row with a retry message, never a
 configured connection. Metadata caches are generation-scoped, expire after five minutes
-(or 15 seconds on failure), and are invalidated by sign-out and Refresh. Automatic
+(or 15 seconds on failure; 2 seconds after a failure in transit, doubling while it
+keeps failing, up to 15), and are invalidated by sign-out and Refresh. Automatic
 BOSS AI suppresses duplicate legacy BOSS AI shares. A server-recommended default fills
 an absent preference, including recovery after initial authentication failure; it
 never overrides an explicit provider/model choice or an active CLI engine.
@@ -1115,6 +1116,18 @@ the store-level tests would still have passed, because they call `loadAll` direc
   `loadAll` again, so the provider stayed unconfigured until the panel was opened.
   `lastMintFailureMs` gives bounded retry (`mintRetryBackoffMs`, 15s). It cannot be expressed as
   a blank-token cache entry - `resolveBrokered` would serve that while the deadline was ahead.
+- **A failure in transit is not a refusal.** A dropped connection or a 5xx (`isTransient`) is
+  retried inside the call (`retryTransient`: 250 ms and 1 s, plus jitter), and the BOSS AI
+  exchange asks for a fresh single-use ticket each attempt. If it still fails it is a
+  `TransientBrokerFailure` and the read path retries after `transientMintRetryBackoffMs` (2s),
+  doubling per consecutive failure up to the 15s backoff. Max retries a model call after about
+  1 s and 3 s: with the 15s backoff every retry of a blip failed too (2026-10-27, Optimist pods).
+  Timeouts (including socket timeouts), refused connections, unknown hosts and TLS failures are
+  not transient: they already spent their wait, or stay that way. Only BOSS AI produces
+  `TransientBrokerFailure`; other brokers keep the 15s backoff. On the consumer read path the
+  view model's 5s refresh floor applies after the first retry, so a blip longer than the
+  in-call retries is ridden out by Max's own mint window (boss-plugin-max #113), not here. Messages name only the exception class or the HTTP status, never the
+  exception text, which can carry the ticket or token.
 
 **The interval and the backoff are constructor parameters, not constants.** Hard-coded, every
 test of them had to outwait them or be written around them, which is how an untested guard ends
