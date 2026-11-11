@@ -621,12 +621,17 @@ private fun SecretsSection(
     // Cards/Addresses render an "Add" header as lazy item 0.
     val headerRows = if (selectedKind == VaultKind.CARD || selectedKind == VaultKind.ADDRESS) 1 else 0
 
-    // Open on a kind that has rows until the user picks one (most vaults today are keys).
+    // Once, on the first unfiltered load with rows: open on a kind that has some (most vaults
+    // today are keys). Latched so a search never moves the filter under the user.
     LaunchedEffect(counts) {
-        if (!viewModel.vaultKindChosen && (counts[viewModel.vaultKind] ?: 0) == 0) {
-            VaultKind.entries.firstOrNull { (counts[it] ?: 0) > 0 }?.let { viewModel.vaultKind = it }
+        if (!viewModel.vaultKindChosen && state.searchQuery.isBlank() && counts.isNotEmpty()) {
+            if ((counts[viewModel.vaultKind] ?: 0) == 0) {
+                VaultKind.entries.firstOrNull { (counts[it] ?: 0) > 0 }?.let { viewModel.vaultKind = it }
+            }
+            viewModel.vaultKindChosen = true
         }
     }
+    val kindScope = rememberCoroutineScope()
 
     // Same overflow-gated prefetch as Shared with me: a filtered kind can add zero rows per page,
     // and an always-composed trigger would then page the whole vault.
@@ -661,13 +666,16 @@ private fun SecretsSection(
             selected = selectedKind,
             counts = counts,
             partial = state.hasMore,
-            onSelect = { viewModel.showVaultKind(it) },
+            onSelect = {
+                if (it != selectedKind) kindScope.launch { listState.scrollToItem(0) }
+                viewModel.showVaultKind(it)
+            },
             modifier = Modifier.padding(bottom = 12.dp),
         )
 
         // Secret count
         Text(
-            "${state.secrets.size} secret${if (state.secrets.size != 1) "s" else ""}" +
+            "${visible.size} ${selectedKind.label.lowercase()}" +
                 (state.lastLoadDurationMs?.let { " · last fetch ${formatLoadDuration(it)}" } ?: ""),
             color = BossThemeColors.TextSecondary,
             style = SecretPanelType.meta,

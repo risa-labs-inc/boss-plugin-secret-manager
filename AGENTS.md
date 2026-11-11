@@ -1464,3 +1464,14 @@ may be partial on write failure or cancellation. The current create/update API
 cannot write a 2FA seed: leave such entries untouched and report `unsupportedTwofa`
 rather than claiming they were restored. Always clear caller-owned passphrase
 arrays on completion, including a launch cancelled before entering its body.
+
+## Vault kinds: Logins, Cards, Addresses, Keys & tokens
+
+The Secrets section partitions rows with `VaultRows.classify` (website shape plus `kind:` tag), because SM rows are also the store for host browser autofill and the Max vault.
+
+- **`VaultRows.isPayment` is the single definition of a card or card security code.** The panel, the ViewModel's reveal/copy guards, Shared with me and the MCP `secret_get`/`my_secret_get` refusal all call it, so a row one surface masks is never handed out raw by another. Untagged `card/...` and old-Max `fluck/<ws>/vault/card-NNNN[-cvv]` rows count. An explicit `kind:password` tag wins. Mutation-verified: dropping the untagged `card/` branch fails `isPaymentCoversEveryCardAndCodeShape`, `cardPrefixWithoutKindTagIsStillACard`, `cardsAndCodesCannotBeRevealedButLoginsCan` and the MCP withhold test.
+- **`VaultRows.isConnectorToken`** is the one connector predicate (`connector` tag, or any `fluck/` key outside a vault), shared the same way.
+- **Card and CVV views never read the password column.** `VaultRow.Card` has no field that could hold the number. Backup/export still includes card numbers inside the encrypted envelope, on purpose: it is the owner's own vault backup.
+- **Vault health rates password rows only.** Cards, card codes and the address filler `-` are not passwords.
+- **`vaultKind` lives on the ViewModel** for the same reason as `selectedSection`: `SecretsSection` leaves composition on every section switch.
+- Card notes are written in Max's `notes()` shape with ASCII digits whatever the locale. Max and host autofill parse them.

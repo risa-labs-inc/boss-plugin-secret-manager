@@ -231,6 +231,43 @@ class VaultRowsTest {
     }
 
     @Test
+    fun explicitPasswordTagOnCardShapedWebsiteWins() {
+        // Decision: an explicit kind:password is honoured, so this row is a login, not payment.
+        assertFalse(VaultRows.isPayment("card/visa-4242", listOf("kind:password")))
+    }
+
+    @Test
+    fun connectorTokenIsOneDefinitionForAnyDepth() {
+        assertTrue(VaultRows.isConnectorToken("fluck/ws/conn/VAR", emptyList()))
+        assertTrue(VaultRows.isConnectorToken("fluck/ws/conn/sub/VAR", emptyList()))
+        assertTrue(VaultRows.isConnectorToken("fluck/ws/vault/x", listOf("connector")))
+        assertFalse(VaultRows.isConnectorToken("fluck/ws/vault/github.com", listOf("kind:password")))
+        assertFalse(VaultRows.isConnectorToken("github.com", emptyList()))
+        assertEquals(VaultKind.KEY, classify(row("fluck/ws/conn/sub/VAR")).kind)
+    }
+
+    @Test
+    fun expiryIsAsciiInEveryLocale() {
+        val prior = java.util.Locale.getDefault(java.util.Locale.Category.FORMAT)
+        try {
+            java.util.Locale.setDefault(java.util.Locale.Category.FORMAT, java.util.Locale.forLanguageTag("ar-EG-u-nu-arab"))
+            assertEquals("08" to "29", VaultRows.parseExpiry("8/29"))
+            val notes = VaultRows.newCard("4242424242424242", "8/29", "J")!!.notes
+            assertTrue("\"exp_month\":\"08\"" in notes, notes)
+        } finally {
+            java.util.Locale.setDefault(java.util.Locale.Category.FORMAT, prior)
+        }
+    }
+
+    @Test
+    fun isExpiredToleratesJunk() {
+        val now = java.time.YearMonth.of(2026, 11)
+        assertFalse(VaultRows.isExpired("x", "26", now))
+        assertFalse(VaultRows.isExpired("13", "26", now))
+        assertFalse(VaultRows.isExpired("01", "2025", now))
+    }
+
+    @Test
     fun isPaymentIsFalseForLoginsAddressesAndKeys() {
         assertFalse(VaultRows.isPayment("https://github.com", emptyList()))
         assertFalse(VaultRows.isPayment("fluck/w/vault/github.com", listOf("kind:password")))

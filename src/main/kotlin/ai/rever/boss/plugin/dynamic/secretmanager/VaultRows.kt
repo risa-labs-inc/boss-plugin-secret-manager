@@ -127,6 +127,7 @@ internal object VaultRows {
     const val ADDRESS_PASSWORD_FILLER = "-"
 
     private const val MAX_PREFIX = "fluck/"
+    private const val CONNECTOR_TAG = "connector"
     private val HOST = Regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
     private val FOUR_DIGITS = Regex("^[0-9]{4}$")
     private val MAX_CARD_ALIAS = Regex("^card-[0-9]{4}$")
@@ -159,11 +160,9 @@ internal object VaultRows {
             return VaultRow.Address(site.removePrefix(ADDRESS_PREFIX), AddressFields.parse(parseObject(notes)))
         }
         if (isAiProvider || "api_key" in tags) return VaultRow.Key(site)
-        if (site.startsWith(MAX_PREFIX)) {
-            if (maxAlias != null && (kind == null || kind == KIND_PASSWORD)) {
-                return VaultRow.Login(maxLoginSite(maxAlias) ?: maxAlias, username)
-            }
-            // Connector tokens (`fluck/<ws>/<connector>/<VAR>`) keep their key as the name.
+        if (isConnectorToken(site, tags)) return VaultRow.Key(site)
+        if (maxAlias != null) {
+            if (kind == null || kind == KIND_PASSWORD) return VaultRow.Login(maxLoginSite(maxAlias) ?: maxAlias, username)
             return VaultRow.Key(site)
         }
         if (kind != null && kind != KIND_PASSWORD) return VaultRow.Key(site)
@@ -176,6 +175,15 @@ internal object VaultRows {
      */
     fun isPayment(website: String, tags: List<String>): Boolean =
         classify(website, "", null, tags).let { it is VaultRow.Card || it is VaultRow.CardCode }
+
+    /**
+     * A connector credential: tagged `connector`, or any `fluck/` key outside a vault
+     * (`fluck/<ws>/<connector>/<VAR>` and deeper). Shared by the panel and the MCP refusal.
+     */
+    fun isConnectorToken(website: String, tags: List<String>): Boolean {
+        val site = website.trim()
+        return CONNECTOR_TAG in tags || (site.startsWith(MAX_PREFIX) && maxVaultAlias(site) == null)
+    }
 
     /** The alias of an old-shape Max vault row `fluck/<ws>/vault/<alias>`, else null. */
     internal fun maxVaultAlias(website: String): String? {
@@ -254,11 +262,15 @@ internal object VaultRows {
         val m = raw.substringBefore('/', "").trim().toIntOrNull()?.takeIf { it in 1..12 } ?: return null
         val y = raw.substringAfter('/', "").trim().toIntOrNull()
             ?.let { if (it in 0..99) it else if (it in 2000..2099) it % 100 else null } ?: return null
-        return "%02d".format(m) to "%02d".format(y)
+        // ASCII digits regardless of locale: Max and host autofill parse these notes.
+        return m.toString().padStart(2, '0') to y.toString().padStart(2, '0')
     }
 
-    fun isExpired(month: String, year: String, now: java.time.YearMonth): Boolean =
-        java.time.YearMonth.of(2000 + year.toInt(), month.toInt()).isBefore(now)
+    fun isExpired(month: String, year: String, now: java.time.YearMonth): Boolean {
+        val m = month.toIntOrNull()?.takeIf { it in 1..12 } ?: return false
+        val y = year.toIntOrNull()?.takeIf { it in 0..99 } ?: return false
+        return java.time.YearMonth.of(2000 + y, m).isBefore(now)
+    }
 
     /** Notes for a card, in Max's notes() shape (limit/currency/billing blank on a hand-added card). */
     fun cardNotes(holder: String, expMonth: String, expYear: String): String =

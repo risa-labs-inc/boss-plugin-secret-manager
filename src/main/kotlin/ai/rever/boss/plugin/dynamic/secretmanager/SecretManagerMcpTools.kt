@@ -387,7 +387,7 @@ internal class SecretManagerMcpToolProvider(
                 "is a payment card and is not readable through this tool. " +
                     "Card details are only used by the vault's own checkout."
             // Connector tokens (fluck/<ws>/<connector>/<VAR>); the connector reads its own.
-            tags.contains(CONNECTOR_TAG) || CONNECTOR_TOKEN_WEBSITE.matches(website) ->
+            VaultRows.isConnectorToken(website, tags) ->
                 "is a connector credential and is not readable through this tool. " +
                     "Connectors read their own tokens."
             else -> return null
@@ -510,8 +510,6 @@ internal class SecretManagerMcpToolProvider(
         """{"type":"object","properties":{"id":{"type":"string","description":"$desc"}},"required":["id"]}"""
 
     private companion object {
-        const val CONNECTOR_TAG = "connector"
-        val CONNECTOR_TOKEN_WEBSITE = Regex("^fluck/[^/]+/(?!vault/)[^/]+/[^/]+$")
 
         const val LIMIT_SCHEMA =
             """{"type":"object","properties":{"limit":{"type":"integer","description":"Max secrets (default 100)."}}}"""
