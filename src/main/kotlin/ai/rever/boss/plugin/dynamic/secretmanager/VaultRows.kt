@@ -347,3 +347,23 @@ internal object VaultRows {
 }
 
 private fun JsonObject?.str(key: String): String = (this?.get(key) as? JsonPrimitive)?.contentOrNull.orEmpty()
+
+/**
+ * Caps prefetches that add no rows to the current kind. Not thread-safe; used from one
+ * composition's effect.
+ */
+internal class PrefetchBudget(private val maxBarren: Int = 2) {
+    private var lastCount = -1
+    private var barren = 0
+
+    fun allow(count: Int): Boolean {
+        barren = if (count == lastCount) barren + 1 else 0
+        lastCount = count
+        return barren < maxBarren
+    }
+
+    fun reset() {
+        lastCount = -1
+        barren = 0
+    }
+}

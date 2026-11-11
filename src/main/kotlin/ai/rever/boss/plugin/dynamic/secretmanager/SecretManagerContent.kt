@@ -536,6 +536,7 @@ private fun SecretManagerView(
     if (state.showDeleteDialog && state.selectedSecret != null) {
         DeleteConfirmationDialog(
             secret = state.selectedSecret,
+            isAiProvider = viewModel.isAiProviderSecret(state.selectedSecret),
             onConfirm = { viewModel.deleteSecret(state.selectedSecret.id) },
             onDismiss = { viewModel.hideDeleteDialog() },
             isLoading = state.isOperationInProgress
@@ -639,6 +640,10 @@ private fun SecretsSection(
     val currentCount by rememberUpdatedState(visible.size + headerRows)
     val currentHasMore by rememberUpdatedState(state.hasMore)
     val currentIsLoadingMore by rememberUpdatedState(state.isLoadingMore)
+    // A page can add nothing to a sparse kind while the footer swap re-emits the window; stop
+    // after a couple of barren pages and leave the rest to the Load more button.
+    val budget = remember { PrefetchBudget() }
+    LaunchedEffect(selectedKind, state.searchQuery) { budget.reset() }
     LaunchedEffect(listState) {
         snapshotFlow {
             val info = listState.layoutInfo
@@ -648,7 +653,7 @@ private fun SecretsSection(
                 renderedItemCount = info.totalItemsCount,
             )
         }.collect { window ->
-            if (shouldPrefetchMore(window, currentCount, currentHasMore, currentIsLoadingMore)) {
+            if (shouldPrefetchMore(window, currentCount, currentHasMore, currentIsLoadingMore) && budget.allow(currentCount)) {
                 viewModel.loadMoreSecrets()
             }
         }
@@ -846,7 +851,10 @@ private fun SecretsSection(
                     if (state.hasMore && !state.isLoadingMore) {
                         item(key = "more-${selectedKind.name}") {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                                TextButton(onClick = { viewModel.loadMoreSecrets() }) {
+                                TextButton(onClick = {
+                                    budget.reset()
+                                    viewModel.loadMoreSecrets()
+                                }) {
                                     Text("Load more", color = BossThemeColors.AccentColor, style = SecretPanelType.body)
                                 }
                             }
@@ -2143,6 +2151,7 @@ private fun EditSecretDialog(
 @Composable
 private fun DeleteConfirmationDialog(
     secret: SecretEntryData,
+    isAiProvider: Boolean,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     isLoading: Boolean
@@ -2160,7 +2169,7 @@ private fun DeleteConfirmationDialog(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    VaultRows.classify(secret, secret.tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER)).let { row ->
+                    VaultRows.classify(secret, isAiProvider).let { row ->
                         if (row is VaultRow.Card || row is VaultRow.Address) row.title else "${row.title} - ${secret.username}"
                     },
                     color = BossThemeColors.AccentColor,

@@ -247,6 +247,24 @@ class VaultRowsTest {
     }
 
     @Test
+    fun prefetchBudgetStopsAfterBarrenPagesAndResets() {
+        val b = PrefetchBudget(maxBarren = 2)
+        assertTrue(b.allow(5))
+        assertTrue(b.allow(5))
+        assertFalse(b.allow(5))
+        assertFalse(b.allow(5))
+        assertTrue(b.allow(6), "a page that added rows re-opens prefetch")
+        b.reset()
+        assertTrue(b.allow(6))
+    }
+
+    @Test
+    fun cardShapeWithPasswordTagIsLoginUnlessAlsoTaggedCard() {
+        assertFalse(VaultRows.isPayment("card/visa-4242", listOf("kind:password")))
+        assertTrue(VaultRows.isPayment("card/visa-4242", listOf("kind:password", "kind:card")))
+    }
+
+    @Test
     fun paymentTagWinsOverOtherKinds() {
         assertTrue(VaultRows.isPayment("example.com", listOf("kind:password", "kind:cvv")))
         assertTrue(VaultRows.isPayment("example.com", listOf("kind:password", "kind:card")))

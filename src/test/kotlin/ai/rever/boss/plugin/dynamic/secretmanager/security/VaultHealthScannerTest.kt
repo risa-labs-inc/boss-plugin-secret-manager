@@ -63,9 +63,10 @@ class VaultHealthScannerTest {
                     secret("v1", "fluck/w/vault/card-4242-cvv", "sealed").copy(tags = listOf("kind:cvv")),
                     secret("l1", "github.com", "Str0ng!Passphrase"),
                     secret("l2", "fluck/w/vault/work@github.com", "An0ther!Passphrase").copy(tags = listOf("kind:password")),
+                    secret("l3", "address/book", "Th1rd!Passphrase").copy(notes = "plain notes"),
                 )
             val report = VaultHealthScanner.scan(FakeSecretDataProvider(entries))
-            assertEquals(2, report.analyzedCount, "logins, including Max-alias logins, are still rated")
+            assertEquals(3, report.analyzedCount, "logins, incl. Max-alias and untagged address/ logins, are still rated")
             assertEquals(0, report.reuseGroups.size)
             assertEquals(0, report.weakCount)
         }
