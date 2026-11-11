@@ -83,7 +83,7 @@ internal class SecretManagerMcpToolProvider(
                 val id = args.string("id")
                     ?: return@McpToolHandler McpToolResult("Missing required argument: id", isError = true)
                 findById(id)?.let { s ->
-                    aiProviderRefusal(id, s.tags)?.let { return@McpToolHandler it }
+                    deliveryRefusal(id, s.tags, s.website)?.let { return@McpToolHandler it }
                     McpToolResult(
                         buildString {
                             appendLine("website: ${s.website}")
@@ -207,7 +207,7 @@ internal class SecretManagerMcpToolProvider(
                 // The same refusal secret_get carries. This tool shipped without it for three
                 // days and read exactly the keys the other one withholds: same vault, same
                 // secret.read gate, so a gate on one tool and not its sibling is no gate.
-                aiProviderRefusal(id, entry.tags)?.let { return@McpToolHandler it }
+                deliveryRefusal(id, entry.tags, entry.website)?.let { return@McpToolHandler it }
                 McpToolResult(
                     buildString {
                         appendLine("website: ${entry.website}")
@@ -376,16 +376,24 @@ internal class SecretManagerMcpToolProvider(
      * sibling plugin's `my_secret_get` came to read exactly what `secret_get` refused. Any
      * new tool that returns a password calls this.
      */
-    private fun aiProviderRefusal(id: String, tags: List<String>): McpToolResult? =
-        if (tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER)) {
-            McpToolResult(
-                "Secret $id is an AI provider key and is not readable through this tool. " +
-                    "Use the provider via the host's AI provider settings instead.",
-                isError = true,
-            )
-        } else {
-            null
+    private fun deliveryRefusal(id: String, tags: List<String>, website: String): McpToolResult? {
+        val reason = when {
+            tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER) ->
+                "is an AI provider key and is not readable through this tool. " +
+                    "Use the provider via the host's AI provider settings instead."
+            // Max vault payment rows: the full card number and CVV. Only the vault's own
+            // checkout path may read them; an agent tool never needs the raw value.
+            tags.any { it in PAYMENT_KIND_TAGS } ->
+                "is a payment card and is not readable through this tool. " +
+                    "Card details are only used by the vault's own checkout."
+            // Connector tokens (fluck/<ws>/<connector>/<VAR>); the connector reads its own.
+            tags.contains(CONNECTOR_TAG) || CONNECTOR_TOKEN_WEBSITE.matches(website) ->
+                "is a connector credential and is not readable through this tool. " +
+                    "Connectors read their own tokens."
+            else -> return null
         }
+        return McpToolResult("Secret $id $reason", isError = true)
+    }
 
     /**
      * `secret_get`'s lookup, still a single 500-row page. Left as it is on purpose: it collapses
@@ -502,6 +510,11 @@ internal class SecretManagerMcpToolProvider(
         """{"type":"object","properties":{"id":{"type":"string","description":"$desc"}},"required":["id"]}"""
 
     private companion object {
+        /** Kept in step with BossConsole's SecretReferenceResolver.deliveryRefusal. */
+        val PAYMENT_KIND_TAGS = setOf("kind:card", "kind:cvv")
+        const val CONNECTOR_TAG = "connector"
+        val CONNECTOR_TOKEN_WEBSITE = Regex("^fluck/[^/]+/(?!vault/)[^/]+/[^/]+$")
+
         const val LIMIT_SCHEMA =
             """{"type":"object","properties":{"limit":{"type":"integer","description":"Max secrets (default 100)."}}}"""
 
