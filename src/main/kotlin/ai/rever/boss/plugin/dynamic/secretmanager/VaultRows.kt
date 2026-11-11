@@ -129,6 +129,8 @@ internal object VaultRows {
     private const val MAX_PREFIX = "fluck/"
     private val HOST = Regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
     private val FOUR_DIGITS = Regex("^[0-9]{4}$")
+    private val MAX_CARD_ALIAS = Regex("^card-[0-9]{4}$")
+    private val MAX_CVV_ALIAS = Regex("^card-[0-9]{4}-cvv$")
     private val JSON = Json { ignoreUnknownKeys = true }
 
     fun classify(secret: SecretEntryData, isAiProvider: Boolean = false): VaultRow =
@@ -145,14 +147,15 @@ internal object VaultRows {
         val kind = tags.firstOrNull { it.startsWith("kind:") }
         val maxAlias = maxVaultAlias(site)
 
-        if (KIND_CVV in tags) {
+        if (KIND_CVV in tags || (kind == null && maxAlias != null && MAX_CVV_ALIAS.matches(maxAlias))) {
             val card = maxAlias?.removeSuffix("-cvv") ?: site.removeSuffix("-cvv")
             return VaultRow.CardCode("Card security code · $card")
         }
-        if (KIND_CARD in tags || (kind == null && site.startsWith(CARD_PREFIX))) {
+        if (KIND_CARD in tags || (kind == null && (site.startsWith(CARD_PREFIX) || (maxAlias != null && MAX_CARD_ALIAS.matches(maxAlias))))) {
             return card(site, maxAlias, username, notes)
         }
-        if (kind == KIND_ADDRESS || (kind == null && site.startsWith(ADDRESS_PREFIX))) {
+        // Untagged `address/` only counts when its notes are JSON, so a plain login there keeps its notes.
+        if (kind == KIND_ADDRESS || (kind == null && site.startsWith(ADDRESS_PREFIX) && parseObject(notes) != null)) {
             return VaultRow.Address(site.removePrefix(ADDRESS_PREFIX), AddressFields.parse(parseObject(notes)))
         }
         if (isAiProvider || "api_key" in tags) return VaultRow.Key(site)
@@ -253,6 +256,9 @@ internal object VaultRows {
             ?.let { if (it in 0..99) it else if (it in 2000..2099) it % 100 else null } ?: return null
         return "%02d".format(m) to "%02d".format(y)
     }
+
+    fun isExpired(month: String, year: String, now: java.time.YearMonth): Boolean =
+        java.time.YearMonth.of(2000 + year.toInt(), month.toInt()).isBefore(now)
 
     /** Notes for a card, in Max's notes() shape (limit/currency/billing blank on a hand-added card). */
     fun cardNotes(holder: String, expMonth: String, expYear: String): String =

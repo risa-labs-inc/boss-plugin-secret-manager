@@ -133,6 +133,14 @@ class SecretManagerViewModel(
     /** Kind filter in the Secrets section; here so it survives switching sections. */
     internal var vaultKind by mutableStateOf(VaultKind.LOGIN)
 
+    /** False until the user picks a kind or creates a row; until then the panel opens on a non-empty kind. */
+    internal var vaultKindChosen by mutableStateOf(false)
+
+    internal fun showVaultKind(kind: VaultKind) {
+        vaultKind = kind
+        vaultKindChosen = true
+    }
+
     /**
      * Initialize by loading secrets.
      *
@@ -680,6 +688,7 @@ class SecretManagerViewModel(
                         aiProviderSources = state.aiProviderSources +
                             (providerId to CredentialSource.STORED)
                     )
+                    showVaultKind(VaultKind.KEY)
                     loadSecrets()
                 }
                 .onFailure { error ->
@@ -844,6 +853,7 @@ class SecretManagerViewModel(
 
             result?.onSuccess {
                 state = state.copy(isOperationInProgress = false)
+                showVaultKind(VaultRows.classify(request.website, request.username, request.notes, request.tags).kind)
                 hideCreateDialog()
                 loadSecrets()
             }?.onFailure { exception ->
@@ -1324,6 +1334,7 @@ class SecretManagerViewModel(
                         apiKeyCreatedSuccessfully = true,
                         apiKeys = state.apiKeys + creationResult.keyInfo
                     )
+                    showVaultKind(VaultKind.KEY)
                     // Reload secrets to show the newly created one
                     loadSecrets()
                 }?.onFailure { secretException ->

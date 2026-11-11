@@ -205,6 +205,8 @@ class SecretManagerMcpToolsTest {
                     vaultRow("c", "bank.test", "4242424242424242", listOf("kind:card", "fluck-ws:w1")),
                     vaultRow("v", "bank.test-cvv", "123", listOf("kind:cvv", "fluck-ws:w1")),
                     vaultRow("u", "card/visa-4242", "4242424242424242", emptyList()),
+                    vaultRow("m", "fluck/w1/vault/card-4242", "4242424242424242", emptyList()),
+                    vaultRow("k", "fluck/w1/vault/x", "ctok-9f3e", listOf("connector")),
                     vaultRow("t", "fluck/w1/github/GH_TOKEN", "ghp_live", listOf("kind:secret", "fluck-ws:w1")),
                     vaultRow("g", "fluck/w1/google/GOOGLE_REFRESH_TOKEN", "1//refresh", listOf("fluck", "connector")),
                 )

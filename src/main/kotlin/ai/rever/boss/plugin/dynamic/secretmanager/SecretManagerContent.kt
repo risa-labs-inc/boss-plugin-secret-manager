@@ -618,10 +618,19 @@ private fun SecretsSection(
     }
     val counts = remember(classified) { classified.groupingBy { it.second.kind }.eachCount() }
     val visible = remember(classified, selectedKind) { classified.filter { it.second.kind == selectedKind } }
+    // Cards/Addresses render an "Add" header as lazy item 0.
+    val headerRows = if (selectedKind == VaultKind.CARD || selectedKind == VaultKind.ADDRESS) 1 else 0
+
+    // Open on a kind that has rows until the user picks one (most vaults today are keys).
+    LaunchedEffect(counts) {
+        if (!viewModel.vaultKindChosen && (counts[viewModel.vaultKind] ?: 0) == 0) {
+            VaultKind.entries.firstOrNull { (counts[it] ?: 0) > 0 }?.let { viewModel.vaultKind = it }
+        }
+    }
 
     // Same overflow-gated prefetch as Shared with me: a filtered kind can add zero rows per page,
     // and an always-composed trigger would then page the whole vault.
-    val currentCount by rememberUpdatedState(visible.size)
+    val currentCount by rememberUpdatedState(visible.size + headerRows)
     val currentHasMore by rememberUpdatedState(state.hasMore)
     val currentIsLoadingMore by rememberUpdatedState(state.isLoadingMore)
     LaunchedEffect(listState) {
@@ -652,7 +661,7 @@ private fun SecretsSection(
             selected = selectedKind,
             counts = counts,
             partial = state.hasMore,
-            onSelect = { viewModel.vaultKind = it },
+            onSelect = { viewModel.showVaultKind(it) },
             modifier = Modifier.padding(bottom = 12.dp),
         )
 
@@ -738,8 +747,9 @@ private fun SecretsSection(
                     onDismiss = { viewModel.clearError() }
                 )
             }
-            state.secrets.isEmpty() && (selectedKind == VaultKind.CARD || selectedKind == VaultKind.ADDRESS) -> {
-                VaultKindEmpty(selectedKind, hasMore = false, onLoadMore = {}, onAdd = {
+            state.secrets.isEmpty() && state.searchQuery.isBlank() &&
+                (selectedKind == VaultKind.CARD || selectedKind == VaultKind.ADDRESS) -> {
+                VaultKindEmpty(selectedKind, onAdd = {
                     if (selectedKind == VaultKind.CARD) showAddCard = true else showAddAddress = true
                 })
             }
@@ -778,7 +788,7 @@ private fun SecretsSection(
                     }
                     if (visible.isEmpty()) {
                         item(key = "empty-${selectedKind.name}") {
-                            VaultKindEmpty(selectedKind, hasMore = false, onLoadMore = {}, onAdd = null)
+                            VaultKindEmpty(selectedKind, searchQuery = state.searchQuery, onAdd = null)
                         }
                     }
                     items(visible, key = { it.first.id }) { (secret, row) ->
@@ -875,6 +885,7 @@ private fun VaultKindDialogs(
     editingAddress: Pair<SecretEntryData, VaultRow.Address>?,
     onClose: () -> Unit,
 ) {
+    // Duplicate and free-label checks see loaded pages only; a server-side row can still collide.
     if (showAddCard) {
         AddCardDialog(
             takenWebsites = takenWebsites(viewModel.state.secrets),

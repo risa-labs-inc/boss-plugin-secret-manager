@@ -7,6 +7,7 @@ import ai.rever.boss.plugin.ui.BossPrimaryButton
 import ai.rever.boss.plugin.ui.BossThemeColors
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.ClipboardManager
@@ -39,7 +41,7 @@ internal fun VaultKindFilter(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier.fillMaxWidth().selectableGroup(),
+        modifier = modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         VaultKind.entries.forEach { kind ->
@@ -171,7 +173,7 @@ private fun ManageActions(canManage: Boolean, onEdit: (() -> Unit)?, onDelete: (
 }
 
 @Composable
-private fun ActionIcon(icon: ImageVector, label: String, tint: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
+private fun ActionIcon(icon: ImageVector, label: String, tint: Color, onClick: () -> Unit) {
     IconButton(onClick = onClick, modifier = Modifier.size(28.dp)) {
         Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(16.dp))
     }
@@ -224,6 +226,7 @@ internal fun AddCardDialog(
         else -> null
     }
     val duplicate = row != null && row.website in takenWebsites
+    val expired = VaultRows.parseExpiry(expiry)?.let { (m, y) -> VaultRows.isExpired(m, y, java.time.YearMonth.now()) } == true
     FormDialog(
         title = "Add card",
         confirmLabel = "Save card",
@@ -234,6 +237,9 @@ internal fun AddCardDialog(
         DialogTextField(value = number, onValueChange = { v -> number = v.filter { it.isDigit() || it == ' ' }.take(23) }, label = "Card number", isPassword = true)
         DialogTextField(value = expiry, onValueChange = { expiry = it.take(7) }, label = "Expiry", placeholder = "MM/YY")
         DialogTextField(value = holder, onValueChange = { holder = it }, label = "Name on card")
+        if (expired) {
+            Text("This card has expired.", color = BossThemeColors.WarningColor, style = SecretPanelType.caption)
+        }
         if (duplicate) {
             Text(
                 "A card ending ${digits.takeLast(4)} is already saved. Saving adds a second one.",
@@ -304,33 +310,31 @@ private fun FormDialog(
     }
 }
 
-/** Empty list for one kind, with a footer action when more pages exist. */
+/** Empty list for one kind. Paging is the list footer's job. */
 @Composable
-internal fun VaultKindEmpty(kind: VaultKind, hasMore: Boolean, onLoadMore: () -> Unit, onAdd: (() -> Unit)?) {
+internal fun VaultKindEmpty(kind: VaultKind, searchQuery: String = "", onAdd: (() -> Unit)?) {
     Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        val noun = when (kind) {
+            VaultKind.LOGIN -> "logins"
+            VaultKind.CARD -> "cards"
+            VaultKind.ADDRESS -> "addresses"
+            VaultKind.KEY -> "keys or tokens"
+        }
         Text(
-            when (kind) {
-                VaultKind.LOGIN -> "No logins loaded"
-                VaultKind.CARD -> "No cards loaded"
-                VaultKind.ADDRESS -> "No addresses loaded"
-                VaultKind.KEY -> "No keys or tokens loaded"
-            },
+            if (searchQuery.isNotBlank()) "No $noun match '$searchQuery'" else "No $noun loaded",
             color = BossThemeColors.TextPrimary,
             style = SecretPanelType.bodyStrong,
         )
-        if (kind == VaultKind.CARD || kind == VaultKind.ADDRESS) {
+        if (searchQuery.isBlank() && (kind == VaultKind.CARD || kind == VaultKind.ADDRESS)) {
             Text(
                 "Saved by BOSS browser autofill and Max.",
                 color = BossThemeColors.TextSecondary,
                 style = SecretPanelType.meta,
             )
-        }
-        if (hasMore) {
-            TextButton(onClick = onLoadMore) { Text("Load more", color = BossThemeColors.AccentColor, style = SecretPanelType.body) }
         }
         if (onAdd != null) {
             TextButton(onClick = onAdd) {

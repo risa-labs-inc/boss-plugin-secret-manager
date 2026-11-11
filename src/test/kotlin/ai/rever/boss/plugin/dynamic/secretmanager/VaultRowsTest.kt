@@ -209,6 +209,28 @@ class VaultRowsTest {
     }
 
     @Test
+    fun untaggedOldMaxCardAndCvvAliasesArePayment() {
+        assertTrue(VaultRows.isPayment("fluck/w/vault/card-4242", emptyList()))
+        assertTrue(VaultRows.isPayment("fluck/w/vault/card-4242-cvv", listOf("fluck-ws:w")))
+        assertIs<VaultRow.Card>(classify(row("fluck/w/vault/card-4242", "Visa 4242")))
+        assertIs<VaultRow.CardCode>(classify(row("fluck/w/vault/card-4242-cvv", "sealed")))
+    }
+
+    @Test
+    fun untaggedAddressPrefixWithPlainNotesStaysALogin() {
+        assertEquals(VaultKind.LOGIN, classify(row("address/book", "me", notes = "my notes")).kind)
+        assertEquals(VaultKind.ADDRESS, classify(row("address/home", "me", notes = """{"street":"1 Main"}""")).kind)
+    }
+
+    @Test
+    fun isExpiredComparesMonthAndYear() {
+        val now = java.time.YearMonth.of(2026, 11)
+        assertTrue(VaultRows.isExpired("10", "26", now))
+        assertFalse(VaultRows.isExpired("11", "26", now))
+        assertFalse(VaultRows.isExpired("01", "27", now))
+    }
+
+    @Test
     fun isPaymentIsFalseForLoginsAddressesAndKeys() {
         assertFalse(VaultRows.isPayment("https://github.com", emptyList()))
         assertFalse(VaultRows.isPayment("fluck/w/vault/github.com", listOf("kind:password")))
