@@ -165,7 +165,8 @@ internal object VaultRows {
         }
         // Untagged `address/` only counts when its notes are JSON, so a plain login there keeps its notes.
         if (kind == KIND_ADDRESS || (kind == null && lsite.startsWith(ADDRESS_PREFIX) && parseObject(notes) != null)) {
-            return VaultRow.Address(site.substring(ADDRESS_PREFIX.length), AddressFields.parse(parseObject(notes)))
+            val label = if (lsite.startsWith(ADDRESS_PREFIX)) site.substring(ADDRESS_PREFIX.length) else site
+            return VaultRow.Address(label, AddressFields.parse(parseObject(notes)))
         }
         if (isAiProvider || "api_key" in ltags) return VaultRow.Key(site)
         if (isConnectorToken(site, tags)) return VaultRow.Key(site)

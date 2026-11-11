@@ -155,6 +155,16 @@ class VaultRowsTest {
     }
 
     @Test
+    fun taggedAddressWithoutPrefixDoesNotCrash() {
+        for (site in listOf("home", "", "addr", "Address/Home")) {
+            val r = classify(row(site, "me", notes = """{"street":"1 Main"}""", tags = listOf("kind:address")))
+            assertIs<VaultRow.Address>(r)
+        }
+        assertEquals("Home", (classify(row("Address/Home", tags = listOf("kind:address"))) as VaultRow.Address).label)
+        assertFalse(VaultRows.isPayment("home", listOf("kind:address")))
+    }
+
+    @Test
     fun addressEditKeepsUnknownNoteKeys() {
         val base = VaultRows.parseObject("""{"name":"A","street":"x","extra":"keep"}""")
         val json = AddressFields(name = "B", street = "y").toJson(base)

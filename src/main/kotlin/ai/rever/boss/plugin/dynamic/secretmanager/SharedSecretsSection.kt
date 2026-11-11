@@ -369,7 +369,7 @@ private fun SharedSecretCard(
                             modifier = Modifier.size(16.dp),
                         )
                         Text(
-                            text = VaultRows.classify(secret.website, secret.username, secret.notes, secret.tags).title,
+                            text = remember(secret) { VaultRows.classify(secret.website, secret.username, secret.notes, secret.tags).title },
                             color = BossThemeColors.TextPrimary,
                             style = SecretPanelType.bodyStrong,
                             maxLines = 1,

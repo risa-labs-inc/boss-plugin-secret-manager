@@ -1473,5 +1473,6 @@ The Secrets section partitions rows with `VaultRows.classify` (website shape plu
 - **`VaultRows.isConnectorToken`** is the one connector predicate (`connector` tag, or any `fluck/` key outside a vault), shared the same way. The MCP withhold test runs every refused shape (connector tag, deep `fluck/` key) through both `secret_get` and `my_secret_get`.
 - **Card and CVV views never read the password column.** `VaultRow.Card` has no field that could hold the number. Backup/export still includes card numbers inside the encrypted envelope, on purpose: it is the owner's own vault backup.
 - **Vault health excludes cards, card codes and addresses.** None of them are passwords (an address stores the filler `-`). Logins and keys are still rated.
+- The filter opens on the first kind with rows in the first unfiltered page, then latches. A vault whose first page is all keys opens on Keys even if logins come later.
 - **`vaultKind` lives on the ViewModel** for the same reason as `selectedSection`: `SecretsSection` leaves composition on every section switch.
 - Card notes are written in Max's `notes()` shape with ASCII digits whatever the locale. Max and host autofill parse them.

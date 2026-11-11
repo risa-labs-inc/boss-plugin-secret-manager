@@ -242,7 +242,7 @@ internal fun AddCardDialog(
         }
         if (duplicate) {
             Text(
-                "A card ending ${digits.takeLast(4)} is already saved. Saving adds a second one.",
+                "A card ending ${digits.takeLast(4)} is already among loaded secrets. Saving adds a second one.",
                 color = BossThemeColors.WarningColor,
                 style = SecretPanelType.caption,
             )

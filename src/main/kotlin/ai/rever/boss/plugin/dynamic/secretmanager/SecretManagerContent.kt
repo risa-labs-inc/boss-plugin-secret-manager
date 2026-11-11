@@ -932,7 +932,7 @@ private fun VaultKindDialogs(
                         password = secret.password.ifEmpty { VaultRows.ADDRESS_PASSWORD_FILLER },
                         notes = fields.toJson(VaultRows.parseObject(secret.notes)),
                         expirationDate = secret.expirationDate,
-                        tags = if (VaultRows.KIND_ADDRESS in secret.tags) secret.tags else secret.tags + VaultRows.KIND_ADDRESS,
+                        tags = if (secret.tags.any { it.trim().equals(VaultRows.KIND_ADDRESS, true) }) secret.tags else secret.tags + VaultRows.KIND_ADDRESS,
                     )
                 )
                 onClose()
