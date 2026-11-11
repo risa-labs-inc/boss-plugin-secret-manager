@@ -609,7 +609,7 @@ private fun SecretsSection(
     modifier: Modifier = Modifier,
 ) {
     val state = viewModel.state
-    var selectedKind by remember { mutableStateOf(VaultKind.LOGIN) }
+    val selectedKind = viewModel.vaultKind
     var showAddCard by remember { mutableStateOf(false) }
     var showAddAddress by remember { mutableStateOf(false) }
     var editingAddress by remember { mutableStateOf<Pair<SecretEntryData, VaultRow.Address>?>(null) }
@@ -617,7 +617,27 @@ private fun SecretsSection(
         state.secrets.map { it to VaultRows.classify(it, viewModel.isAiProviderSecret(it)) }
     }
     val counts = remember(classified) { classified.groupingBy { it.second.kind }.eachCount() }
-    val visible = classified.filter { it.second.kind == selectedKind }
+    val visible = remember(classified, selectedKind) { classified.filter { it.second.kind == selectedKind } }
+
+    // Same overflow-gated prefetch as Shared with me: a filtered kind can add zero rows per page,
+    // and an always-composed trigger would then page the whole vault.
+    val currentCount by rememberUpdatedState(visible.size)
+    val currentHasMore by rememberUpdatedState(state.hasMore)
+    val currentIsLoadingMore by rememberUpdatedState(state.isLoadingMore)
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            PrefetchWindow(
+                lastVisibleIndex = info.visibleItemsInfo.lastOrNull()?.index,
+                visibleItemCount = info.visibleItemsInfo.size,
+                renderedItemCount = info.totalItemsCount,
+            )
+        }.collect { window ->
+            if (shouldPrefetchMore(window, currentCount, currentHasMore, currentIsLoadingMore)) {
+                viewModel.loadMoreSecrets()
+            }
+        }
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         // Search bar
@@ -631,7 +651,8 @@ private fun SecretsSection(
         VaultKindFilter(
             selected = selectedKind,
             counts = counts,
-            onSelect = { selectedKind = it },
+            partial = state.hasMore,
+            onSelect = { viewModel.vaultKind = it },
             modifier = Modifier.padding(bottom = 12.dp),
         )
 
@@ -717,6 +738,11 @@ private fun SecretsSection(
                     onDismiss = { viewModel.clearError() }
                 )
             }
+            state.secrets.isEmpty() && (selectedKind == VaultKind.CARD || selectedKind == VaultKind.ADDRESS) -> {
+                VaultKindEmpty(selectedKind, hasMore = false, onLoadMore = {}, onAdd = {
+                    if (selectedKind == VaultKind.CARD) showAddCard = true else showAddAddress = true
+                })
+            }
             state.secrets.isEmpty() -> {
                 EmptyView(
                     searchQuery = state.searchQuery,
@@ -752,7 +778,7 @@ private fun SecretsSection(
                     }
                     if (visible.isEmpty()) {
                         item(key = "empty-${selectedKind.name}") {
-                            VaultKindEmpty(selectedKind, state.hasMore && !state.isLoadingMore, { viewModel.loadMoreSecrets() }, null)
+                            VaultKindEmpty(selectedKind, hasMore = false, onLoadMore = {}, onAdd = null)
                         }
                     }
                     items(visible, key = { it.first.id }) { (secret, row) ->
@@ -761,6 +787,11 @@ private fun SecretsSection(
                                 card = row,
                                 canManage = viewModel.canManageSecret(secret.id),
                                 clipboard = clipboardManager,
+                                onDelete = { viewModel.showDeleteDialog(secret) },
+                            )
+                            is VaultRow.CardCode -> VaultCardCodeItem(
+                                code = row,
+                                canManage = viewModel.canManageSecret(secret.id),
                                 onDelete = { viewModel.showDeleteDialog(secret) },
                             )
                             is VaultRow.Address -> VaultAddressItem(
@@ -792,22 +823,13 @@ private fun SecretsSection(
                         }
                     }
 
-                    // Auto-load only on Logins: a sparse kind would page the whole vault.
-                    if (visible.isNotEmpty() && selectedKind != VaultKind.LOGIN && state.hasMore && !state.isLoadingMore) {
+                    // The only way on when the filtered list fits on screen (prefetch declines then).
+                    if (state.hasMore && !state.isLoadingMore) {
                         item(key = "more-${selectedKind.name}") {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                                 TextButton(onClick = { viewModel.loadMoreSecrets() }) {
                                     Text("Load more", color = BossThemeColors.AccentColor, style = SecretPanelType.body)
                                 }
-                            }
-                        }
-                    }
-
-                    // Load more trigger
-                    if (selectedKind == VaultKind.LOGIN && state.hasMore && !state.isLoadingMore) {
-                        item {
-                            LaunchedEffect(Unit) {
-                                viewModel.loadMoreSecrets()
                             }
                         }
                     }
@@ -855,6 +877,7 @@ private fun VaultKindDialogs(
 ) {
     if (showAddCard) {
         AddCardDialog(
+            takenWebsites = takenWebsites(viewModel.state.secrets),
             onConfirm = { row ->
                 viewModel.createSecret(
                     CreateSecretRequestData(website = row.website, username = row.username, password = row.password, notes = row.notes, tags = row.tags)

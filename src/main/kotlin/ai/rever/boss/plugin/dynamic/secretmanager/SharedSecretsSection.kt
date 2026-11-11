@@ -345,7 +345,7 @@ private fun SharedSecretCard(
 ) {
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val isApiKey = secret.tags.contains(ProviderCredentialStore.TAG_API_KEY)
+    val isApiKey = secret.tags.contains(ProviderCredentialStore.TAG_API_KEY) && !VaultRows.isPayment(secret.website, secret.tags)
 
     BossCard(modifier = Modifier.fillMaxWidth()) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

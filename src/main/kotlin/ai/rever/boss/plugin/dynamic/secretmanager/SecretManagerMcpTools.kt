@@ -383,7 +383,7 @@ internal class SecretManagerMcpToolProvider(
                     "Use the provider via the host's AI provider settings instead."
             // Max vault payment rows: the full card number and CVV. Only the vault's own
             // checkout path may read them; an agent tool never needs the raw value.
-            tags.any { it in PAYMENT_KIND_TAGS } ->
+            VaultRows.isPayment(website, tags) ->
                 "is a payment card and is not readable through this tool. " +
                     "Card details are only used by the vault's own checkout."
             // Connector tokens (fluck/<ws>/<connector>/<VAR>); the connector reads its own.
@@ -510,8 +510,6 @@ internal class SecretManagerMcpToolProvider(
         """{"type":"object","properties":{"id":{"type":"string","description":"$desc"}},"required":["id"]}"""
 
     private companion object {
-        /** Kept in step with BossConsole's SecretReferenceResolver.deliveryRefusal. */
-        val PAYMENT_KIND_TAGS = setOf("kind:card", "kind:cvv")
         const val CONNECTOR_TAG = "connector"
         val CONNECTOR_TOKEN_WEBSITE = Regex("^fluck/[^/]+/(?!vault/)[^/]+/[^/]+$")
 

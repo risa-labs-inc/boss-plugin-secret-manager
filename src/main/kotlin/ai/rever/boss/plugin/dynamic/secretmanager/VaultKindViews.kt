@@ -3,6 +3,7 @@ package ai.rever.boss.plugin.dynamic.secretmanager
 import ai.rever.boss.plugin.api.SecretEntryData
 import ai.rever.boss.plugin.ui.BossCard
 import ai.rever.boss.plugin.ui.BossDialog
+import ai.rever.boss.plugin.ui.BossPrimaryButton
 import ai.rever.boss.plugin.ui.BossThemeColors
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,6 +33,8 @@ import kotlinx.coroutines.delay
 internal fun VaultKindFilter(
     selected: VaultKind,
     counts: Map<VaultKind, Int>,
+    /** More pages exist, so counts are a floor. */
+    partial: Boolean,
     onSelect: (VaultKind) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -57,7 +60,7 @@ internal fun VaultKindFilter(
                     maxLines = 1,
                 )
                 Text(
-                    "${counts[kind] ?: 0}",
+                    "${counts[kind] ?: 0}${if (partial) "+" else ""}",
                     style = SecretPanelType.micro,
                     color = BossThemeColors.TextSecondary,
                     maxLines = 1,
@@ -103,6 +106,24 @@ internal fun VaultCardItem(
 }
 
 @Composable
+internal fun VaultCardCodeItem(
+    code: VaultRow.CardCode,
+    canManage: Boolean,
+    onDelete: () -> Unit,
+) {
+    BossCard(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Default.Lock, contentDescription = null, tint = BossThemeColors.TextSecondary, modifier = Modifier.size(16.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(code.title, color = BossThemeColors.TextPrimary, style = SecretPanelType.bodyStrong, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Sealed. Used only at checkout.", color = BossThemeColors.TextSecondary, style = SecretPanelType.meta, maxLines = 1)
+            }
+            ManageActions(canManage = canManage, onEdit = null, onDelete = onDelete)
+        }
+    }
+}
+
+@Composable
 internal fun VaultAddressItem(
     address: VaultRow.Address,
     canManage: Boolean,
@@ -123,11 +144,13 @@ internal fun VaultAddressItem(
                     style = SecretPanelType.meta,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = if (line.isNotBlank()) Modifier.clickable { clipboard.setText(AnnotatedString(line)) } else Modifier,
                 )
                 val contact = listOf(f.email, f.phone).filter { it.isNotBlank() }.joinToString(" · ")
                 if (contact.isNotBlank()) {
                     Text(contact, color = BossThemeColors.TextSecondary, style = SecretPanelType.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (line.isNotBlank()) {
+                    Row(modifier = Modifier.padding(top = 4.dp)) { CopyChip("Address", line, clipboard) }
                 }
             }
             ManageActions(canManage = canManage, onEdit = onEdit, onDelete = onDelete)
@@ -167,7 +190,7 @@ private fun CopyChip(label: String, value: String, clipboard: ClipboardManager) 
     Row(
         modifier = Modifier
             .background(BossThemeColors.BackgroundColor, RoundedCornerShape(4.dp))
-            .clickable {
+            .clickable(role = Role.Button, onClickLabel = "Copy $label") {
                 clipboard.setText(AnnotatedString(value))
                 copied = true
             }
@@ -186,6 +209,7 @@ private fun CopyChip(label: String, value: String, clipboard: ClipboardManager) 
 
 @Composable
 internal fun AddCardDialog(
+    takenWebsites: Set<String>,
     onConfirm: (VaultRows.NewRow) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -199,6 +223,7 @@ internal fun AddCardDialog(
         expiry.length >= 4 && VaultRows.parseExpiry(expiry) == null -> "Use MM/YY for the expiry."
         else -> null
     }
+    val duplicate = row != null && row.website in takenWebsites
     FormDialog(
         title = "Add card",
         confirmLabel = "Save card",
@@ -209,6 +234,13 @@ internal fun AddCardDialog(
         DialogTextField(value = number, onValueChange = { v -> number = v.filter { it.isDigit() || it == ' ' }.take(23) }, label = "Card number", isPassword = true)
         DialogTextField(value = expiry, onValueChange = { expiry = it.take(7) }, label = "Expiry", placeholder = "MM/YY")
         DialogTextField(value = holder, onValueChange = { holder = it }, label = "Name on card")
+        if (duplicate) {
+            Text(
+                "A card ending ${digits.takeLast(4)} is already saved. Saving adds a second one.",
+                color = BossThemeColors.WarningColor,
+                style = SecretPanelType.caption,
+            )
+        }
         Text(
             error ?: "The security code is not stored here. Autofill and Max ask for it at checkout.",
             color = if (error != null) BossThemeColors.ErrorColor else BossThemeColors.TextSecondary,
@@ -263,13 +295,9 @@ private fun FormDialog(
                 Text(title, color = BossThemeColors.TextPrimary, style = SecretPanelType.title)
                 content()
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = onDismiss) { Text("Cancel", color = BossThemeColors.TextSecondary) }
+                    TextButton(onClick = onDismiss) { Text("Cancel", color = BossThemeColors.TextSecondary, style = SecretPanelType.body) }
                     Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = onConfirm,
-                        enabled = canConfirm,
-                        colors = ButtonDefaults.buttonColors(backgroundColor = BossThemeColors.AccentColor),
-                    ) { Text(confirmLabel, color = BossThemeColors.TextPrimary) }
+                    BossPrimaryButton(text = confirmLabel, onClick = onConfirm, enabled = canConfirm)
                 }
             }
         }

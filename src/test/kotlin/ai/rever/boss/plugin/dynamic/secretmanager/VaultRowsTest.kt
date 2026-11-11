@@ -178,10 +178,59 @@ class VaultRowsTest {
     }
 
     @Test
-    fun maxCvvRowIsKeyNotCard() {
-        val r = classify(row("fluck/ws1/vault/card-4242-cvv", "sealed", tags = listOf("kind:cvv", "fluck-ws:ws1")))
+    fun maxCvvRowIsSealedCardCode() {
+        val r = classify(row("fluck/ws1/vault/card-4242-cvv", "sealed", password = "sealed-blob", tags = listOf("kind:cvv", "fluck-ws:ws1")))
+        assertEquals(VaultRow.CardCode("Card security code · card-4242"), r)
         assertEquals(VaultKind.KEY, r.kind)
-        assertEquals("Card security code · card-4242", r.title)
+        assertFalse("sealed-blob" in r.toString())
+    }
+
+    @Test
+    fun anyKindCvvRowIsCardCodeWhateverItsWebsite() {
+        assertIs<VaultRow.CardCode>(classify(row("bank.test-cvv", tags = listOf("fluck-ws:w", "kind:cvv"))))
+    }
+
+    @Test
+    fun cvvInCardNotesNeverReachesTheCardView() {
+        val r = classify(row("card/visa-4242", "Visa 4242", notes = """{"name":"J","cvv":"987","exp_month":"01","exp_year":"30"}""", tags = listOf("kind:card")))
+        assertFalse("987" in r.toString())
+    }
+
+    // ---- isPayment: shared by the panel and the MCP refusal ----
+
+    @Test
+    fun isPaymentCoversEveryCardAndCodeShape() {
+        assertTrue(VaultRows.isPayment("card/visa-4242", emptyList()))
+        assertTrue(VaultRows.isPayment("card/visa-4242", listOf("kind:card")))
+        assertTrue(VaultRows.isPayment("fluck/w/vault/card-4242", listOf("kind:card", "fluck-ws:w")))
+        assertTrue(VaultRows.isPayment("bank.test", listOf("fluck-ws:w", "kind:card")))
+        assertTrue(VaultRows.isPayment("fluck/w/vault/card-4242-cvv", listOf("kind:cvv")))
+        assertTrue(VaultRows.isPayment("card/visa-4242", listOf("api_key")))
+    }
+
+    @Test
+    fun isPaymentIsFalseForLoginsAddressesAndKeys() {
+        assertFalse(VaultRows.isPayment("https://github.com", emptyList()))
+        assertFalse(VaultRows.isPayment("fluck/w/vault/github.com", listOf("kind:password")))
+        assertFalse(VaultRows.isPayment("address/home", listOf("kind:address")))
+        assertFalse(VaultRows.isPayment("fluck/w/github/GH_TOKEN", listOf("fluck", "connector")))
+    }
+
+    // ---- parseExpiry / slug ----
+
+    @Test
+    fun parseExpiryEdges() {
+        assertEquals("01" to "31", VaultRows.parseExpiry("1/2031"))
+        assertEquals("08" to "29", VaultRows.parseExpiry(" 08 / 29 "))
+        assertNull(VaultRows.parseExpiry("00/29"))
+        assertNull(VaultRows.parseExpiry("08/"))
+        assertNull(VaultRows.parseExpiry("08/1999"))
+    }
+
+    @Test
+    fun nonAsciiNameSlugsToHome() {
+        assertEquals("", VaultRows.slug("山田太郎"))
+        assertEquals("address/home", VaultRows.newAddress(AddressFields(name = "山田太郎"), emptySet()).website)
     }
 
     @Test

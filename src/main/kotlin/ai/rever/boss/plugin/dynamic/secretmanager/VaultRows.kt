@@ -54,6 +54,11 @@ internal sealed interface VaultRow {
         override val kind get() = VaultKind.KEY
     }
 
+    /** A stored card security code. Listed so it can be deleted; never revealed or copied. */
+    data class CardCode(override val title: String) : VaultRow {
+        override val kind get() = VaultKind.KEY
+    }
+
     companion object {
         const val MASK = "••••"
     }
@@ -140,7 +145,11 @@ internal object VaultRows {
         val kind = tags.firstOrNull { it.startsWith("kind:") }
         val maxAlias = maxVaultAlias(site)
 
-        if (kind == KIND_CARD || (kind == null && site.startsWith(CARD_PREFIX))) {
+        if (KIND_CVV in tags) {
+            val card = maxAlias?.removeSuffix("-cvv") ?: site.removeSuffix("-cvv")
+            return VaultRow.CardCode("Card security code · $card")
+        }
+        if (KIND_CARD in tags || (kind == null && site.startsWith(CARD_PREFIX))) {
             return card(site, maxAlias, username, notes)
         }
         if (kind == KIND_ADDRESS || (kind == null && site.startsWith(ADDRESS_PREFIX))) {
@@ -151,15 +160,19 @@ internal object VaultRows {
             if (maxAlias != null && (kind == null || kind == KIND_PASSWORD)) {
                 return VaultRow.Login(maxLoginSite(maxAlias) ?: maxAlias, username)
             }
-            if (maxAlias != null && kind == KIND_CVV) {
-                return VaultRow.Key("Card security code · ${maxAlias.removeSuffix("-cvv")}")
-            }
             // Connector tokens (`fluck/<ws>/<connector>/<VAR>`) keep their key as the name.
             return VaultRow.Key(site)
         }
         if (kind != null && kind != KIND_PASSWORD) return VaultRow.Key(site)
         return VaultRow.Login(site, username)
     }
+
+    /**
+     * True for a card number or card security code. The one definition both the panel and the
+     * MCP refusal use, so a row the panel masks is never handed out raw by a tool.
+     */
+    fun isPayment(website: String, tags: List<String>): Boolean =
+        classify(website, "", null, tags).let { it is VaultRow.Card || it is VaultRow.CardCode }
 
     /** The alias of an old-shape Max vault row `fluck/<ws>/vault/<alias>`, else null. */
     internal fun maxVaultAlias(website: String): String? {

@@ -130,6 +130,9 @@ class SecretManagerViewModel(
     var state by mutableStateOf(SecretManagerState())
         private set
 
+    /** Kind filter in the Secrets section; here so it survives switching sections. */
+    internal var vaultKind by mutableStateOf(VaultKind.LOGIN)
+
     /**
      * Initialize by loading secrets.
      *
@@ -926,6 +929,8 @@ class SecretManagerViewModel(
      * regardless. Copying to the system clipboard is inherently exposed.
      */
     fun copyPasswordToClipboard(secret: SecretEntryData, clipboard: ClipboardManager) {
+        // Card numbers and security codes never leave the panel.
+        if (VaultRows.isPayment(secret.website, secret.tags)) return
         val copied = secret.password
         val generation = ++clipboardCopyGeneration
         clipboard.setText(AnnotatedString(copied))
@@ -961,6 +966,7 @@ class SecretManagerViewModel(
     }
 
     fun togglePasswordVisibility(secretId: String) {
+        if (state.secrets.any { it.id == secretId && VaultRows.isPayment(it.website, it.tags) }) return
         val current = state.visiblePasswordIds
         state = if (current.contains(secretId)) {
             state.copy(visiblePasswordIds = current - secretId)
