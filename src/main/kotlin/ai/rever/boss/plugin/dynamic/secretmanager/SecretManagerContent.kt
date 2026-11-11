@@ -609,6 +609,15 @@ private fun SecretsSection(
     modifier: Modifier = Modifier,
 ) {
     val state = viewModel.state
+    var selectedKind by remember { mutableStateOf(VaultKind.LOGIN) }
+    var showAddCard by remember { mutableStateOf(false) }
+    var showAddAddress by remember { mutableStateOf(false) }
+    var editingAddress by remember { mutableStateOf<Pair<SecretEntryData, VaultRow.Address>?>(null) }
+    val classified = remember(state.secrets) {
+        state.secrets.map { it to VaultRows.classify(it, viewModel.isAiProviderSecret(it)) }
+    }
+    val counts = remember(classified) { classified.groupingBy { it.second.kind }.eachCount() }
+    val visible = classified.filter { it.second.kind == selectedKind }
 
     Column(modifier = modifier.fillMaxSize()) {
         // Search bar
@@ -616,7 +625,14 @@ private fun SecretsSection(
             query = state.searchQuery,
             onQueryChange = { viewModel.searchSecrets(it) },
             placeholder = "Search secrets",
-            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+        )
+
+        VaultKindFilter(
+            selected = selectedKind,
+            counts = counts,
+            onSelect = { selectedKind = it },
+            modifier = Modifier.padding(bottom = 12.dp),
         )
 
         // Secret count
@@ -719,9 +735,44 @@ private fun SecretsSection(
                         ),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(state.secrets, key = { it.id }) { secret ->
-                        SecretCard(
+                    if (selectedKind == VaultKind.CARD || selectedKind == VaultKind.ADDRESS) {
+                        item(key = "add-${selectedKind.name}") {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                TextButton(onClick = {
+                                    if (selectedKind == VaultKind.CARD) showAddCard = true else showAddAddress = true
+                                }) {
+                                    Text(
+                                        if (selectedKind == VaultKind.CARD) "Add card" else "Add address",
+                                        color = BossThemeColors.AccentColor,
+                                        style = SecretPanelType.body,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (visible.isEmpty()) {
+                        item(key = "empty-${selectedKind.name}") {
+                            VaultKindEmpty(selectedKind, state.hasMore && !state.isLoadingMore, { viewModel.loadMoreSecrets() }, null)
+                        }
+                    }
+                    items(visible, key = { it.first.id }) { (secret, row) ->
+                        when (row) {
+                            is VaultRow.Card -> VaultCardItem(
+                                card = row,
+                                canManage = viewModel.canManageSecret(secret.id),
+                                clipboard = clipboardManager,
+                                onDelete = { viewModel.showDeleteDialog(secret) },
+                            )
+                            is VaultRow.Address -> VaultAddressItem(
+                                address = row,
+                                canManage = viewModel.canManageSecret(secret.id),
+                                clipboard = clipboardManager,
+                                onEdit = { editingAddress = secret to row },
+                                onDelete = { viewModel.showDeleteDialog(secret) },
+                            )
+                            else -> SecretCard(
                             secret = secret,
+                            title = row.title,
                             access = viewModel.accessFor(secret.id),
                             isPasswordVisible = state.visiblePasswordIds.contains(secret.id),
                             isExpanded = state.expandedSecretIds.contains(secret.id),
@@ -738,10 +789,22 @@ private fun SecretsSection(
                             // the right row rather than at the top of the list.
                             onOpenAiProviderSettings = { onOpenAiProvider(viewModel.aiProviderId(secret).orEmpty()) }
                         )
+                        }
+                    }
+
+                    // Auto-load only on Logins: a sparse kind would page the whole vault.
+                    if (visible.isNotEmpty() && selectedKind != VaultKind.LOGIN && state.hasMore && !state.isLoadingMore) {
+                        item(key = "more-${selectedKind.name}") {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                                TextButton(onClick = { viewModel.loadMoreSecrets() }) {
+                                    Text("Load more", color = BossThemeColors.AccentColor, style = SecretPanelType.body)
+                                }
+                            }
+                        }
                     }
 
                     // Load more trigger
-                    if (state.hasMore && !state.isLoadingMore) {
+                    if (selectedKind == VaultKind.LOGIN && state.hasMore && !state.isLoadingMore) {
                         item {
                             LaunchedEffect(Unit) {
                                 viewModel.loadMoreSecrets()
@@ -767,6 +830,72 @@ private fun SecretsSection(
                 }
             }
         }
+    }
+
+    VaultKindDialogs(
+        viewModel = viewModel,
+        showAddCard = showAddCard,
+        showAddAddress = showAddAddress,
+        editingAddress = editingAddress,
+        onClose = {
+            showAddCard = false
+            showAddAddress = false
+            editingAddress = null
+        },
+    )
+}
+
+@Composable
+private fun VaultKindDialogs(
+    viewModel: SecretManagerViewModel,
+    showAddCard: Boolean,
+    showAddAddress: Boolean,
+    editingAddress: Pair<SecretEntryData, VaultRow.Address>?,
+    onClose: () -> Unit,
+) {
+    if (showAddCard) {
+        AddCardDialog(
+            onConfirm = { row ->
+                viewModel.createSecret(
+                    CreateSecretRequestData(website = row.website, username = row.username, password = row.password, notes = row.notes, tags = row.tags)
+                )
+                onClose()
+            },
+            onDismiss = onClose,
+        )
+    }
+    if (showAddAddress) {
+        AddressDialog(
+            initial = null,
+            onConfirm = { fields ->
+                val row = VaultRows.newAddress(fields, takenWebsites(viewModel.state.secrets))
+                viewModel.createSecret(
+                    CreateSecretRequestData(website = row.website, username = row.username, password = row.password, notes = row.notes, tags = row.tags)
+                )
+                onClose()
+            },
+            onDismiss = onClose,
+        )
+    }
+    editingAddress?.let { (secret, address) ->
+        AddressDialog(
+            initial = address.fields,
+            onConfirm = { fields ->
+                viewModel.updateSecret(
+                    UpdateSecretRequestData(
+                        secretId = secret.id,
+                        website = secret.website,
+                        username = fields.name.ifBlank { secret.username.ifBlank { "Address" } },
+                        password = secret.password.ifEmpty { VaultRows.ADDRESS_PASSWORD_FILLER },
+                        notes = fields.toJson(VaultRows.parseObject(secret.notes)),
+                        expirationDate = secret.expirationDate,
+                        tags = if (VaultRows.KIND_ADDRESS in secret.tags) secret.tags else secret.tags + VaultRows.KIND_ADDRESS,
+                    )
+                )
+                onClose()
+            },
+            onDismiss = onClose,
+        )
     }
 }
 
@@ -1125,6 +1254,8 @@ private fun TotpCodeRow(
 @Composable
 private fun SecretCard(
     secret: SecretEntryData,
+    /** Old-shape Max rows show their real site, not the `fluck/...` key. */
+    title: String = secret.website,
     access: SecretAccessState,
     isPasswordVisible: Boolean,
     isExpanded: Boolean,
@@ -1207,7 +1338,7 @@ private fun SecretCard(
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = secret.website,
+                            text = title,
                             color = BossThemeColors.TextPrimary,
                             style = SecretPanelType.bodyStrong,
                             maxLines = 1,
@@ -1986,7 +2117,9 @@ private fun DeleteConfirmationDialog(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    "${secret.website} - ${secret.username}",
+                    VaultRows.classify(secret).let { row ->
+                        if (row is VaultRow.Card || row is VaultRow.Address) row.title else "${row.title} - ${secret.username}"
+                    },
                     color = BossThemeColors.AccentColor,
                     style = SecretPanelType.bodyStrong
                 )
@@ -2354,7 +2487,7 @@ internal fun presentShareTarget(
     }
 
 @Composable
-private fun DialogTextField(
+internal fun DialogTextField(
     value: String,
     onValueChange: (String) -> Unit,
     label: String,
