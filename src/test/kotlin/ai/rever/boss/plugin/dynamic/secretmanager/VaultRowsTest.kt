@@ -237,6 +237,27 @@ class VaultRowsTest {
     }
 
     @Test
+    fun paymentTagWinsOverOtherKinds() {
+        assertTrue(VaultRows.isPayment("example.com", listOf("kind:password", "kind:cvv")))
+        assertTrue(VaultRows.isPayment("example.com", listOf("kind:password", "kind:card")))
+    }
+
+    @Test
+    fun paymentMatchingIsCaseInsensitive() {
+        assertTrue(VaultRows.isPayment("Card/Visa-4242", emptyList()))
+        assertTrue(VaultRows.isPayment("example.com", listOf("Kind:Card")))
+        assertTrue(VaultRows.isPayment("Fluck/w/Vault/Card-4242", emptyList()))
+        assertTrue(VaultRows.isConnectorToken("x", listOf("Connector")))
+    }
+
+    @Test
+    fun maxCardShapesWithANonPasswordKindArePayment() {
+        assertTrue(VaultRows.isPayment("fluck/w/vault/card-4242-cvv", listOf("kind:secret")))
+        assertTrue(VaultRows.isPayment("fluck/w/vault/card-4242", listOf("kind:secret")))
+        assertFalse(VaultRows.isPayment("fluck/w/vault/card-4242", listOf("kind:password")))
+    }
+
+    @Test
     fun connectorTokenIsOneDefinitionForAnyDepth() {
         assertTrue(VaultRows.isConnectorToken("fluck/ws/conn/VAR", emptyList()))
         assertTrue(VaultRows.isConnectorToken("fluck/ws/conn/sub/VAR", emptyList()))

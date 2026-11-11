@@ -179,7 +179,7 @@ private fun ActionIcon(icon: ImageVector, label: String, tint: Color, onClick: (
     }
 }
 
-/** Copies a non-secret value (last 4, expiry, name). */
+/** Copies a non-secret value (last 4, expiry, name, address). No 45s wipe: not a credential. */
 @Composable
 private fun CopyChip(label: String, value: String, clipboard: ClipboardManager) {
     var copied by remember { mutableStateOf(false) }

@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.*
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersPanel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.AiProvidersViewModel
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.CredentialSource
+import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderCredentialStore
 import ai.rever.boss.plugin.dynamic.secretmanager.ai.ProviderRegistry
 import ai.rever.boss.plugin.dynamic.secretmanager.security.PasswordGenerator
 import ai.rever.boss.plugin.scrollbar.getPanelScrollbarConfig
@@ -675,7 +676,7 @@ private fun SecretsSection(
 
         // Secret count
         Text(
-            "${visible.size} ${selectedKind.label.lowercase()}" +
+            "${visible.size}${if (state.hasMore) "+" else ""} shown" +
                 (state.lastLoadDurationMs?.let { " · last fetch ${formatLoadDuration(it)}" } ?: ""),
             color = BossThemeColors.TextSecondary,
             style = SecretPanelType.meta,
@@ -2159,7 +2160,7 @@ private fun DeleteConfirmationDialog(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    VaultRows.classify(secret).let { row ->
+                    VaultRows.classify(secret, secret.tags.contains(ProviderCredentialStore.TAG_AI_PROVIDER)).let { row ->
                         if (row is VaultRow.Card || row is VaultRow.Address) row.title else "${row.title} - ${secret.username}"
                     },
                     color = BossThemeColors.AccentColor,

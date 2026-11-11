@@ -145,21 +145,29 @@ internal object VaultRows {
         isAiProvider: Boolean = false,
     ): VaultRow {
         val site = website.trim()
-        val kind = tags.firstOrNull { it.startsWith("kind:") }
+        // Payment checks fail closed: case-insensitive, any kind:card/kind:cvv tag, and card shapes
+        // count unless the row is explicitly kind:password.
+        val lsite = site.lowercase()
+        val ltags = tags.map { it.trim().lowercase() }
+        val kind = ltags.firstOrNull { it.startsWith("kind:") }
         val maxAlias = maxVaultAlias(site)
+        val lalias = maxAlias?.lowercase()
+        val shapeAllowed = kind != KIND_PASSWORD
 
-        if (KIND_CVV in tags || (kind == null && maxAlias != null && MAX_CVV_ALIAS.matches(maxAlias))) {
-            val card = maxAlias?.removeSuffix("-cvv") ?: site.removeSuffix("-cvv")
+        if (KIND_CVV in ltags || (shapeAllowed && lalias != null && MAX_CVV_ALIAS.matches(lalias))) {
+            val card = lalias?.removeSuffix("-cvv") ?: lsite.removeSuffix("-cvv")
             return VaultRow.CardCode("Card security code · $card")
         }
-        if (KIND_CARD in tags || (kind == null && (site.startsWith(CARD_PREFIX) || (maxAlias != null && MAX_CARD_ALIAS.matches(maxAlias))))) {
-            return card(site, maxAlias, username, notes)
+        if (KIND_CARD in ltags ||
+            (shapeAllowed && (lsite.startsWith(CARD_PREFIX) || (lalias != null && MAX_CARD_ALIAS.matches(lalias))))
+        ) {
+            return card(lsite, lalias, username, notes)
         }
         // Untagged `address/` only counts when its notes are JSON, so a plain login there keeps its notes.
-        if (kind == KIND_ADDRESS || (kind == null && site.startsWith(ADDRESS_PREFIX) && parseObject(notes) != null)) {
-            return VaultRow.Address(site.removePrefix(ADDRESS_PREFIX), AddressFields.parse(parseObject(notes)))
+        if (kind == KIND_ADDRESS || (kind == null && lsite.startsWith(ADDRESS_PREFIX) && parseObject(notes) != null)) {
+            return VaultRow.Address(site.substring(ADDRESS_PREFIX.length), AddressFields.parse(parseObject(notes)))
         }
-        if (isAiProvider || "api_key" in tags) return VaultRow.Key(site)
+        if (isAiProvider || "api_key" in ltags) return VaultRow.Key(site)
         if (isConnectorToken(site, tags)) return VaultRow.Key(site)
         if (maxAlias != null) {
             if (kind == null || kind == KIND_PASSWORD) return VaultRow.Login(maxLoginSite(maxAlias) ?: maxAlias, username)
@@ -182,13 +190,14 @@ internal object VaultRows {
      */
     fun isConnectorToken(website: String, tags: List<String>): Boolean {
         val site = website.trim()
-        return CONNECTOR_TAG in tags || (site.startsWith(MAX_PREFIX) && maxVaultAlias(site) == null)
+        return tags.any { it.trim().equals(CONNECTOR_TAG, ignoreCase = true) } ||
+            (site.lowercase().startsWith(MAX_PREFIX) && maxVaultAlias(site) == null)
     }
 
     /** The alias of an old-shape Max vault row `fluck/<ws>/vault/<alias>`, else null. */
     internal fun maxVaultAlias(website: String): String? {
         val parts = website.split('/', limit = 4)
-        if (parts.size != 4 || parts[0] != "fluck" || parts[2] != "vault") return null
+        if (parts.size != 4 || !parts[0].equals("fluck", true) || !parts[2].equals("vault", true)) return null
         return parts[3].takeIf { it.isNotBlank() }
     }
 

@@ -510,7 +510,6 @@ internal class SecretManagerMcpToolProvider(
         """{"type":"object","properties":{"id":{"type":"string","description":"$desc"}},"required":["id"]}"""
 
     private companion object {
-
         const val LIMIT_SCHEMA =
             """{"type":"object","properties":{"limit":{"type":"integer","description":"Max secrets (default 100)."}}}"""
 
