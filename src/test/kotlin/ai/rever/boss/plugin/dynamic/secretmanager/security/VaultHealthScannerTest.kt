@@ -52,6 +52,26 @@ class VaultHealthScannerTest {
         }
 
     @Test
+    fun `cards, card codes and addresses are not rated as passwords`() =
+        runTest {
+            val entries =
+                listOf(
+                    secret("a1", "address/home", "-").copy(tags = listOf("kind:address"), notes = """{"street":"1 Main"}"""),
+                    secret("a2", "address/work", "-").copy(tags = listOf("kind:address"), notes = """{"street":"2 Main"}"""),
+                    secret("c1", "card/visa-4242", "4242424242424242").copy(tags = listOf("kind:card")),
+                    secret("c2", "fluck/w/vault/card-4242", "4242424242424242"),
+                    secret("v1", "fluck/w/vault/card-4242-cvv", "sealed").copy(tags = listOf("kind:cvv")),
+                    secret("l1", "github.com", "Str0ng!Passphrase"),
+                    secret("l2", "fluck/w/vault/work@github.com", "An0ther!Passphrase").copy(tags = listOf("kind:password")),
+                    secret("l3", "address/book", "Th1rd!Passphrase").copy(notes = "plain notes"),
+                )
+            val report = VaultHealthScanner.scan(FakeSecretDataProvider(entries))
+            assertEquals(3, report.analyzedCount, "logins, incl. Max-alias and untagged address/ logins, are still rated")
+            assertEquals(0, report.reuseGroups.size)
+            assertEquals(0, report.weakCount)
+        }
+
+    @Test
     fun `a failed read throws rather than returning a partial report`() =
         runTest {
             val provider = FakeSecretDataProvider(emptyList(), failReads = true)

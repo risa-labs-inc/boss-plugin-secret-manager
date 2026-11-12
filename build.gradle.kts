@@ -227,6 +227,7 @@ fun verifyNoLooseFontSizes() {
         listOf(
             "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/SecretManagerContent.kt",
             "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/SharedSecretsSection.kt",
+            "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/VaultKindViews.kt",
             "src/main/kotlin/ai/rever/boss/plugin/dynamic/secretmanager/ai/AiProvidersPanel.kt"
         ).map { file(it) }
 

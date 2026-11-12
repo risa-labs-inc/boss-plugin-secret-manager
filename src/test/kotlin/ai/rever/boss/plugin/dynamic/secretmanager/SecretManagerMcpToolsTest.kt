@@ -198,6 +198,48 @@ class SecretManagerMcpToolsTest {
         }
 
     @Test
+    fun `secret_get and my_secret_get withhold vault cards, cvvs and connector tokens`() =
+        runTest {
+            val rows =
+                listOf(
+                    vaultRow("c", "bank.test", "4242424242424242", listOf("kind:card", "fluck-ws:w1")),
+                    vaultRow("v", "bank.test-cvv", "123", listOf("kind:cvv", "fluck-ws:w1")),
+                    vaultRow("u", "card/visa-4242", "4242424242424242", emptyList()),
+                    vaultRow("m", "fluck/w1/vault/card-4242", "4242424242424242", emptyList()),
+                    vaultRow("k", "fluck/w1/vault/x", "ctok-9f3e", listOf("connector")),
+                    vaultRow("d", "fluck/w1/conn/sub/VAR", "deep-7c1a", emptyList()),
+                    vaultRow("t", "fluck/w1/github/GH_TOKEN", "ghp_live", listOf("kind:secret", "fluck-ws:w1")),
+                    vaultRow("g", "fluck/w1/google/GOOGLE_REFRESH_TOKEN", "1//refresh", listOf("fluck", "connector")),
+                )
+            val (store, secrets) = storeWith(rows)
+            secrets.sharingEntries =
+                rows.map {
+                    SecretEntryWithSharingData(
+                        id = it.id, website = it.website, username = it.username, password = it.password,
+                        tags = it.tags, createdAt = it.createdAt, updatedAt = it.updatedAt,
+                        isOwner = true, accessLevel = "owner",
+                    )
+                }
+            for (name in listOf("secret_get", "my_secret_get")) {
+                for (row in rows) {
+                    val result = tool(store, secrets, name).handler.call(McpToolArgs(mapOf("id" to row.id)))
+                    assertTrue(result.isError, "$name ${row.id}: ${result.text}")
+                    assertFalse(result.text.contains(row.password), "$name leaked ${row.id}: ${result.text}")
+                }
+            }
+        }
+
+    @Test
+    fun `a vault login is still readable`() =
+        runTest {
+            val login = vaultRow("p", "fluck/w1/vault/github", "hunter2", listOf("kind:password", "fluck-ws:w1"))
+            val (store, secrets) = storeWith(listOf(login))
+            val result = tool(store, secrets, "secret_get").handler.call(McpToolArgs(mapOf("id" to "p")))
+            assertFalse(result.isError, result.text)
+            assertTrue(result.text.contains("hunter2"))
+        }
+
+    @Test
     fun `secret_get still returns an ordinary secret`() =
         runTest {
             // The gate must be scoped to provider keys — this tool's whole purpose otherwise.
@@ -738,6 +780,21 @@ class SecretManagerMcpToolsTest {
         updatedAt = "2026-01-01",
         isOwner = isOwner,
         accessLevel = accessLevel,
+    )
+
+    private fun vaultRow(
+        id: String,
+        website: String,
+        password: String,
+        tags: List<String>,
+    ) = SecretEntryData(
+        id = id,
+        website = website,
+        username = "u-$id",
+        password = password,
+        tags = tags,
+        createdAt = "2026-01-01",
+        updatedAt = "2026-01-01",
     )
 
     private fun aiProviderSecret(

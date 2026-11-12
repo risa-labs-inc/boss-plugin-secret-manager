@@ -130,6 +130,17 @@ class SecretManagerViewModel(
     var state by mutableStateOf(SecretManagerState())
         private set
 
+    /** Kind filter in the Secrets section; here so it survives switching sections. */
+    internal var vaultKind by mutableStateOf(VaultKind.LOGIN)
+
+    /** False until the user picks a kind or creates a row; until then the panel opens on a non-empty kind. */
+    internal var vaultKindChosen by mutableStateOf(false)
+
+    internal fun showVaultKind(kind: VaultKind) {
+        vaultKind = kind
+        vaultKindChosen = true
+    }
+
     /**
      * Initialize by loading secrets.
      *
@@ -677,6 +688,7 @@ class SecretManagerViewModel(
                         aiProviderSources = state.aiProviderSources +
                             (providerId to CredentialSource.STORED)
                     )
+                    showVaultKind(VaultKind.KEY)
                     loadSecrets()
                 }
                 .onFailure { error ->
@@ -841,6 +853,7 @@ class SecretManagerViewModel(
 
             result?.onSuccess {
                 state = state.copy(isOperationInProgress = false)
+                showVaultKind(VaultRows.classify(request.website, request.username, request.notes, request.tags).kind)
                 hideCreateDialog()
                 loadSecrets()
             }?.onFailure { exception ->
@@ -926,6 +939,8 @@ class SecretManagerViewModel(
      * regardless. Copying to the system clipboard is inherently exposed.
      */
     fun copyPasswordToClipboard(secret: SecretEntryData, clipboard: ClipboardManager) {
+        // Card numbers and security codes never leave the panel.
+        if (VaultRows.isPayment(secret.website, secret.tags)) return
         val copied = secret.password
         val generation = ++clipboardCopyGeneration
         clipboard.setText(AnnotatedString(copied))
@@ -961,6 +976,7 @@ class SecretManagerViewModel(
     }
 
     fun togglePasswordVisibility(secretId: String) {
+        if (state.secrets.any { it.id == secretId && VaultRows.isPayment(it.website, it.tags) }) return
         val current = state.visiblePasswordIds
         state = if (current.contains(secretId)) {
             state.copy(visiblePasswordIds = current - secretId)
@@ -1318,6 +1334,7 @@ class SecretManagerViewModel(
                         apiKeyCreatedSuccessfully = true,
                         apiKeys = state.apiKeys + creationResult.keyInfo
                     )
+                    showVaultKind(VaultKind.KEY)
                     // Reload secrets to show the newly created one
                     loadSecrets()
                 }?.onFailure { secretException ->

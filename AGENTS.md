@@ -1464,3 +1464,15 @@ may be partial on write failure or cancellation. The current create/update API
 cannot write a 2FA seed: leave such entries untouched and report `unsupportedTwofa`
 rather than claiming they were restored. Always clear caller-owned passphrase
 arrays on completion, including a launch cancelled before entering its body.
+
+## Vault kinds: Logins, Cards, Addresses, Keys & tokens
+
+The Secrets section partitions rows with `VaultRows.classify` (website shape plus `kind:` tag), because SM rows are also the store for host browser autofill and the Max vault.
+
+- **`VaultRows.isPayment` is the single definition of a card or card security code.** The panel, the ViewModel's reveal/copy guards, Shared with me and the MCP `secret_get`/`my_secret_get` refusal all call it, so a row one surface masks is never handed out raw by another. Any `kind:card`/`kind:cvv` tag makes a row payment, even alongside other kinds. The `card/...` and old-Max `fluck/<ws>/vault/card-NNNN[-cvv]` shapes are payment unless the row's first kind tag is `kind:password`. All matching is case-insensitive, so the check fails closed. Mutation-verified: dropping the untagged `card/` branch fails `isPaymentCoversEveryCardAndCodeShape`, `cardPrefixWithoutKindTagIsStillACard`, `cardsAndCodesCannotBeRevealedButLoginsCan` and the MCP withhold test.
+- **`VaultRows.isConnectorToken`** is the one connector predicate (`connector` tag, or any `fluck/` key outside a vault), shared the same way. The MCP withhold test runs every refused shape (connector tag, deep `fluck/` key) through both `secret_get` and `my_secret_get`.
+- **Card and CVV views never read the password column.** `VaultRow.Card` has no field that could hold the number. Backup/export still includes card numbers inside the encrypted envelope, on purpose: it is the owner's own vault backup.
+- **Vault health excludes cards, card codes and addresses.** None of them are passwords (an address stores the filler `-`). Logins and keys are still rated.
+- The filter opens on the first kind with rows in the first unfiltered page, then latches. A vault whose first page is all keys opens on Keys even if logins come later.
+- **`vaultKind` lives on the ViewModel** for the same reason as `selectedSection`: `SecretsSection` leaves composition on every section switch.
+- Card notes are written in Max's `notes()` shape with ASCII digits whatever the locale. Max and host autofill parse them.

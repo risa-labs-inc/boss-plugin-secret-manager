@@ -1,6 +1,8 @@
 package ai.rever.boss.plugin.dynamic.secretmanager.security
 
 import ai.rever.boss.plugin.api.SecretDataProvider
+import ai.rever.boss.plugin.dynamic.secretmanager.VaultRow
+import ai.rever.boss.plugin.dynamic.secretmanager.VaultRows
 import kotlinx.coroutines.ensureActive
 import kotlin.coroutines.coroutineContext
 
@@ -37,7 +39,7 @@ object VaultHealthScanner {
                 throw VaultHealthScanException("Vault enumeration returned an empty page before completion")
             }
             if (offset + page.data.size > cap) throw VaultHealthScanException("Vault exceeds the health check limit of $cap entries")
-            page.data.filter(PersonalVaultOwnership::includes).map { it.secret }.forEach {
+            page.data.filter(PersonalVaultOwnership::includes).map { it.secret }.filter { isPasswordRow(it.website, it.notes, it.tags) }.forEach {
                 records.add(VaultHealth.PasswordRecord(it.id, it.website, it.password, it.username))
             }
             if (!page.hasMore || page.data.isEmpty()) break
@@ -48,3 +50,10 @@ object VaultHealthScanner {
         return VaultHealth.analyze(records)
     }
 }
+
+/** Card numbers, security codes and address filler are not passwords; rating them is noise. */
+internal fun isPasswordRow(website: String, notes: String?, tags: List<String>): Boolean =
+    when (VaultRows.classify(website, "", notes, tags)) {
+        is VaultRow.Card, is VaultRow.CardCode, is VaultRow.Address -> false
+        else -> true
+    }

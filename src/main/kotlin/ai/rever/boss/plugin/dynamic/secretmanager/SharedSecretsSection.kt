@@ -345,7 +345,7 @@ private fun SharedSecretCard(
 ) {
     val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val isApiKey = secret.tags.contains(ProviderCredentialStore.TAG_API_KEY)
+    val isApiKey = secret.tags.contains(ProviderCredentialStore.TAG_API_KEY) && !VaultRows.isPayment(secret.website, secret.tags)
 
     BossCard(modifier = Modifier.fillMaxWidth()) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -369,7 +369,7 @@ private fun SharedSecretCard(
                             modifier = Modifier.size(16.dp),
                         )
                         Text(
-                            text = secret.website,
+                            text = remember(secret) { VaultRows.classify(secret.website, secret.username, secret.notes, secret.tags).title },
                             color = BossThemeColors.TextPrimary,
                             style = SecretPanelType.bodyStrong,
                             maxLines = 1,
